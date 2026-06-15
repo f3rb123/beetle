@@ -1,0 +1,2203 @@
+import zipfile
+import os
+import re
+import json
+import hashlib
+import base64
+import mimetypes
+import tempfile
+import traceback
+import time
+import logging
+
+log = logging.getLogger("cortex.android")
+
+def _stage(scan_id: str, name: str, t0: float):
+    log.info(f"[{scan_id}] stage={name} took={int((time.perf_counter()-t0)*1000)}ms")
+from pathlib import Path
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from xml.etree import ElementTree as ET
+from urllib.parse import urlparse
+
+from .common import (
+    ns, DANGEROUS_PERMISSIONS, SDK_SIGNATURES,
+    scan_files_for_secrets, scan_text_for_secrets,
+    extract_urls, sort_findings, SEVERITY_ORDER,
+    shannon_entropy,
+    normalize_severity, compute_severity_summary, dedupe_findings,
+)
+from . import scan_storage
+from .code_analyzer import run_android_sast
+from .semgrep_runner import run_semgrep, semgrep_available
+from .osv_scanner import scan_dependencies
+from .string_analyzer import analyze_strings
+from .cert_analyzer import analyze_certificate
+from .elf_analyzer import analyze_elf_binaries
+from .scoring import calculate_score
+from .live_checks import (
+    check_firebase_db, check_assetlinks, check_s3_buckets,
+    analyze_file_inventory, detect_obfuscation
+)
+from .tracker_db import detect_trackers, analyze_malware_permissions
+from .api_analyzer import analyze_android_apis, extract_emails_from_app, detect_apkid_features
+from .domain_analyzer import check_domains
+from .evidence_scanner import (
+    scan_directory_for_secrets, scan_directory_for_ips,
+    scan_directory_for_jwts, extract_urls
+)
+from .path_utils import relativize_path, normalize_relative_path, make_file_evidence
+from .chain_analyzer import synthesize_attack_chains
+from .secret_validator import validate_secrets
+from .taint_analyzer import run_taint_analysis
+from .virustotal import run_virustotal
+
+try:
+    # Silence androguard's loguru logger — its DEBUG output on AXML parsing
+    # can emit tens of thousands of lines per APK and stalls scans under
+    # Docker's log driver. Must be done BEFORE importing androguard.
+    try:
+        from loguru import logger as _loguru_logger
+        _loguru_logger.remove()
+        _loguru_logger.add(lambda _m: None, level="ERROR")
+    except Exception:
+        pass
+    import logging as _stdlog
+    for _name in ("androguard", "androguard.core", "androguard.core.axml",
+                  "androguard.core.apk", "androguard.core.analysis"):
+        _stdlog.getLogger(_name).setLevel(_stdlog.ERROR)
+    os.environ.setdefault("LOGURU_LEVEL", "ERROR")
+
+    try:
+        from androguard.core.apk import APK as AndroAPK   # v3.x
+    except ImportError:
+        from androguard.core import APK as AndroAPK        # v4.x
+    ANDROGUARD = True
+except ImportError:
+    ANDROGUARD = False
+
+
+BEHAVIOR_RULES = {
+    "Get SMS Messages": {
+        "severity": "high",
+        "title": "SMS Access Behavior Detected",
+        "description": "Code paths that access SMS APIs were detected. This materially increases privacy and account-takeover risk, especially around OTP harvesting.",
+        "impact": "Compromised or abused code paths can read OTPs, transactional SMS messages, and other sensitive user communications.",
+        "recommendation": "Verify SMS access is essential and user-consented. Remove the capability from release builds where possible.",
+        "cwe": "CWE-359",
+        "masvs": "MASVS-PRIVACY-1",
+        "owasp": "M2",
+    },
+    "Read/Write Contacts": {
+        "severity": "high",
+        "title": "Contact Book Access Behavior Detected",
+        "description": "The app interacts with contact APIs and can enumerate or modify the user's address book.",
+        "impact": "This expands privacy exposure and can enable large-scale data harvesting if abused.",
+        "recommendation": "Validate business need, scope access tightly, and review how contact data is stored and transmitted.",
+        "cwe": "CWE-359",
+        "masvs": "MASVS-PRIVACY-1",
+        "owasp": "M2",
+    },
+    "Get Cell Information": {
+        "severity": "medium",
+        "title": "Telephony / Device Identifier Access Detected",
+        "description": "The app accesses telephony APIs that can expose IMEI, cell, or network identifiers.",
+        "impact": "Device-unique identifiers can be used for tracking, profiling, or correlation across services.",
+        "recommendation": "Prefer resettable identifiers and remove device identifiers unless strictly required.",
+        "cwe": "CWE-359",
+        "masvs": "MASVS-PRIVACY-1",
+        "owasp": "M2",
+    },
+    "Get Subscriber ID": {
+        "severity": "high",
+        "title": "Subscriber Identifier Access Detected",
+        "description": "The app contains code paths that retrieve IMSI or subscriber identifiers.",
+        "impact": "Subscriber identifiers are highly sensitive and can be used for tracking and correlation.",
+        "recommendation": "Eliminate IMSI/subscriber access unless mandatory for core telecom workflows.",
+        "cwe": "CWE-359",
+        "masvs": "MASVS-PRIVACY-1",
+        "owasp": "M2",
+    },
+    "GPS Location": {
+        "severity": "medium",
+        "title": "Location Collection Behavior Detected",
+        "description": "The app accesses GPS or location APIs.",
+        "impact": "Precise location collection materially increases privacy impact and breach severity.",
+        "recommendation": "Collect only when necessary and clearly gate the flows with runtime consent.",
+        "cwe": "CWE-359",
+        "masvs": "MASVS-PRIVACY-1",
+        "owasp": "M2",
+    },
+    "Audio Record": {
+        "severity": "high",
+        "title": "Audio Recording Capability Detected",
+        "description": "Microphone or audio recording APIs were found in the app.",
+        "impact": "Abuse of these code paths can capture voice, ambient conversations, or other sensitive audio.",
+        "recommendation": "Audit every microphone use case and ensure clear user awareness and consent.",
+        "cwe": "CWE-359",
+        "masvs": "MASVS-PRIVACY-1",
+        "owasp": "M2",
+    },
+    "Accessibility Service": {
+        "severity": "high",
+        "title": "Accessibility Automation Capability Detected",
+        "description": "Accessibility APIs were found. These can read screen content and perform actions on behalf of the user.",
+        "impact": "Accessibility services are frequently abused in mobile malware and fraud tooling.",
+        "recommendation": "Review whether accessibility support is essential and constrain privileged flows aggressively.",
+        "cwe": "CWE-269",
+        "masvs": "MASVS-PLATFORM-1",
+        "owasp": "M1",
+    },
+    "Execute OS Command": {
+        "severity": "high",
+        "title": "OS Command Execution Primitive Detected",
+        "description": "Runtime command execution APIs are present in the app.",
+        "impact": "Command execution expands the impact of code injection or tainted input vulnerabilities.",
+        "recommendation": "Remove shell execution where possible. Strictly control command arguments and inputs.",
+        "cwe": "CWE-78",
+        "masvs": "MASVS-CODE-3",
+        "owasp": "M7",
+    },
+    "Dynamic Class and Dexloading": {
+        "severity": "high",
+        "title": "Dynamic Code Loading Detected",
+        "description": "The app uses dynamic class loading or in-memory DEX loading APIs.",
+        "impact": "Dynamic code loading weakens reviewability and can be abused to fetch or execute untrusted code.",
+        "recommendation": "Remove dynamic loading from production where possible or enforce strong integrity controls.",
+        "cwe": "CWE-94",
+        "masvs": "MASVS-RESILIENCE-2",
+        "owasp": "M8",
+    },
+    "Network Operations": {
+        "severity": "low",
+        "title": "Low-Level Network Socket Usage Detected",
+        "description": "The app uses low-level network socket APIs beyond standard HTTP clients.",
+        "impact": "Custom socket logic can bypass expected network-security controls and is worth reviewing during pentest.",
+        "recommendation": "Review custom socket usage and verify TLS, certificate validation, and protocol hardening.",
+        "cwe": "CWE-319",
+        "masvs": "MASVS-NETWORK-1",
+        "owasp": "M5",
+    },
+}
+
+QUICK_INSIGHT_TITLES = (
+    "Application is Debuggable",
+    "Potentially Debuggable (Flag Missing)",
+    "Debug Certificate Used to Sign APK",
+    "Only APK Signature Scheme v1 Used",
+    "Only Weak APK Signature Scheme Detected",
+    "Exported Content Provider Without Permission",
+    "Exported Intent to JS-Enabled WebView Attack Chain",
+    "Session Recording SDK Present",
+)
+
+
+def _record_module_metric(results: dict, module: str, started_at: float, **extra):
+    metrics = results.setdefault("scan_metrics", {"modules": {}, "cache": {}, "summary": {}})
+    payload = {"duration_ms": int((time.perf_counter() - started_at) * 1000)}
+    payload.update({k: v for k, v in extra.items() if v is not None})
+    metrics.setdefault("modules", {})[module] = payload
+
+
+def _timed_value(module: str, func, *args, **kwargs):
+    started_at = time.perf_counter()
+    value = func(*args, **kwargs)
+    return module, value, int((time.perf_counter() - started_at) * 1000)
+
+
+def _build_certificate_security_overview(certificate: dict, apk_path: str = "") -> dict:
+    scheme = {entry.lower() for entry in (certificate or {}).get("scheme", [])}
+    v4_enabled = bool(apk_path and os.path.exists(f"{apk_path}.idsig"))
+    flags = {
+        "v1": "v1" in scheme,
+        "v2": "v2" in scheme,
+        "v3": "v3" in scheme,
+        "v4": v4_enabled,
+    }
+    if flags["v1"] and not (flags["v2"] or flags["v3"] or flags["v4"]):
+        overall_status = "vulnerable"
+        overall_text = "Vulnerable"
+    elif flags["v2"] or flags["v3"] or flags["v4"]:
+        overall_status = "secure"
+        overall_text = "Secure"
+    else:
+        overall_status = "limited"
+        overall_text = "Limited visibility"
+
+    return {
+        "v1": {"enabled": flags["v1"], "label": "Enabled (Weak)" if flags["v1"] else "Disabled"},
+        "v2": {"enabled": flags["v2"], "label": "Enabled" if flags["v2"] else "Disabled (Missing)"},
+        "v3": {"enabled": flags["v3"], "label": "Enabled" if flags["v3"] else "Disabled"},
+        "v4": {"enabled": flags["v4"], "label": "Enabled" if flags["v4"] else "Disabled"},
+        "overall": overall_text,
+        "overall_status": overall_status,
+        "janus_risk": flags["v1"] and not (flags["v2"] or flags["v3"] or flags["v4"]),
+    }
+
+
+def _apply_finding_validation_layer(results: dict):
+    cache_stats = results.setdefault("scan_metrics", {}).setdefault("cache", {})
+    cache_stats.setdefault("regex_cache", "enabled")
+    cache_stats.setdefault("incremental_dedupe", "enabled")
+
+    for finding in results.get("findings", []):
+        validation_status = (finding.get("validation_status") or "detected").lower()
+        confidence = finding.get("confidence")
+        if isinstance(confidence, str):
+            confidence = {"high": 85, "medium": 65, "low": 45}.get(confidence.lower(), 65)
+            finding["confidence"] = confidence
+        if confidence is None:
+            confidence = 55 if validation_status in {"heuristic", "potential", "uncertain"} else 72
+            finding["confidence"] = confidence
+
+        if confidence < 60 or validation_status in {"heuristic", "potential", "uncertain"}:
+            finding["confidence_label"] = "Low Confidence"
+            finding.setdefault("validation_status", "heuristic")
+        elif confidence < 80:
+            finding["confidence_label"] = "Medium Confidence"
+        else:
+            finding["confidence_label"] = "High Confidence"
+
+        finding.setdefault("description", finding.get("title", "Security finding detected."))
+        finding.setdefault("recommendation", "Review the affected component and harden the implementation before release.")
+        finding.setdefault("explanation", finding.get("description", ""))
+        finding.setdefault("remediation", finding.get("recommendation", ""))
+
+        evidence_path = finding.get("file_path", "")
+        line = finding.get("line")
+        if evidence_path:
+            finding["evidence"] = f"{evidence_path}{f':{line}' if line else ''}"
+        elif finding.get("file_evidence"):
+            first = next((entry for entry in finding["file_evidence"] if entry.get("path")), None)
+            if first:
+                first_line = (first.get("lines") or [None])[0]
+                finding["evidence"] = f"{first['path']}{f':{first_line}' if first_line else ''}"
+        else:
+            finding.setdefault("evidence", "Evidence requires analyst verification.")
+
+
+def _build_quick_summary(results: dict):
+    findings = results.get("findings", [])
+    severity_counts = {
+        level: len([finding for finding in findings if finding.get("severity") == level])
+        for level in ("critical", "high", "medium", "low", "info")
+    }
+    key_issues = []
+    seen = set()
+    for finding in findings:
+        title = finding.get("title", "")
+        if (
+            finding.get("severity") in {"critical", "high"}
+            or any(token in title for token in QUICK_INSIGHT_TITLES)
+        ) and title and title not in seen:
+            seen.add(title)
+            key_issues.append(title)
+    debug_state = results.get("manifest_security", {}).get("debuggable", {})
+    certificate_overview = results.get("certificate", {}).get("security_overview", {})
+    secure_signals = []
+    if debug_state.get("state") == "false":
+        secure_signals.append("Debuggable flag explicitly disabled")
+    if certificate_overview.get("overall_status") == "secure":
+        secure_signals.append("Modern APK signature scheme detected")
+
+    # Attack chain synthesis
+    chain_data = synthesize_attack_chains(results)
+
+    results["quick_summary"] = {
+        "total_vulnerabilities": len([finding for finding in findings if finding.get("severity") != "info"]),
+        "severity_counts": severity_counts,
+        "key_critical_issues": key_issues[:6],
+        "highlight_count": len(key_issues),
+        "secure_signals": secure_signals,
+        "attack_chain":   chain_data.get("attack_chains", []),
+        "pentest_hints":  chain_data.get("pentest_playbook", []),
+        "chain_count":    chain_data.get("chain_count", 0),
+        "chain_severity": chain_data.get("highest_chain_severity", "none"),
+    }
+    results["view_modes"] = {
+        "quick": {"recommended_tabs": ["dashboard", "findings", "manifest", "surface", "cert"]},
+        "detailed": {"recommended_tabs": [tab for tab in ("dashboard", "findings", "source", "code", "manifest", "permissions", "surface", "cert", "domains", "binary", "api")]},
+    }
+
+
+def analyze_apk(apk_path: str, scan_id: str, filename: str,
+                jadx_dir: str = None, apktool_dir: str = None) -> dict:
+    overall_started = time.perf_counter()
+    results = {
+        "scan_id":          scan_id,
+        "filename":         filename,
+        "platform":         "android",
+        "app_name":         Path(filename).stem,
+        "app_info":         {},
+        "findings":         [],
+        "attack_surface":   {"activities": [], "services": [], "receivers": [], "providers": []},
+        "secrets":          [],
+        "endpoints":        [],
+        "sdks":             [],
+        "framework":        {"type": "native", "details": []},
+        "permissions":      {"dangerous": [], "all": []},
+        "severity_summary": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+        "scan_time":        datetime.utcnow().isoformat() + "Z",
+        "certificate":      {},
+        "binaries":         [],
+        "string_analysis":  {},
+        "file_inventory":   {},
+        "score":            {},
+        "android_api":      {},
+        "emails":           [],
+        "apkid":            {},
+        "trackers":         [],
+        "malware_perms":    {},
+        "domain_intel":     [],
+        "manifest_xml":     "",
+        "manifest_permissions": [],
+        "manifest_security": {},
+        "network_config":   {},
+        "dependencies":     {},
+        "sdk_secrets":      [],
+        "behavior_analysis": [],
+        "ips":              [],
+        "jwts":             [],
+        "taint_flows":      [],
+        "virustotal":       {},
+        "quick_summary":    {},
+        "view_modes":       {},
+        "scan_metrics":     {"modules": {}, "cache": {}, "summary": {}},
+        "decompile_info":   {"jadx_dir": jadx_dir, "apktool_dir": apktool_dir, "tools_used": []},
+    }
+    preferred_source_dirs = [d for d in [jadx_dir, apktool_dir] if d and os.path.exists(d)]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        extract_started = time.perf_counter()
+        # ── Extract APK ──────────────────────────────────────────────────────
+        log.info(f"[{scan_id}] stage=apk_extract start")
+        try:
+            with zipfile.ZipFile(apk_path, "r") as z:
+                z.extractall(tmpdir)
+        except Exception as e:
+            results["findings"].append(_meta_finding(f"APK extraction warning: {e}"))
+
+        # ── Persist extraction for code viewer (so viewer works without jadx) ─
+        _persist_extraction(tmpdir, scan_id)
+        _record_module_metric(results, "apk_extraction", extract_started)
+        _stage(scan_id, "apk_extract", extract_started)
+
+        # ── App hash ─────────────────────────────────────────────────────────
+        hash_started = time.perf_counter()
+        with open(apk_path, "rb") as f:
+            data = f.read()
+            results["app_info"]["sha256"] = hashlib.sha256(data).hexdigest()
+            results["app_info"]["md5"]    = hashlib.md5(data).hexdigest()
+            results["app_info"]["size_mb"] = round(len(data) / (1024 * 1024), 2)
+        _record_module_metric(results, "package_hashing", hash_started)
+
+        # ── Androguard analysis ───────────────────────────────────────────────
+        manifest_started = time.perf_counter()
+        log.info(f"[{scan_id}] stage=manifest_analysis start")
+        if ANDROGUARD:
+            try:
+                apk = AndroAPK(apk_path)
+                _parse_manifest(apk, results)
+                _analyze_permissions(apk, results)
+                _analyze_components(apk, tmpdir, results)
+                _detect_sdks(apk, tmpdir, results)
+            except Exception as e:
+                results["findings"].append(_meta_finding(f"Manifest parse partial: {e}"))
+        else:
+            results["findings"].append(_meta_finding("androguard not available — manifest analysis skipped"))
+
+        # ── Framework detection ───────────────────────────────────────────────
+        _record_module_metric(results, "manifest_analysis", manifest_started, components=sum(len(results["attack_surface"].get(key, [])) for key in ("activities", "services", "receivers", "providers")))
+        _stage(scan_id, "manifest_analysis", manifest_started)
+        framework_started = time.perf_counter()
+        log.info(f"[{scan_id}] stage=framework_detect start")
+        _detect_framework(tmpdir, results)
+        _record_module_metric(results, "framework_detection", framework_started, framework=results.get("framework", {}).get("type"))
+        _stage(scan_id, "framework_detect", framework_started)
+
+        # ── Secrets scan ──────────────────────────────────────────────────────
+        secrets_started = time.perf_counter()
+        log.info(f"[{scan_id}] stage=secrets start")
+        if preferred_source_dirs:
+            results["secrets"] = _scan_precise_source_secrets(preferred_source_dirs)
+        else:
+            results["secrets"] = scan_files_for_secrets(tmpdir)
+            # Only fall back to raw DEX strings when JADX source is unavailable.
+            _scan_dex_strings(tmpdir, results)
+        if results.get("sdk_secrets"):
+            results["secrets"].extend(results["sdk_secrets"])
+        _record_module_metric(results, "secret_detection", secrets_started, findings=len(results.get("secrets", [])))
+        _stage(scan_id, "secrets", secrets_started)
+
+        # ── Endpoint extraction ───────────────────────────────────────────────
+        resource_started = time.perf_counter()
+        log.info(f"[{scan_id}] stage=resource_scan start")
+        _extract_endpoints(tmpdir, results)
+
+        # ── Network security config ───────────────────────────────────────────
+        _analyze_network_security_config(tmpdir, results)
+
+        # ── React Native bundle analysis ──────────────────────────────────────
+        if results["framework"]["type"] == "react_native":
+            _analyze_rn_bundle(tmpdir, results)
+        _record_module_metric(results, "resource_analysis", resource_started, endpoints=len(results.get("endpoints", [])))
+        _stage(scan_id, "resource_scan", resource_started)
+
+        # ── Binary protection summary ─────────────────────────────────────────
+        protection_started = time.perf_counter()
+        log.info(f"[{scan_id}] stage=binary_protections start")
+        _check_apk_protections(tmpdir, results)
+        _record_module_metric(results, "binary_protections", protection_started)
+        _stage(scan_id, "binary_protections", protection_started)
+
+        # ── NEW: SAST Code Analysis ───────────────────────────────────────────
+        sast_roots = preferred_source_dirs[:] or [tmpdir]
+        if results["framework"]["type"] == "react_native" and tmpdir not in sast_roots:
+            sast_roots.append(tmpdir)
+        code_started = time.perf_counter()
+        log.info(f"[{scan_id}] stage=sast start")
+        run_android_sast(sast_roots, results)
+        _record_module_metric(results, "code_scanning", code_started, sast_findings=len([finding for finding in results.get("findings", []) if finding.get("source") == "SAST" or finding.get("rule_id")]))
+        _stage(scan_id, "sast", code_started)
+
+        # ── Semgrep SAST (optional — requires semgrep on PATH) ────────────────
+        semgrep_started = time.perf_counter()
+        log.info(f"[{scan_id}] stage=semgrep start")
+        semgrep_metrics = run_semgrep(sast_roots, results)
+        _record_module_metric(
+            results, "semgrep_sast", semgrep_started,
+            ran=semgrep_metrics.get("ran"),
+            findings=semgrep_metrics.get("finding_count", 0),
+            error=semgrep_metrics.get("error"),
+        )
+        results["scan_metrics"]["semgrep"] = semgrep_metrics
+        _stage(scan_id, "semgrep", semgrep_started)
+
+        # ── Supply chain CVE lookup (OSV.dev) ────────────────────────────────
+        osv_started = time.perf_counter()
+        log.info(f"[{scan_id}] stage=osv start")
+        osv_metrics = scan_dependencies(sast_roots, results)
+        _record_module_metric(
+            results, "osv_scan", osv_started,
+            deps=osv_metrics.get("dep_count", 0),
+            vulns=osv_metrics.get("vuln_count", 0),
+            error=osv_metrics.get("error"),
+        )
+        results["scan_metrics"]["osv"] = osv_metrics
+        _stage(scan_id, "osv", osv_started)
+
+        # ── Taint Analysis (Androguard DEX call-graph) ───────────────────────
+        taint_started = time.perf_counter()
+        log.info(f"[{scan_id}] stage=taint start")
+        try:
+            taint_metrics = run_taint_analysis(str(apk_path), results)
+            _record_module_metric(
+                results, "taint_analysis", taint_started,
+                ran=taint_metrics.get("ran"),
+                flows=taint_metrics.get("flow_count", 0),
+                error=taint_metrics.get("error"),
+            )
+            results["scan_metrics"]["taint"] = taint_metrics
+        except Exception as _te:
+            _record_module_metric(results, "taint_analysis", taint_started, error=str(_te))
+            results.setdefault("taint_flows", [])
+        _stage(scan_id, "taint", taint_started)
+
+        # ── VirusTotal hash lookup ────────────────────────────────────────────
+        vt_started = time.perf_counter()
+        log.info(f"[{scan_id}] stage=virustotal start")
+        try:
+            vt_metrics = run_virustotal(str(apk_path), results)
+            _record_module_metric(
+                results, "virustotal", vt_started,
+                ran=vt_metrics.get("ran"),
+                verdict=vt_metrics.get("main_verdict"),
+                error=vt_metrics.get("error"),
+            )
+            results["scan_metrics"]["virustotal"] = vt_metrics
+        except Exception as _vt_err:
+            _record_module_metric(results, "virustotal", vt_started, error=str(_vt_err))
+            results.setdefault("virustotal", {})
+        _stage(scan_id, "virustotal", vt_started)
+
+        # ── NEW: String Analysis ──────────────────────────────────────────────
+        extra_dirs = preferred_source_dirs[:]
+        parallel_started = time.perf_counter()
+        log.info(f"[{scan_id}] stage=strings_parallel start")
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {
+                "string_analysis": pool.submit(_timed_value, "string_analysis", analyze_strings, tmpdir, "android"),
+                "emails": pool.submit(_timed_value, "email_detection", extract_emails_from_app, tmpdir, apk_path),
+                "apkid": pool.submit(_timed_value, "apkid_detection", detect_apkid_features, tmpdir),
+                "ips": pool.submit(_timed_value, "ip_detection", scan_directory_for_ips, tmpdir, extra_dirs),
+                "jwts": pool.submit(_timed_value, "jwt_detection", scan_directory_for_jwts, tmpdir, extra_dirs),
+            }
+            for key, future in futures.items():
+                # Guarded: one noisy analyzer (e.g. IP scan on a pathological
+                # smali blob) must not torch the whole parallel phase. Record
+                # the error in metrics and seed an empty default for the key.
+                try:
+                    module_name, value, duration_ms = future.result(timeout=600)
+                    results[key] = value
+                    results["scan_metrics"]["modules"][module_name] = {
+                        "duration_ms": duration_ms
+                    }
+                except Exception as _pe:
+                    log.warning(f"[{scan_id}] parallel analyzer {key!r} failed: {_pe}")
+                    results.setdefault(key, [])
+                    results["scan_metrics"]["modules"][key] = {
+                        "duration_ms": 0,
+                        "error": str(_pe)[:200],
+                    }
+        results["scan_metrics"]["summary"]["parallel_phase_ms"] = int((time.perf_counter() - parallel_started) * 1000)
+        _stage(scan_id, "strings_parallel", parallel_started)
+
+        # ── NEW: ELF/SO Binary Analysis ───────────────────────────────────────
+        binaries_started = time.perf_counter()
+        log.info(f"[{scan_id}] stage=elf_binaries start")
+        analyze_elf_binaries(tmpdir, results)
+        _record_module_metric(results, "native_binary_analysis", binaries_started, libraries=len(results.get("binaries", [])))
+        _stage(scan_id, "elf_binaries", binaries_started)
+
+        # ── LIEF deep ELF scan (only if lief is installed) ────────────────────
+        lief_started = time.perf_counter()
+        log.info(f"[{scan_id}] stage=lief start")
+        so_files: list[str] = []
+        try:
+            from . import lief_analyzer
+            for root, _dirs, files in os.walk(tmpdir):
+                for fn in files:
+                    if fn.endswith(".so"):
+                        so_files.append(os.path.join(root, fn))
+                if len(so_files) >= 40:
+                    break
+            if lief_analyzer.available():
+                # Parallel LIEF scan — each analyze_elf call is ~1–3s of pure
+                # parsing + heuristics; serial at 30 files that's 30–90s. With
+                # 6-way threading it drops to ~5–15s.
+                # NOTE: ThreadPoolExecutor is imported at module scope — do NOT
+                # re-import here or Python makes it a local binding and the
+                # earlier usage in this function blows up with UnboundLocalError.
+                from concurrent.futures import as_completed
+                targets = so_files[:30]
+                with ThreadPoolExecutor(max_workers=min(6, max(1, len(targets)))) as pool:
+                    futs = [pool.submit(lief_analyzer.analyze_elf, so) for so in targets]
+                    for fut in as_completed(futs):
+                        try:
+                            r = fut.result(timeout=60)
+                        except Exception:
+                            continue
+                        for f in r.get("findings", []):
+                            results["findings"].append(f)
+        except Exception:
+            pass
+        _stage(scan_id, "lief", lief_started)
+
+        # ── CVE mapping: native .so + Maven (AAR) packages ────────────────────
+        try:
+            from . import cve_mapper
+            if cve_mapper.available():
+                cve_started = time.perf_counter()
+                log.info(f"[{scan_id}] stage=cve_mapping start")
+                native_out = cve_mapper.analyze_native_libs(so_files) if so_files else None
+                maven_comps = cve_mapper.scan_maven_packages(tmpdir)
+                maven_out   = cve_mapper.analyze_packages(maven_comps) if maven_comps else None
+                merged      = cve_mapper.merge_cve_results(native_out, maven_out)
+                if merged.get("findings"):
+                    results["findings"].extend(merged["findings"])
+                results["components"] = merged.get("components", [])
+                results["cve_stats"]  = merged.get("stats", {})
+                _record_module_metric(
+                    results, "cve_mapping", cve_started,
+                    components=len(results["components"]),
+                    cves=len(merged.get("findings", [])),
+                    kev=merged.get("stats", {}).get("kev_matched", 0),
+                )
+                _stage(scan_id, "cve_mapping", cve_started)
+        except Exception as _e:
+            log.debug(f"cve mapping failed: {_e}")
+
+        # ── NEW: Obfuscation Detection ────────────────────────────────────────
+        obfuscation_started = time.perf_counter()
+        detect_obfuscation(tmpdir, results)
+        _record_module_metric(results, "obfuscation_detection", obfuscation_started)
+
+        # ── NEW: File Inventory ───────────────────────────────────────────────
+        inventory_started = time.perf_counter()
+        analyze_file_inventory(apk_path, results)
+        _record_module_metric(results, "file_inventory", inventory_started)
+
+        # ── NEW: Android API Analysis ─────────────────────────────────────────
+        api_started = time.perf_counter()
+        analyze_android_apis(tmpdir, results)
+        _build_behavior_findings(results)
+        _record_module_metric(results, "api_behavior_analysis", api_started, categories=len(results.get("android_api", {})))
+
+        # ── NEW: Email Extraction ─────────────────────────────────────────────
+
+        # ── NEW: APKiD-style Detection ────────────────────────────────────────
+
+        # ── Evidence: IP Detection ────────────────────────────────────────────
+
+        # Add high-severity IP findings
+        public_ips = [ip for ip in results["ips"] if ip["type"] == "public"]
+        if public_ips:
+            public_ip_evidence = [
+                make_file_evidence(ip["file_path"], ip.get("line", 0), ip.get("snippet", ""))
+                for ip in public_ips
+                if ip.get("file_path")
+            ]
+            results["findings"].append({
+                "title":             f"Hardcoded Public IP Addresses ({len(public_ips)} found)",
+                "severity":          "low",
+                "category":          "Configuration",
+                "description":       f"Public IP addresses hardcoded in app: {', '.join(set(ip['ip'] for ip in public_ips[:5]))}. May expose infrastructure.",
+                "recommendation":    "Use domain names instead of IP addresses. Remove dev/test server references.",
+                "file_path":         public_ips[0]["file_path"] if public_ips else "",
+                "line":              public_ips[0]["line"] if public_ips else 0,
+                "snippet":           public_ips[0]["snippet"] if public_ips else "",
+                "file_evidence":     public_ip_evidence,
+                "confidence":        85,
+                "exploitability":    25,
+                "validation_status": "validated",
+                "source":            "IP_SCANNER",
+                "cwe":               "CWE-547",
+                "masvs":             "MASVS-CODE-4",
+                "owasp":             "M8",
+                "files":             list(set(ip["file_path"] for ip in public_ips)),
+                "file_count":        len(public_ip_evidence),
+            })
+
+        # ── Evidence: JWT Detection ───────────────────────────────────────────
+        for jwt in results["jwts"]:
+            results["findings"].append({
+                "title":             "Hardcoded JWT Token",
+                "severity":          "high",
+                "category":          "Auth Token",
+                "description":       "A hardcoded JWT token is embedded in the app. This may allow authentication as the associated user/service without credentials.",
+                "impact":            "Attacker can reuse this token for unauthorized API access until it expires.",
+                "recommendation":    "Invalidate this token immediately. Never hardcode auth tokens in client apps.",
+                "poc":               f"# Decode JWT header/payload (no signature verification):\nimport base64, json\ntoken = \"{jwt['value'][:50]}...\"\nparts = token.split('.')\nprint(json.loads(base64.b64decode(parts[1] + '==').decode()))",
+                "file_path":         jwt["file_path"],
+                "line":              jwt["line"],
+                "snippet":           jwt["snippet"],
+                "code_context":      jwt["code_context"],
+                "file_evidence":     jwt.get("file_evidence") or [make_file_evidence(jwt["file_path"], jwt.get("line", 0), jwt.get("snippet", ""))],
+                "confidence":        90,
+                "exploitability":    80,
+                "validation_status": "validated",
+                "source":            "JWT_SCANNER",
+                "cwe":               "CWE-798",
+                "masvs":             "MASVS-CRYPTO-2",
+                "owasp":             "M1",
+                "value":             jwt["value"],
+                "files":             [jwt["file_path"]] if jwt.get("file_path") else [],
+                "file_count":        1 if jwt.get("file_path") else 0,
+            })
+
+        # ── Evidence: Enhanced Secret Scanning (jadx+apktool output) ──────────
+    # ── NEW: Certificate Analysis (done outside tmpdir) ───────────────────────
+    cert_started = time.perf_counter()
+    analyze_certificate(apk_path, results)
+    results["certificate"]["security_overview"] = _build_certificate_security_overview(results.get("certificate", {}), apk_path)
+    _record_module_metric(results, "certificate_analysis", cert_started, available=results.get("certificate", {}).get("available"))
+
+    # ── Fix cert unavailable message ─────────────────────────────────────────
+    if not results.get("certificate", {}).get("available"):
+        scheme = results.get("certificate", {}).get("scheme", [])
+        scheme_str = "/".join(s.upper() for s in scheme) or "v2/v3"
+        results["certificate"]["unavailable_reason"] = (
+            f"APK uses {scheme_str} signature scheme. "
+            "Limited certificate extraction available via META-INF parsing. "
+            "Full details require apksigner or androguard."
+        )
+
+    # ── NEW: Live Checks ──────────────────────────────────────────────────────
+    live_checks_started = time.perf_counter()
+    check_firebase_db(results)
+    check_assetlinks(results)
+    try:
+        check_s3_buckets(results)
+    except Exception:
+        pass
+    _record_module_metric(results, "live_checks", live_checks_started)
+
+    # ── NEW: Tracker Detection ────────────────────────────────────────────────
+    tracker_started = time.perf_counter()
+    package_hints = set(results.get("app_info", {}).get("package_hints", []))
+    results["trackers"] = detect_trackers(package_hints) if package_hints else []
+    _record_module_metric(results, "tracker_detection", tracker_started, trackers=len(results.get("trackers", [])))
+
+    # ── NEW: Malware Permission Analysis ──────────────────────────────────────
+    malware_started = time.perf_counter()
+    all_perms = results.get("permissions", {}).get("all", [])
+    results["malware_perms"] = analyze_malware_permissions(all_perms)
+    _add_malware_permission_findings(results)
+    _record_module_metric(results, "malware_permission_analysis", malware_started, overlap=results.get("malware_perms", {}).get("malware_permission_overlap"))
+
+    # ── NEW: Domain Geo/Intel Check ───────────────────────────────────────────
+    domains_started = time.perf_counter()
+    check_domains(results.get("endpoints", []), results)
+    _add_domain_intel_summary(results)
+    _add_exported_webview_attack_chain(results)
+    _enrich_findings_with_standards(results)
+    _record_module_metric(results, "domain_intelligence", domains_started, domains=len(results.get("domain_intel", [])))
+
+    # ── Cross-dedup: remove JWT-looking secrets already surfaced by JWT scanner ─
+    # The JWT scanner produces results["jwts"] which are shown in their own UI
+    # section. Any secret entry whose value matches a known JWT (eyJ…) should be
+    # removed from results["secrets"] to prevent double-reporting. We only do
+    # this for patterns that produce JWT-format values (Supabase key etc.) since
+    # plain secrets and JWTs use completely different value formats.
+    jwt_values = {jwt["value"] for jwt in results.get("jwts", []) if jwt.get("value")}
+    if jwt_values:
+        results["secrets"] = [
+            s for s in results.get("secrets", [])
+            if s.get("value", "") not in jwt_values
+        ]
+
+    # ── Live secret validation ────────────────────────────────────────────────
+    validation_started = time.perf_counter()
+    try:
+        results["secrets"] = validate_secrets(results.get("secrets", []))
+        live_count = sum(1 for s in results["secrets"] if s.get("validated"))
+        _record_module_metric(results, "secret_validation", validation_started, live_secrets=live_count)
+    except Exception:
+        _record_module_metric(results, "secret_validation", validation_started, live_secrets=0)
+
+    # ── JS bundle scan (React Native / Cordova / Capacitor) ───────────────────
+    try:
+        from . import js_bundle_analyzer
+        js_scan_root = str(scan_storage.scan_root(scan_id) / "apk_extract")
+        js_out = js_bundle_analyzer.analyze_js_bundles(js_scan_root)
+        if js_out.get("findings"):
+            results["findings"].extend(js_out["findings"])
+        if js_out.get("secrets"):
+            results.setdefault("secrets", []).extend(js_out["secrets"])
+        if js_out.get("framework", {}).get("type") and not results.get("framework", {}).get("type"):
+            results["framework"] = js_out["framework"]
+        results["js_bundles"] = js_out.get("bundles", [])
+    except Exception:
+        pass
+
+    # ── Post-JS-bundle cross-dedup: JS bundles may re-introduce JWT values ────
+    # The primary cross-dedup ran before the JS bundle scan, so any JWTs found
+    # in JS bundles (React Native, Cordova, Capacitor) may have been appended to
+    # results["secrets"] again. Re-apply the dedup now.
+    jwt_values_final = {jwt["value"] for jwt in results.get("jwts", []) if jwt.get("value")}
+    if jwt_values_final:
+        results["secrets"] = [
+            s for s in results.get("secrets", [])
+            if s.get("value", "") not in jwt_values_final
+        ]
+
+    # ── Severity summary ──────────────────────────────────────────────────────
+    finalize_started = time.perf_counter()
+    _apply_finding_validation_layer(results)
+    # sort_findings normalizes severity in-place before sorting. Recompute the
+    # summary AFTER validation layer runs so counts and findings always match.
+    # Dedupe BEFORE sorting / summary / scoring so all three agree.
+    results["findings"] = dedupe_findings(results["findings"])
+    results["findings"] = sort_findings(results["findings"])
+    results["severity_summary"] = compute_severity_summary(results["findings"])
+    _build_quick_summary(results)
+    _record_module_metric(results, "finalize_results", finalize_started, finding_count=len(results.get("findings", [])))
+
+    # ── Security Score ────────────────────────────────────────────────────────
+    score_started = time.perf_counter()
+    results["score"] = calculate_score(results)
+    _record_module_metric(results, "security_scoring", score_started, score=results.get("score", {}).get("score"))
+    results["scan_metrics"]["summary"]["total_duration_ms"] = int((time.perf_counter() - overall_started) * 1000)
+    results["scan_metrics"]["summary"]["module_count"] = len(results.get("scan_metrics", {}).get("modules", {}))
+
+    return results
+
+
+# ─── Manifest ────────────────────────────────────────────────────────────────
+def _parse_manifest(apk, results):
+    pkg     = apk.get_package()     or ""
+    # androguard 4.x renamed get_app_name to get_app_name, but it may need try/except
+    try:
+        appname = apk.get_app_name() or pkg.split(".")[-1] if pkg else "Unknown"
+    except Exception:
+        appname = pkg.split(".")[-1] if pkg else "Unknown"
+
+    results["app_name"] = appname
+    results["app_info"].update({
+        "package":        pkg,
+        "app_name":       appname,
+        "version_name":   apk.get_androidversion_name() or "?",
+        "version_code":   apk.get_androidversion_code() or "?",
+        "min_sdk":        apk.get_min_sdk_version()     or "?",
+        "target_sdk":     apk.get_target_sdk_version()  or "?",
+        "main_activity":  apk.get_main_activity()       or "?",
+    })
+    _extract_android_app_icon(apk, results)
+
+    # ── Manifest-level binary flags ───────────────────────────────────────────
+    try:
+        manifest = apk.get_android_manifest_xml()
+        app_elem = manifest.find("application")
+        if app_elem is not None:
+            _check_app_flags(app_elem, results)
+            metadata = []
+            for meta in app_elem.findall("meta-data"):
+                name = meta.get(ns("name")) or meta.get("name") or ""
+                value = meta.get(ns("value")) or meta.get("value") or meta.get(ns("resource")) or meta.get("resource") or ""
+                if name:
+                    metadata.append({"name": name, "value": value})
+            if metadata:
+                results["app_info"]["manifest_metadata"] = metadata
+        manifest_permissions = []
+        for perm in manifest.findall("permission"):
+            name = perm.get(ns("name")) or perm.get("name") or ""
+            protection = perm.get(ns("protectionLevel")) or perm.get("protectionLevel") or ""
+            if name:
+                manifest_permissions.append({
+                    "name": name,
+                    "protection_level": _normalize_protection_level(protection),
+                    "raw_protection_level": protection or "unknown",
+                })
+        results["manifest_permissions"] = manifest_permissions
+        # Store manifest as clean string
+        try:
+            from xml.etree.ElementTree import indent, tostring
+            try:
+                indent(manifest)
+            except TypeError:
+                pass  # indent() not in Python < 3.9
+            results["manifest_xml"] = tostring(manifest, encoding="unicode")
+        except Exception:
+            try:
+                from xml.etree.ElementTree import tostring
+                results["manifest_xml"] = tostring(manifest, encoding="unicode")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # ── SDK version checks ─────────────────────────────────────────────────────
+    try:
+        min_sdk = int(apk.get_min_sdk_version() or 0)
+        if 0 < min_sdk < 21:
+            results["findings"].append({
+                "title":          "Low Minimum SDK Version",
+                "severity":       "medium",
+                "category":       "Configuration",
+                "description":    f"minSdkVersion is {min_sdk} (Android {_sdk_to_version(min_sdk)}). "
+                                  "Devices running this version lack modern security controls "
+                                  "(full-disk encryption, SELinux enforcing, etc.).",
+                "impact":         "App can be installed on devices with known OS-level vulnerabilities.",
+                "recommendation": "Raise minSdkVersion to at least 23 (Android 6.0) to enforce runtime permissions.",
+            })
+        elif 0 < min_sdk < 24:
+            results["findings"].append({
+                "title":          "Below-Recommended Minimum SDK",
+                "severity":       "low",
+                "category":       "Configuration",
+                "description":    f"minSdkVersion is {min_sdk}. Android 6 and 7 lack Certificate Transparency and newer TLS defaults.",
+                "recommendation": "Consider raising minSdkVersion to 24+ for stronger TLS and security defaults.",
+                "impact":         "Users on older OS versions miss security improvements.",
+            })
+    except (ValueError, TypeError):
+        pass
+
+
+def _check_app_flags(app_elem, results):
+    def attr(name): return app_elem.get(ns(name)) or app_elem.get(name)
+
+    debuggable = attr("debuggable")
+    manifest_security = results.setdefault("manifest_security", {})
+    if debuggable and debuggable.lower() in ("true", "1"):
+        manifest_security["debuggable"] = {
+            "value": "true",
+            "state": "true",
+            "status": "True (Vulnerable)",
+            "severity": "high",
+            "reason": "android:debuggable is explicitly enabled and exposes the process to ADB debugging.",
+        }
+        results["findings"].append({
+            "title":          "Application is Debuggable",
+            "severity":       "high",
+            "category":       "Binary Hardening",
+            "description":    "android:debuggable=\"true\" is set. Any user with ADB access can attach a debugger, dump memory, extract data, and bypass certificate pinning.",
+            "impact":         "Full application memory accessible via ADB. SSL pinning trivially bypassed.",
+            "poc":            "adb shell run-as <package> ls /data/data/<package>/\nadb jdwp  # list debuggable processes",
+            "recommendation": "Remove android:debuggable or ensure it is false. Never ship debug builds to production.",
+            "cwe":            "CWE-489",
+            "masvs":          "MASVS-CODE-2",
+            "owasp":          "M7",
+        })
+    elif debuggable and debuggable.lower() in ("false", "0"):
+        manifest_security["debuggable"] = {
+            "value": "false",
+            "state": "false",
+            "status": "False (Secure)",
+            "severity": "info",
+            "reason": "android:debuggable is explicitly disabled in the manifest.",
+        }
+    else:
+        manifest_security["debuggable"] = {
+            "value": "missing",
+            "state": "missing",
+            "status": "Missing (Potential Risk)",
+            "severity": "low",
+            "reason": "The manifest does not explicitly set android:debuggable. Build-time configuration should be verified.",
+        }
+        results["findings"].append({
+            "title":          "Potentially Debuggable (Flag Missing)",
+            "severity":       "low",
+            "category":       "Binary Hardening",
+            "description":    "android:debuggable is not explicitly declared in the manifest. Release builds normally resolve this to false, but the missing flag increases the risk of an insecure build configuration or misconfigured signing pipeline.",
+            "impact":         "A misconfigured release pipeline could accidentally ship a debuggable build without the manifest making that intent explicit.",
+            "recommendation": "Set android:debuggable=\"false\" explicitly for production releases and verify the final merged manifest in CI.",
+            "cwe":            "CWE-16",
+            "masvs":          "MASVS-CODE-2",
+            "owasp":          "M7",
+            "confidence":     55,
+            "validation_status": "heuristic",
+        })
+
+    allow_backup = attr("allowBackup")
+    if allow_backup is None or allow_backup.lower() in ("true", "1"):
+        results["findings"].append({
+            "title":          "Backup Enabled — Data Extraction Risk",
+            "severity":       "medium",
+            "category":       "Data Storage",
+            "description":    "android:allowBackup is true (or unset, which defaults to true before API 31). App data can be extracted via ADB without root.",
+            "impact":         "Credentials, tokens, and local databases extractable without rooting the device.",
+            "poc":            "adb backup -f backup.ab -noapk <package>\ndd if=backup.ab bs=24 skip=1 | python3 -c \"import zlib,sys; sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))\" | tar xvf -",
+            "recommendation": "Set android:allowBackup=\"false\" or configure android:fullBackupContent with exclusion rules for sensitive files.",
+        })
+
+    cleartext = attr("usesCleartextTraffic")
+    if cleartext and cleartext.lower() in ("true", "1"):
+        results["findings"].append({
+            "title":          "Cleartext HTTP Traffic Permitted",
+            "severity":       "high",
+            "category":       "Network Security",
+            "description":    "android:usesCleartextTraffic=\"true\" allows the app to communicate over unencrypted HTTP. This enables trivial MitM attacks on the same network.",
+            "impact":         "All HTTP traffic is in cleartext — credentials, tokens, and PII exposed to network observers.",
+            "poc":            "# Set up MitM proxy on same network\n# All http:// traffic will be readable in plaintext",
+            "recommendation": "Remove usesCleartextTraffic or set to false. Migrate all endpoints to HTTPS.",
+        })
+
+    test_only = attr("testOnly")
+    if test_only and test_only.lower() in ("true", "1"):
+        results["findings"].append({
+            "title":          "Test-Only Build in Production",
+            "severity":       "high",
+            "category":       "Binary Hardening",
+            "description":    "android:testOnly=\"true\" detected. This is a test build that should never reach end users.",
+            "impact":         "Test builds may have reduced security controls, debug endpoints, and verbose logging.",
+            "recommendation": "Remove testOnly flag. Ensure production release builds are properly configured.",
+        })
+
+
+# ─── Permissions ─────────────────────────────────────────────────────────────
+def _analyze_permissions(apk, results):
+    perms = apk.get_permissions() or []
+    results["permissions"]["all"] = perms
+
+    # Classify every permission with status + description
+    classified = []
+    dangerous = []
+    for p in perms:
+        if p in DANGEROUS_PERMISSIONS:
+            sev, desc = DANGEROUS_PERMISSIONS[p]
+            entry = {
+                "permission": p,
+                "short_name": p.split(".")[-1],
+                "status":     "dangerous",
+                "severity":   sev,
+                "description": desc,
+            }
+            dangerous.append(entry)
+            classified.append(entry)
+        else:
+            # Normal / signature / unknown
+            normal_desc = _NORMAL_PERMISSION_DESCS.get(p)
+            if normal_desc:
+                status = "normal"
+            elif p.startswith("android.permission.") or p.startswith("com.google."):
+                status = "normal"
+                normal_desc = "Standard Android/Google permission."
+            else:
+                status = "unknown"
+                normal_desc = "Unknown permission — may be custom or from a third-party library."
+            classified.append({
+                "permission": p,
+                "short_name": p.split(".")[-1],
+                "status":     status,
+                "severity":   "info",
+                "description": normal_desc or "",
+            })
+
+    results["permissions"]["classified"] = classified
+    results["permissions"]["dangerous"] = dangerous
+
+    if len(dangerous) >= 8:
+        results["findings"].append({
+            "title":          "Excessive Dangerous Permissions",
+            "severity":       "medium",
+            "category":       "Permissions",
+            "description":    f"App requests {len(dangerous)} dangerous/sensitive permissions. Over-permissioning increases the blast radius of a compromise.",
+            "impact":         "If exploited or compromised, attacker gains access to broad device data.",
+            "recommendation": "Apply principle of least privilege. Remove permissions not essential to core functionality.",
+        })
+
+    has_sms  = "android.permission.READ_SMS" in perms or "android.permission.RECEIVE_SMS" in perms
+    has_call = "android.permission.READ_CALL_LOG" in perms or "android.permission.PROCESS_OUTGOING_CALLS" in perms
+    if has_sms and has_call:
+        results["findings"].append({
+            "title":          "SMS + Call Log Access — Spyware-Like Permission Combo",
+            "severity":       "high",
+            "category":       "Permissions",
+            "description":    "App requests both SMS and call log permissions simultaneously.",
+            "recommendation": "Audit whether both are genuinely required.",
+            "impact":         "App can silently capture all communications metadata.",
+        })
+
+
+# Normal permission descriptions (subset of most common)
+_NORMAL_PERMISSION_DESCS = {
+    "android.permission.INTERNET":                "Allows full Internet access. Required for any networked app.",
+    "android.permission.ACCESS_NETWORK_STATE":    "Allows viewing network connection status.",
+    "android.permission.ACCESS_WIFI_STATE":       "Allows viewing Wi-Fi connection info.",
+    "android.permission.CHANGE_WIFI_STATE":       "Allows connecting/disconnecting Wi-Fi networks.",
+    "android.permission.VIBRATE":                 "Allows control of the vibrator.",
+    "android.permission.WAKE_LOCK":               "Prevents phone from sleeping.",
+    "android.permission.RECEIVE_BOOT_COMPLETED":  "Allows app to start at boot.",
+    "android.permission.FOREGROUND_SERVICE":      "Allows running foreground services.",
+    "android.permission.FOREGROUND_SERVICE_LOCATION": "Allows foreground services with location.",
+    "android.permission.MODIFY_AUDIO_SETTINGS":   "Allows modification of global audio settings.",
+    "android.permission.USE_BIOMETRIC":           "Allows use of biometric hardware.",
+    "android.permission.USE_FINGERPRINT":         "Deprecated: use USE_BIOMETRIC instead.",
+    "android.permission.POST_NOTIFICATIONS":      "Allows sending push notifications.",
+    "android.permission.BLUETOOTH":               "Allows Bluetooth connections.",
+    "android.permission.BLUETOOTH_ADMIN":         "Allows Bluetooth device discovery and pairing.",
+    "android.permission.NFC":                     "Allows NFC communications.",
+    "android.permission.QUERY_ALL_PACKAGES":      "Allows querying all installed apps.",
+    "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS": "Allows requesting battery optimization exemption.",
+    "com.google.android.c2dm.permission.RECEIVE": "Allows receiving FCM push notifications.",
+    "com.google.android.gms.permission.AD_ID":    "Allows access to Google Advertising ID.",
+    "com.google.android.finsky.permission.BIND_GET_INSTALL_REFERRER_SERVICE": "Google Play install referrer.",
+}
+
+
+# ─── Components ──────────────────────────────────────────────────────────────
+def _analyze_components(apk, tmpdir, results):
+    try:
+        manifest = apk.get_android_manifest_xml()
+    except Exception:
+        return
+
+    app_elem = manifest.find("application")
+    if app_elem is None:
+        return
+
+    pkg = results["app_info"].get("package", "")
+
+    for comp_type in ["activity", "service", "receiver", "provider"]:
+        for elem in app_elem.iter(comp_type):
+            _process_component(elem, comp_type, pkg, results)
+
+
+def _process_component(elem, comp_type, pkg, results):
+    def attr(name): return elem.get(ns(name)) or elem.get(name)
+
+    raw_name = attr("name") or ""
+    full_name = raw_name if raw_name.startswith(pkg) else (pkg + raw_name if raw_name.startswith(".") else raw_name)
+    short_name = raw_name.split(".")[-1] if "." in raw_name else raw_name
+
+    exported_val = attr("exported")
+    permission   = attr("permission")
+    read_perm    = attr("readPermission")
+    write_perm   = attr("writePermission")
+    authority    = attr("authorities") or ""
+    permission_level = _permission_protection_level(permission, results)
+
+    # Determine if exported
+    intent_filters = list(elem.iter("intent-filter"))
+    has_filter = len(intent_filters) > 0
+
+    if exported_val is not None:
+        is_exported = exported_val.lower() in ("true", "1")
+    elif comp_type == "provider":
+        is_exported = bool(authority)
+    else:
+        # Default: exported if has intent-filter (pre-API31 behavior)
+        is_exported = has_filter
+
+    # Collect intent filters
+    actions   = []
+    schemes   = []
+    hosts     = []
+    deeplinks = []
+    browsable = False
+
+    for intent_filter in intent_filters:
+        for action in intent_filter.iter("action"):
+            name = action.get(ns("name")) or action.get("name") or ""
+            if name: actions.append(name)
+        for category in intent_filter.iter("category"):
+            cat = category.get(ns("name")) or ""
+            if "BROWSABLE" in cat: browsable = True
+        for data in intent_filter.iter("data"):
+            scheme = data.get(ns("scheme")) or ""
+            host   = data.get(ns("host"))   or ""
+            path   = data.get(ns("path"))   or data.get(ns("pathPattern")) or data.get(ns("pathPrefix")) or ""
+            if scheme: schemes.append(scheme)
+            if host:   hosts.append(host)
+            if scheme and host:
+                deeplinks.append(f"{scheme}://{host}{path}")
+
+    comp_info = {
+        "name":       full_name,
+        "short_name": short_name,
+        "exported":   is_exported,
+        "permission": permission,
+        "permission_protection": permission_level,
+        "read_permission": read_perm,
+        "write_permission": write_perm,
+        "authorities": authority,
+        "actions":    actions,
+        "schemes":    schemes,
+        "hosts":      hosts,
+        "deeplinks":  deeplinks,
+        "browsable":  browsable,
+    }
+
+    # Add to attack surface
+    key_map = {"activity": "activities", "service": "services",
+               "receiver": "receivers", "provider": "providers"}
+    results["attack_surface"][key_map[comp_type]].append(comp_info)
+
+    if not is_exported:
+        return
+
+    if permission and permission_level in {"normal", "dangerous", "unknown"}:
+        results["findings"].append({
+            "title":          f"Weak Exported Component Permission Protection — {short_name}",
+            "severity":       "medium",
+            "category":       "Attack Surface",
+            "description":    f"Exported {comp_type} `{short_name}` is protected only by `{permission}` with protection level `{permission_level}`. Third-party apps can often obtain or satisfy this permission.",
+            "impact":         "This component may remain externally reachable despite a declared permission boundary.",
+            "recommendation": "Use signature-level permissions for exported privileged components or set android:exported=\"false\".",
+            "cwe":            "CWE-926",
+            "masvs":          "MASVS-PLATFORM-1",
+            "owasp":          "M1",
+        })
+
+    # ── Exported component findings ───────────────────────────────────────────
+    adb_intent = f"adb shell am start -n {pkg}/{full_name}" if comp_type == "activity" else \
+                 f"adb shell am startservice -n {pkg}/{full_name}" if comp_type == "service" else \
+                 f"adb shell am broadcast -a {actions[0] if actions else 'ACTION'} -n {pkg}/{full_name}"
+
+    if comp_type == "activity" and not permission:
+        if browsable and not any(s in ["http", "https"] for s in schemes):
+            # Custom scheme deeplink
+            for dl in deeplinks:
+                results["findings"].append({
+                    "title":          f"Custom Scheme Deeplink Hijacking Surface — {short_name}",
+                    "severity":       "high",
+                    "category":       "Deeplinks",
+                    "description":    f"Activity handles custom URL scheme `{dl}` without Android App Links verification. "
+                                      "Any app on the device can register the same scheme and intercept these intents.",
+                    "impact":         "Malicious app can steal deeplink payloads including OAuth tokens, reset tokens, and session data.",
+                    "poc":            f"# Check assetlinks.json\ncurl https://{hosts[0] if hosts else 'host'}/.well-known/assetlinks.json\n\n# Test deeplink\nadb shell am start -a android.intent.action.VIEW -d '{dl}?token=test' {pkg}",
+                    "recommendation": "Migrate to Android App Links (https:// with verified assetlinks.json). Validate all incoming deeplink data.",
+                })
+        elif not browsable and not actions:
+            results["findings"].append({
+                "title":          f"Exported Activity Without Protection — {short_name}",
+                "severity":       "medium",
+                "category":       "Attack Surface",
+                "description":    f"Activity `{short_name}` is exported without a required permission or intent filter. Any app can launch it.",
+                "impact":         "Unauthorized activity launch may bypass authentication or trigger unintended app flows.",
+                "poc":            adb_intent,
+                "recommendation": "Add android:permission attribute or set android:exported=\"false\" if external access is not required.",
+            })
+
+    elif comp_type == "service" and not permission:
+        results["findings"].append({
+            "title":          f"Exported Service Without Permission — {short_name}",
+            "severity":       "medium",
+            "category":       "Attack Surface",
+            "description":    f"Service `{short_name}` is exported without a required permission. Any app can bind or start it.",
+            "impact":         "Third-party apps can interact with this service to trigger unintended background operations.",
+            "poc":            adb_intent,
+            "recommendation": "Add android:permission to restrict service access.",
+        })
+
+    elif comp_type == "receiver" and not permission:
+        results["findings"].append({
+            "title":          f"Exported Broadcast Receiver Without Permission — {short_name}",
+            "severity":       "medium" if actions else "low",
+            "category":       "Attack Surface",
+            "description":    f"BroadcastReceiver `{short_name}` is exported without required permission. "
+                              "Any app can send broadcasts to trigger it.",
+            "impact":         "Attacker-controlled app can send crafted broadcasts to manipulate app state.",
+            "poc":            adb_intent,
+            "recommendation": "Add android:permission or use LocalBroadcastManager for internal broadcasts.",
+        })
+
+    elif comp_type == "provider":
+        if not (permission or read_perm or write_perm):
+            results["findings"].append({
+                "title":          f"Exported Content Provider Without Permission — {short_name}",
+                "severity":       "high",
+                "category":       "Attack Surface",
+                "description":    f"ContentProvider `{short_name}` (authority: `{authority}`) is exported without read/write permissions. "
+                                  "Any app can query, insert, update, or delete data.",
+                "impact":         "Potential unauthorized data access or manipulation including SQLi via ContentProvider URIs.",
+                "poc":            f"# Query provider\nadb shell content query --uri content://{authority}/\n\n# Or via app\nContentResolver cr = getContentResolver();\nCursor c = cr.query(Uri.parse(\"content://{authority}/\"), null, null, null, null);",
+                "recommendation": "Add readPermission and writePermission with appropriate protectionLevel. Implement URI permission grants.",
+                "cwe":            "CWE-926",
+                "masvs":          "MASVS-PLATFORM-1",
+                "owasp":          "M1",
+            })
+
+
+# ─── SDK detection ────────────────────────────────────────────────────────────
+def _detect_sdks(apk, tmpdir, results):
+    found_sdks = []
+    seen = set()
+    all_packages = _collect_package_hints(apk, tmpdir, results)
+    results["app_info"]["package_hints"] = sorted(all_packages)
+    try:
+        for pkg_prefix, (sdk_name, category, sev) in SDK_SIGNATURES.items():
+            if any(p.startswith(pkg_prefix) for p in all_packages):
+                key = sdk_name
+                if key not in seen:
+                    seen.add(key)
+                    found_sdks.append({
+                        "name":     sdk_name,
+                        "package":  pkg_prefix,
+                        "category": category,
+                        "severity": sev,
+                    })
+                    if sev in ("high", "medium"):
+                        results["findings"].append({
+                            "title":          f"Debug/Sensitive SDK Detected — {sdk_name}",
+                            "severity":       sev,
+                            "category":       "Third-Party SDKs",
+                            "description":    f"`{sdk_name}` ({pkg_prefix}) detected in app. This SDK should not be present in production builds.",
+                            "recommendation": "Remove debug SDKs from release builds using build variants.",
+                        })
+    except Exception:
+        pass
+
+    tracker_hits = detect_trackers(all_packages)
+    for tracker in tracker_hits:
+        key = tracker.get("name")
+        if key and key not in seen:
+            seen.add(key)
+            found_sdks.append({
+                "name": tracker.get("name", ""),
+                "package": tracker.get("pkg", ""),
+                "category": tracker.get("category", ""),
+                "severity": "high" if tracker.get("category") == "Session Replay" else "info",
+                "url": tracker.get("url", ""),
+            })
+
+    _detect_session_recording_sdk_issues(tmpdir, all_packages, tracker_hits, results)
+    results["sdks"] = found_sdks
+
+
+def _normalize_protection_level(protection: str) -> str:
+    value = (protection or "").lower()
+    if not value:
+        return "unknown"
+    if "signatureorsystem" in value or "signature|system" in value:
+        return "signature"
+    if "signature" in value:
+        return "signature"
+    if "dangerous" in value:
+        return "dangerous"
+    if "normal" in value:
+        return "normal"
+    return value.split("|")[0]
+
+
+def _permission_protection_level(permission: str, results: dict) -> str:
+    if not permission:
+        return "none"
+    for perm in results.get("manifest_permissions", []):
+        if perm.get("name") == permission:
+            return perm.get("protection_level", "unknown")
+    if permission.startswith("android.permission."):
+        return "dangerous" if permission in DANGEROUS_PERMISSIONS else "normal"
+    return "unknown"
+
+
+def _collect_package_hints(apk, tmpdir: str, results: dict) -> set[str]:
+    packages = set()
+    pkg = results.get("app_info", {}).get("package")
+    if pkg:
+        packages.add(pkg)
+
+    try:
+        components = list(apk.get_activities()) + list(apk.get_services()) + list(apk.get_receivers()) + list(apk.get_providers())
+        for comp in components:
+            parts = [part for part in comp.split(".") if part]
+            for i in range(2, len(parts)):
+                packages.add(".".join(parts[:i]))
+    except Exception:
+        pass
+
+    manifest_xml = results.get("manifest_xml", "")
+    for match in re.findall(r"\b([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*){1,})\b", manifest_xml):
+        if len(match.split(".")) >= 2:
+            packages.add(match)
+
+    for root, _, files in os.walk(tmpdir):
+        for fname in files:
+            if not fname.endswith((".java", ".kt", ".smali", ".xml")):
+                continue
+            rel = normalize_relative_path(os.path.relpath(os.path.join(root, fname), tmpdir))
+            parts = [part for part in rel.split("/") if part]
+            if parts[:1] == ["smali"] or (len(parts) > 1 and parts[0].startswith("smali")):
+                pkg_parts = parts[1:-1]
+            else:
+                pkg_parts = parts[:-1]
+            cleaned = [part for part in pkg_parts if re.fullmatch(r"[A-Za-z_]\w*", part)]
+            for i in range(2, len(cleaned) + 1):
+                packages.add(".".join(cleaned[:i]))
+
+    return {value for value in packages if "." in value}
+
+
+def _detect_session_recording_sdk_issues(tmpdir: str, all_packages: set[str], tracker_hits: list, results: dict):
+    session_trackers = [tracker for tracker in tracker_hits if tracker.get("category") == "Session Replay"]
+    if not session_trackers:
+        return
+
+    metadata = results.get("app_info", {}).get("manifest_metadata", [])
+    text_hits = []
+    id_pattern = re.compile(r"(?i)(appid|app_id|projectkey|project_key|api[_-]?key|token)[\"'\s:=/>\-]{1,12}([A-Za-z0-9._:-]{6,80})")
+
+    for item in metadata:
+        name = item.get("name", "")
+        value = item.get("value", "")
+        if name and value and not value.lower().startswith("@string/"):
+            for tracker in session_trackers:
+                tracker_name = tracker.get("name", "").split()[0].lower()
+                tracker_pkg = tracker.get("pkg", "").lower()
+                if tracker_name in name.lower() or tracker_pkg in name.lower():
+                    text_hits.append(("AndroidManifest.xml", f"{name}={value}"))
+
+    for root, _, files in os.walk(tmpdir):
+        for fname in files:
+            if not fname.endswith((".xml", ".json", ".properties", ".java", ".kt", ".smali")):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, "r", errors="replace") as handle:
+                    content = handle.read()
+            except Exception:
+                continue
+            lowered = content.lower()
+            if not any(tracker.get("pkg", "").lower() in lowered or tracker.get("name", "").split()[0].lower() in lowered for tracker in session_trackers):
+                continue
+            for match in id_pattern.finditer(content):
+                value = match.group(2)
+                if value and not value.lower().startswith("@string/"):
+                    rel = normalize_relative_path(os.path.relpath(fpath, tmpdir))
+                    text_hits.append((rel, f"{match.group(1)}={value}"))
+
+    added = set()
+    for tracker in session_trackers:
+        name = tracker.get("name", "")
+        if name in added:
+            continue
+        added.add(name)
+        tracker_key = name.split()[0].lower()
+        relevant_hits = [
+            hit for hit in text_hits
+            if tracker_key in hit[0].lower() or tracker_key in hit[1].lower()
+        ][:3] or text_hits[:3]
+        evidence = [make_file_evidence(path, 0, snippet) for path, snippet in relevant_hits]
+        description = f"{name} session-recording SDK is present. Session replay SDKs can capture screen content, taps, and sensitive user flows."
+        if relevant_hits:
+            description += " A hardcoded identifier or configuration value was also detected."
+        results["findings"].append({
+            "title": f"Session Recording SDK Present — {name}",
+            "severity": "high",
+            "category": "Third-Party SDKs",
+            "description": description,
+            "impact": "Session replay tooling materially increases privacy exposure and can capture sensitive in-app content if not tightly controlled.",
+            "recommendation": "Review whether the SDK is acceptable for production, minimize capture scope, and move identifiers or configuration out of the client where possible.",
+            "file_path": relevant_hits[0][0] if relevant_hits else "AndroidManifest.xml",
+            "snippet": relevant_hits[0][1] if relevant_hits else "",
+            "file_evidence": evidence,
+            "files": [path for path, _ in relevant_hits],
+            "file_count": len(relevant_hits),
+            "cwe": "CWE-359",
+            "masvs": "MASVS-PRIVACY-1",
+            "owasp": "M2",
+        })
+        for path, snippet in relevant_hits:
+            results["sdk_secrets"].append({
+                "name": f"{name} Identifier",
+                "category": "Privacy SDK",
+                "severity": "high",
+                "value": snippet.split("=", 1)[-1][:80],
+                "source": path,
+                "full_path": path,
+                "description": f"Potential hardcoded {name} identifier detected.",
+                "recommendation": "Review whether this SDK identifier should be exposed in the client build and limit capture scope.",
+            })
+
+
+def _build_behavior_findings(results: dict):
+    api_results = results.get("android_api", {})
+    behavior_entries = []
+    seen_titles = {finding.get("title") for finding in results.get("findings", [])}
+    for category, files in api_results.items():
+        rule = BEHAVIOR_RULES.get(category)
+        if not rule:
+            continue
+        behavior_entries.append({
+            "category": category,
+            "title": rule["title"],
+            "severity": rule["severity"],
+            "description": rule["description"],
+            "files": files[:10],
+            "file_count": len(files),
+            "cwe": rule["cwe"],
+            "masvs": rule["masvs"],
+            "owasp": rule["owasp"],
+        })
+        if rule["title"] not in seen_titles:
+            results["findings"].append({
+                "title": rule["title"],
+                "severity": rule["severity"],
+                "category": "Behavior Analysis",
+                "description": rule["description"],
+                "impact": rule["impact"],
+                "recommendation": rule["recommendation"],
+                "file_path": files[0] if files else "",
+                "files": files[:10],
+                "file_count": len(files),
+                "cwe": rule["cwe"],
+                "masvs": rule["masvs"],
+                "owasp": rule["owasp"],
+            })
+            seen_titles.add(rule["title"])
+    results["behavior_analysis"] = behavior_entries
+
+
+def _add_malware_permission_findings(results: dict):
+    stats = results.get("malware_perms", {})
+    malware = stats.get("malware_permissions", {})
+    common = stats.get("common_malware_permissions", {})
+    malware_count = malware.get("count", 0)
+    common_count = common.get("count", 0)
+    if not malware_count and not common_count:
+        return
+    severity = "high" if malware_count >= 12 else "medium" if malware_count >= 6 or common_count >= 10 else "low"
+    results["findings"].append({
+        "title": "Malware Permission Overlap Elevated",
+        "severity": severity,
+        "category": "Permissions",
+        "description": f"The app requests {malware_count}/{malware.get('total', 0)} permissions seen in common Android malware sets and {common_count}/{common.get('total', 0)} permissions from broader abuse datasets.",
+        "impact": "A high overlap does not prove malware, but it increases analyst focus on abuse potential and blast radius.",
+        "recommendation": "Review whether all requested permissions are essential and remove non-core access from release builds.",
+        "cwe": "CWE-250",
+        "masvs": "MASVS-PLATFORM-1",
+        "owasp": "M2",
+    })
+
+
+def _add_domain_intel_summary(results: dict):
+    intel = results.get("domain_intel", [])
+    risky = [item for item in intel if item.get("risk_score", 0) >= 20]
+    if not risky:
+        return
+    results["findings"].append({
+        "title": "Domain Intelligence Review Required",
+        "severity": "low" if len(risky) < 3 else "medium",
+        "category": "Network Intelligence",
+        "description": f"{len(risky)} discovered domains were enriched with suspicious or review-worthy indicators such as staging hosts, dynamic DNS, suspicious TLDs, or sanctioned geographies.",
+        "recommendation": "Review the enriched domain list and validate whether non-production or high-risk infrastructure belongs in the shipped app.",
+        "cwe": "CWE-200",
+        "masvs": "MASVS-NETWORK-1",
+        "owasp": "M5",
+    })
+
+
+def _add_exported_webview_attack_chain(results: dict):
+    findings = results.get("findings", [])
+    activities = [activity for activity in results.get("attack_surface", {}).get("activities", []) if activity.get("exported")]
+    js_findings = [finding for finding in findings if "WebView JavaScript Enabled" in finding.get("title", "")]
+    file_findings = [finding for finding in findings if "WebView File System Access Enabled" in finding.get("title", "")]
+    if not activities or not js_findings or not file_findings:
+        return
+
+    candidate = next((
+        activity for activity in activities
+        if any(token in action.upper() for action in activity.get("actions", []) for token in ("OPEN_WEB_URL", "VIEW", "WEB"))
+        or activity.get("browsable")
+        or any(scheme in ("http", "https") for scheme in activity.get("schemes", []))
+    ), None)
+    if not candidate:
+        return
+
+    title = f"Exported Intent to JS-Enabled WebView Attack Chain — {candidate.get('short_name')}"
+    if any(finding.get("title") == title for finding in findings):
+        return
+
+    evidence = []
+    for finding in (js_findings[:1] + file_findings[:1]):
+        evidence.extend(finding.get("file_evidence") or [make_file_evidence(finding.get("file_path", ""), finding.get("line", 0), finding.get("snippet", ""))])
+
+    actions = ", ".join(candidate.get("actions", [])[:3]) or "intent launch"
+    results["findings"].append({
+        "title": title,
+        "severity": "high",
+        "category": "Attack Surface",
+        "description": f"Exported activity `{candidate.get('short_name')}` accepts externally triggerable intents ({actions}) and the app also enables JavaScript plus file access in WebView flows. This forms an open redirect or arbitrary URL loading chain into a high-risk WebView configuration.",
+        "impact": "An attacker-controlled app can drive the exported flow into a JavaScript-enabled WebView and increase the likelihood of XSS, phishing, or local-file exposure.",
+        "poc": f"adb shell am start -n {results.get('app_info', {}).get('package', '')}/{candidate.get('name')} --es url 'https://attacker.example'",
+        "recommendation": "Gate exported URL-entry activities, validate allowed destinations, and disable JavaScript or file access unless strictly required.",
+        "file_path": js_findings[0].get("file_path") or file_findings[0].get("file_path", ""),
+        "snippet": js_findings[0].get("snippet") or file_findings[0].get("snippet", ""),
+        "file_evidence": [entry for entry in evidence if entry.get("path")][:4],
+        "files": list({entry.get("path") for entry in evidence if entry.get("path")}),
+        "file_count": len({entry.get("path") for entry in evidence if entry.get("path")}),
+        "cwe": "CWE-601",
+        "masvs": "MASVS-PLATFORM-2",
+        "owasp": "M1",
+    })
+
+
+def _enrich_findings_with_standards(results: dict):
+    defaults = [
+        (("Attack Surface", "Deeplinks"), ("CWE-926", "MASVS-PLATFORM-1", "M1")),
+        (("WebView",), ("CWE-749", "MASVS-PLATFORM-2", "M1")),
+        (("Permissions", "Behavior Analysis"), ("CWE-359", "MASVS-PRIVACY-1", "M2")),
+        (("Network Security", "Network Intelligence"), ("CWE-319", "MASVS-NETWORK-1", "M5")),
+        (("Third-Party SDKs",), ("CWE-1104", "MASVS-PLATFORM-3", "M9")),
+        (("Binary Hardening", "Certificate"), ("CWE-693", "MASVS-CODE-4", "M7")),
+        (("Configuration",), ("CWE-16", "MASVS-CODE-1", "M8")),
+    ]
+    for finding in results.get("findings", []):
+        if finding.get("cwe") and finding.get("masvs") and finding.get("owasp"):
+            continue
+        category = finding.get("category", "")
+        title = finding.get("title", "")
+        for categories, mapping in defaults:
+            if category in categories or any(token in title for token in categories):
+                finding.setdefault("cwe", mapping[0])
+                finding.setdefault("masvs", mapping[1])
+                finding.setdefault("owasp", mapping[2])
+                break
+
+
+# ─── Framework detection ──────────────────────────────────────────────────────
+def _detect_framework(tmpdir, results):
+    files = set()
+    for root, _, fnames in os.walk(tmpdir):
+        for f in fnames:
+            rel = normalize_relative_path(os.path.relpath(os.path.join(root, f), tmpdir))
+            files.add(rel.replace("\\", "/"))
+
+    framework_type = "native"
+    details = []
+
+    # React Native
+    rn_bundle = next((f for f in files if "index.android.bundle" in f or
+                      ("assets" in f and f.endswith(".bundle"))), None)
+    if rn_bundle or any("libreactnativejni.so" in f for f in files):
+        framework_type = "react_native"
+        details.append("React Native detected via JS bundle / libreactnativejni.so")
+        results["findings"].append({
+            "title":          "React Native Framework Detected",
+            "severity":       "info",
+            "category":       "Framework",
+            "description":    "App is built with React Native. JS bundle contains business logic, API keys, and endpoint URLs in a more accessible format than compiled Java.",
+            "impact":         "JS bundles can be extracted and analyzed without decompilation, revealing secrets and API surface.",
+            "recommendation": "Ensure no sensitive keys in JS bundle. Use Hermes bytecode (not plain JS). Consider JS bundle encryption for sensitive apps.",
+        })
+
+    # Flutter
+    if any("libflutter.so" in f for f in files) or any("libapp.so" in f for f in files):
+        framework_type = "flutter"
+        details.append("Flutter detected via libflutter.so / libapp.so")
+        results["findings"].append({
+            "title":          "Flutter Framework Detected",
+            "severity":       "info",
+            "category":       "Framework",
+            "description":    "App uses Flutter (Dart compiled to native). Standard SSL pinning bypass tools (Objection, reFlutter) may fail. "
+                              "Custom Frida hooks targeting ADRP+ADD instruction sequences in libflutter.so are required.",
+            "poc":            "# Auto-generate Frida hook with K!ll Fl!utter:\n# python3 killflutter.py <apk_path>\n\n# Manual offset scan:\nreadelf -d libflutter.so | grep -i ssl",
+            "recommendation": "N/A — informational framework note for analyst.",
+        })
+
+    # Xamarin
+    if any("assemblies/" in f and f.endswith(".dll") for f in files):
+        framework_type = "xamarin"
+        details.append("Xamarin detected via .NET assemblies")
+        results["findings"].append({
+            "title":          "Xamarin/.NET Framework Detected",
+            "severity":       "info",
+            "category":       "Framework",
+            "description":    "App uses Xamarin (.NET). DLL assemblies can be extracted and decompiled with ILSpy/dnSpy for full source access.",
+            "poc":            "# Extract DLLs:\nunzip app.apk assemblies/ -d extracted/\n# Decompile:\n# Open .dll files in ILSpy or dnSpy",
+            "recommendation": "Enable Dotfuscator or equivalent obfuscation for Xamarin release builds.",
+        })
+
+    # Cordova/Ionic
+    if any("assets/www/index.html" in f or "assets/www/cordova.js" in f for f in files):
+        framework_type = "cordova"
+        details.append("Cordova/Ionic detected via assets/www/")
+        results["findings"].append({
+            "title":          "Cordova/Ionic Hybrid Framework Detected",
+            "severity":       "medium",
+            "category":       "Framework",
+            "description":    "App is built with Cordova/Ionic. Full HTML/JS source is accessible in assets/www/. Business logic, API keys, and endpoints are trivially readable.",
+            "poc":            "unzip app.apk assets/www/ -d extracted/\nls extracted/assets/www/",
+            "recommendation": "Minify and obfuscate JS. Move all sensitive logic server-side. Never store credentials in JS.",
+        })
+
+    results["framework"] = {"type": framework_type, "details": details}
+
+
+# ─── Network Security Config ──────────────────────────────────────────────────
+def _parse_nsc_trust_anchors(elem) -> dict:
+    """Parse <trust-anchors> element into structured dict."""
+    anchors = {"system": False, "user": False, "custom_certs": []}
+    for cert in elem.findall("certificates"):
+        src = cert.get("src", "")
+        overridePins = cert.get("overridePins", "false").lower() == "true"
+        if src == "system":
+            anchors["system"] = True
+        elif src == "user":
+            anchors["user"] = True
+        elif src:
+            anchors["custom_certs"].append({"src": src, "overridePins": overridePins})
+    return anchors
+
+
+def _parse_nsc_pin_set(elem) -> dict:
+    """Parse <pin-set> into structured dict."""
+    expiration = elem.get("expiration", "")
+    pins = []
+    for pin in elem.findall("pin"):
+        pins.append({"digest": pin.get("digest", "SHA-256"), "value": (pin.text or "").strip()})
+    return {"expiration": expiration, "pins": pins}
+
+
+def _nsc_bool(elem, attr: str, default: bool) -> bool:
+    val = elem.get(attr, "")
+    if val.lower() == "true":
+        return True
+    if val.lower() == "false":
+        return False
+    return default
+
+
+def _analyze_network_security_config(tmpdir, results):
+    nsc_paths = []
+    for root, _, files in os.walk(tmpdir):
+        for f in files:
+            if "network_security_config" in f.lower() and f.endswith(".xml"):
+                nsc_paths.append(os.path.join(root, f))
+
+    if not nsc_paths:
+        results["network_config"] = {"present": False}
+        return
+
+    nsc_path = nsc_paths[0]
+    try:
+        tree      = ET.parse(nsc_path)
+        root_elem = tree.getroot()
+        xml_text  = ET.tostring(root_elem, encoding="unicode")
+    except Exception:
+        results["network_config"] = {"present": False, "parse_error": True}
+        return
+
+    # ── Base config ───────────────────────────────────────────────────────────
+    base_elem = root_elem.find("base-config")
+    base_config = None
+    if base_elem is not None:
+        cleartext = _nsc_bool(base_elem, "cleartextTrafficPermitted", True)
+        trust_el  = base_elem.find("trust-anchors")
+        anchors   = _parse_nsc_trust_anchors(trust_el) if trust_el is not None else {"system": True, "user": False, "custom_certs": []}
+        base_config = {"cleartextTrafficPermitted": cleartext, "trust_anchors": anchors}
+
+    # ── Debug overrides ───────────────────────────────────────────────────────
+    debug_elem    = root_elem.find("debug-overrides")
+    debug_overrides = None
+    if debug_elem is not None:
+        cleartext    = _nsc_bool(debug_elem, "cleartextTrafficPermitted", True)
+        trust_el     = debug_elem.find("trust-anchors")
+        anchors      = _parse_nsc_trust_anchors(trust_el) if trust_el is not None else {"system": True, "user": False, "custom_certs": []}
+        pin_override = False
+        for cert in debug_elem.findall(".//certificates"):
+            if cert.get("overridePins", "false").lower() == "true":
+                pin_override = True
+        debug_overrides = {
+            "cleartextTrafficPermitted": cleartext,
+            "trust_anchors": anchors,
+            "overridePins": pin_override,
+        }
+
+    # ── Domain configs ────────────────────────────────────────────────────────
+    domain_configs = []
+    for dc in root_elem.findall("domain-config"):
+        cleartext = _nsc_bool(dc, "cleartextTrafficPermitted", False)
+        domains   = [d.text.strip() for d in dc.findall("domain") if d.text]
+        incl_sub  = [d.get("includeSubdomains", "false").lower() == "true" for d in dc.findall("domain")]
+
+        trust_el  = dc.find("trust-anchors")
+        anchors   = _parse_nsc_trust_anchors(trust_el) if trust_el is not None else None
+
+        pin_el    = dc.find("pin-set")
+        pin_set   = _parse_nsc_pin_set(pin_el) if pin_el is not None else None
+
+        domain_configs.append({
+            "domains":                  domains,
+            "includeSubdomains":        incl_sub,
+            "cleartextTrafficPermitted": cleartext,
+            "trust_anchors":            anchors,
+            "pin_set":                  pin_set,
+        })
+
+    # ── Summarise overall posture ─────────────────────────────────────────────
+    has_pinning       = any(dc.get("pin_set") for dc in domain_configs)
+    user_ca_trusted   = (base_config and base_config["trust_anchors"].get("user")) or \
+                        any(dc.get("trust_anchors") and dc["trust_anchors"].get("user") for dc in domain_configs)
+    cleartext_global  = base_config["cleartextTrafficPermitted"] if base_config else ("cleartextTrafficPermitted=\"true\"" in xml_text)
+    cleartext_domains = [dc for dc in domain_configs if dc.get("cleartextTrafficPermitted")]
+    pin_override      = debug_overrides.get("overridePins") if debug_overrides else False
+
+    network_config = {
+        "present":            True,
+        "file":               os.path.relpath(nsc_path, tmpdir),
+        "xml":                xml_text,
+        "base_config":        base_config,
+        "debug_overrides":    debug_overrides,
+        "domain_configs":     domain_configs,
+        "summary": {
+            "has_pinning":        has_pinning,
+            "user_ca_trusted":    user_ca_trusted,
+            "cleartext_global":   cleartext_global,
+            "cleartext_domains":  [dc["domains"] for dc in cleartext_domains],
+            "pin_override":       pin_override,
+            "domain_count":       len(domain_configs),
+            "pinned_domain_count": sum(1 for dc in domain_configs if dc.get("pin_set")),
+        },
+    }
+    results["network_config"] = network_config
+
+    # ── Generate findings ─────────────────────────────────────────────────────
+
+    # 1. Global cleartext
+    if cleartext_global:
+        results["findings"].append({
+            "title":          "Network Security Config — Global Cleartext HTTP Permitted",
+            "severity":       "high",
+            "category":       "Network Security",
+            "description":    "base-config sets cleartextTrafficPermitted=\"true\", allowing all HTTP traffic from the app. Any data sent over HTTP is visible to passive network observers.",
+            "impact":         "Login credentials, session tokens, and user data can be captured by anyone on the same network.",
+            "poc":            "# Run mitmproxy or Burp on same network — HTTP traffic appears in cleartext",
+            "recommendation": "Set cleartextTrafficPermitted=\"false\" in base-config. Migrate all endpoints to HTTPS.",
+            "masvs":          "MASVS-NETWORK-1",
+            "owasp":          "M5",
+        })
+
+    # 2. Per-domain cleartext
+    for dc in cleartext_domains:
+        domains_str = ", ".join(dc["domains"][:3])
+        results["findings"].append({
+            "title":          f"Cleartext HTTP Permitted for Domain(s): {domains_str}",
+            "severity":       "medium",
+            "category":       "Network Security",
+            "description":    f"domain-config explicitly permits cleartext HTTP for: {', '.join(dc['domains'])}. Traffic to these domains is unencrypted.",
+            "recommendation": "Remove cleartextTrafficPermitted=\"true\" from domain-config or migrate to HTTPS.",
+            "masvs":          "MASVS-NETWORK-1",
+            "owasp":          "M5",
+        })
+
+    # 3. User CA trust
+    if user_ca_trusted:
+        results["findings"].append({
+            "title":          "User-Installed CA Certificates Trusted",
+            "severity":       "high",
+            "category":       "Network Security",
+            "description":    "network_security_config trusts user-installed CA certificates. This allows trivial TLS interception: install a proxy CA cert (Burp, mitmproxy) and all HTTPS traffic is readable.",
+            "impact":         "Any attacker with physical access or social engineering can install a CA cert and intercept all app traffic.",
+            "poc":            "1. Install Burp Suite CA cert on device (Settings > Security > Install certificate)\n2. All HTTPS traffic visible in Burp with no SSL errors",
+            "recommendation": "Remove <certificates src=\"user\"/> from all non-debug trust-anchors.",
+            "masvs":          "MASVS-NETWORK-2",
+            "owasp":          "M5",
+        })
+
+    # 4. Pin override in debug config (leak risk)
+    if pin_override:
+        results["findings"].append({
+            "title":          "Certificate Pinning Override in Debug Config",
+            "severity":       "medium",
+            "category":       "Network Security",
+            "description":    "debug-overrides contains overridePins=\"true\". If this XML is present in a production APK, pinning can be bypassed during pentest/debug sessions.",
+            "recommendation": "Verify debug-overrides is excluded from release builds. Use build flavors to strip debug NSC in production.",
+            "masvs":          "MASVS-NETWORK-2",
+            "owasp":          "M5",
+        })
+
+    # 5. No pinning configured at all
+    if not has_pinning:
+        results["findings"].append({
+            "title":          "No Certificate Pinning Configured",
+            "severity":       "medium",
+            "category":       "Network Security",
+            "description":    "network_security_config.xml does not define any <pin-set> elements. Without pinning, any trusted CA — including those installed by attackers — can issue valid certificates for your domain.",
+            "recommendation": "Add <pin-set> to your domain-config with your server certificate's public key hash. Include a backup pin.",
+            "masvs":          "MASVS-NETWORK-2",
+            "owasp":          "M5",
+        })
+    else:
+        # 6. Pinning configured — check for expired or missing backup pins
+        from datetime import datetime as _dt
+        for dc in domain_configs:
+            pin_set = dc.get("pin_set")
+            if not pin_set:
+                continue
+            domains_str = ", ".join(dc["domains"][:2])
+
+            # Expiry check
+            exp = pin_set.get("expiration", "")
+            if exp:
+                try:
+                    exp_date = _dt.strptime(exp, "%Y-%m-%d")
+                    if exp_date < _dt.utcnow():
+                        results["findings"].append({
+                            "title":          f"Expired Certificate Pin — {domains_str}",
+                            "severity":       "high",
+                            "category":       "Network Security",
+                            "description":    f"Pin-set for {domains_str} expired on {exp}. Connections to these domains will fail — effectively a self-inflicted DoS.",
+                            "recommendation": f"Rotate pin-set expiration date and update pins for {domains_str}.",
+                            "masvs":          "MASVS-NETWORK-2",
+                            "owasp":          "M5",
+                        })
+                except ValueError:
+                    pass
+
+            # Backup pin check (< 2 pins = no backup)
+            if len(pin_set.get("pins", [])) < 2:
+                results["findings"].append({
+                    "title":          f"Certificate Pinning — No Backup Pin for {domains_str}",
+                    "severity":       "low",
+                    "category":       "Network Security",
+                    "description":    f"Only one pin defined for {domains_str}. If the pinned certificate is rotated without updating the app, all connections will fail.",
+                    "recommendation": "Always define at least two pins: the current cert and one backup (next rotation cert or CA pin).",
+                    "masvs":          "MASVS-NETWORK-2",
+                    "owasp":          "M5",
+                })
+            else:
+                # Positive finding — pinning is properly configured
+                results["findings"].append({
+                    "title":          f"Certificate Pinning Configured — {domains_str}",
+                    "severity":       "info",
+                    "category":       "Network Security",
+                    "description":    f"Certificate pinning is configured for {domains_str} with {len(pin_set['pins'])} pin(s). This significantly raises the bar for MitM attacks.",
+                })
+
+
+# ─── React Native bundle analysis ─────────────────────────────────────────────
+def _analyze_rn_bundle(tmpdir, results):
+    bundle_path = None
+    for root, _, files in os.walk(tmpdir):
+        for f in files:
+            if f.endswith(".bundle") or f == "index.android.bundle":
+                bundle_path = os.path.join(root, f)
+                break
+
+    if not bundle_path:
+        return
+
+    try:
+        with open(bundle_path, "r", errors="replace") as f:
+            content = f.read()
+
+        # Scan bundle for secrets
+        bundle_secrets = scan_text_for_secrets(content, relativize_path(bundle_path, tmpdir))
+        seen = {f"{s['name']}:{s['value']}" for s in results["secrets"]}
+        for s in bundle_secrets:
+            key = f"{s['name']}:{s['value']}"
+            if key not in seen:
+                results["secrets"].append(s)
+
+        # Extract URLs
+        urls = extract_urls(content)
+        seen_urls = set(results["endpoints"])
+        results["endpoints"].extend(u for u in urls if u not in seen_urls)
+
+        # Look for API base URLs
+        api_patterns = [
+            r'(?:baseURL|apiUrl|BASE_URL|API_URL|api_base)[\'"\s:=]+[\'"]?(https?://[^\s\'"]+)',
+            r'(?:host|server|endpoint)[\'"\s:=]+[\'"]?(https?://[^\s\'"]+)',
+        ]
+        for pat in api_patterns:
+            for m in re.findall(pat, content):
+                if m and m not in seen_urls:
+                    results["endpoints"].append(m)
+                    seen_urls.add(m)
+
+        results["findings"].append({
+            "title":          "React Native JS Bundle Analysis Complete",
+            "severity":       "info",
+            "category":       "Framework",
+            "description":    f"JS bundle analyzed. Found {len(bundle_secrets)} potential secrets and {len(urls)} endpoints directly in bundle. "
+                              "Full business logic is readable without decompilation.",
+            "recommendation": "Use Hermes AOT compilation to convert bundle to bytecode. Consider additional obfuscation.",
+        })
+    except Exception:
+        pass
+
+
+# ─── DEX string scanning ──────────────────────────────────────────────────────
+def _scan_dex_strings(tmpdir, results):
+    dex_files = []
+    for root, _, files in os.walk(tmpdir):
+        for f in files:
+            if f.endswith(".dex"):
+                dex_files.append(os.path.join(root, f))
+
+    seen = {f"{s['name']}:{s['value']}" for s in results["secrets"]}
+
+    for dex_path in dex_files:
+        try:
+            with open(dex_path, "rb") as f:
+                raw = f.read()
+            # Extract printable strings
+            text = "".join(chr(b) if 32 <= b < 127 else " " for b in raw)
+            for s in scan_text_for_secrets(text, relativize_path(dex_path, tmpdir)):
+                key = f"{s['name']}:{s['value']}"
+                if key not in seen:
+                    seen.add(key)
+                    results["secrets"].append(s)
+        except Exception:
+            continue
+
+
+# ─── Endpoint extraction ──────────────────────────────────────────────────────
+def _extract_endpoints(tmpdir, results):
+    all_urls = set()
+    for root, _, files in os.walk(tmpdir):
+        for fname in files:
+            if fname.endswith((".xml", ".json", ".properties", ".js", ".bundle", ".txt")):
+                fpath = os.path.join(root, fname)
+                try:
+                    with open(fpath, "r", errors="replace") as f:
+                        content = f.read()
+                    for url in extract_urls(content):
+                        all_urls.add(url)
+                except Exception:
+                    continue
+
+    results["endpoints"] = sorted(list(all_urls))[:200]  # cap at 200
+
+
+# ─── APK Protection Checks ────────────────────────────────────────────────────
+def _check_apk_protections(tmpdir, results):
+    # Check for obfuscation (presence of short class names in smali/dex)
+    # Heuristic: count very short filenames in extracted dex
+    short_names = 0
+    total = 0
+    for root, _, files in os.walk(tmpdir):
+        for f in files:
+            if f.endswith(".dex"):
+                total += 1
+
+    if total == 0:
+        pass  # no dex to analyze
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+def _meta_finding(msg: str) -> dict:
+    return {
+        "title":       "Analysis Note",
+        "severity":    "info",
+        "category":    "Meta",
+        "description": msg,
+    }
+
+
+def _extract_android_app_icon(apk, results):
+    candidate_paths = []
+    for method_name in ("get_app_icon",):
+        getter = getattr(apk, method_name, None)
+        if not callable(getter):
+            continue
+        try:
+            icon_path = getter(max_dpi=65535)
+        except TypeError:
+            try:
+                icon_path = getter()
+            except Exception:
+                icon_path = None
+        except Exception:
+            icon_path = None
+        if icon_path:
+            candidate_paths.append(str(icon_path))
+
+    try:
+        manifest = apk.get_android_manifest_xml()
+        app_elem = manifest.find("application")
+        if app_elem is not None:
+            icon_ref = app_elem.get(ns("icon")) or app_elem.get("{http://schemas.android.com/apk/res/android}icon")
+            if icon_ref:
+                candidate_paths.extend(_expand_android_icon_reference(str(icon_ref)))
+    except Exception:
+        pass
+
+    seen = set()
+    for candidate in candidate_paths:
+        for variant in _expand_android_icon_reference(candidate):
+            if variant in seen:
+                continue
+            seen.add(variant)
+            icon = _read_android_icon_candidate(apk, variant)
+            if not icon:
+                continue
+            results["app_info"]["icon_data"] = icon["data"]
+            results["app_info"]["icon_path"] = variant
+            results["app_info"]["icon_source"] = "apk"
+            return
+
+
+def _expand_android_icon_reference(icon_ref: str) -> list[str]:
+    ref = (icon_ref or "").strip()
+    if not ref:
+        return []
+    if ref.startswith("@"):
+        ref = ref[1:]
+    if ref.startswith("res/"):
+        base = ref.rsplit(".", 1)[0]
+        refs = [base]
+    elif "/" in ref:
+        refs = [f"res/{ref}"]
+    else:
+        refs = [ref]
+
+    variants = []
+    for base in refs:
+        base = base.rsplit(".", 1)[0]
+        variants.extend([
+            f"{base}.png",
+            f"{base}.webp",
+            f"{base}.jpg",
+            f"{base}.jpeg",
+            f"{base}.xml",
+        ])
+        name = os.path.basename(base)
+        if name and name != base:
+            variants.extend([
+                f"res/mipmap-anydpi-v26/{name}.png",
+                f"res/mipmap-anydpi-v26/{name}.webp",
+                f"res/mipmap-xxxhdpi-v4/{name}.png",
+                f"res/mipmap-xxhdpi-v4/{name}.png",
+                f"res/mipmap-xhdpi-v4/{name}.png",
+                f"res/drawable-xxxhdpi-v4/{name}.png",
+                f"res/drawable-xxhdpi-v4/{name}.png",
+                f"res/drawable-xhdpi-v4/{name}.png",
+            ])
+    return variants
+
+
+def _read_android_icon_candidate(apk, path: str):
+    norm_path = (path or "").replace("\\", "/")
+    if not norm_path or norm_path.endswith(".xml"):
+        return None
+    try:
+        raw = apk.get_file(norm_path)
+    except Exception:
+        raw = None
+    if not raw or len(raw) > 800_000:
+        return None
+    mime = mimetypes.guess_type(norm_path)[0] or "image/png"
+    encoded = base64.b64encode(raw).decode("ascii")
+    return {"data": f"data:{mime};base64,{encoded}"}
+
+
+def _scan_precise_source_secrets(source_dirs: list[str]) -> list:
+    """Prefer source-backed evidence from JADX/apktool over raw APK extraction.
+
+    Dedup key is (name, value[:80]) so two different rules matching the same
+    string value are NOT collapsed — they surface as distinct findings with
+    different names and recommendations.
+    """
+    from .evidence_scanner import scan_directory_for_secrets as ev_secrets
+
+    findings = []
+    seen: set[tuple[str, str]] = set()
+    for finding in ev_secrets("", source_dirs):
+        name = finding.get("name") or finding.get("title", "")
+        val  = finding.get("value", "")
+        key  = (name, val[:80])
+        if not val or key in seen:
+            continue
+        seen.add(key)
+        findings.append({
+            "name":           name,
+            "category":       finding["category"],
+            "severity":       finding["severity"],
+            "value":          val,
+            "source":         os.path.basename(finding.get("file_path", "")),
+            "full_path":      finding.get("file_path", ""),
+            "line":           finding.get("line", 0),
+            "snippet":        finding.get("snippet", ""),
+            "code_context":   finding.get("code_context", ""),
+            "description":    finding["description"],
+            "recommendation": finding["recommendation"],
+            "confidence":     finding.get("confidence", 70),
+            "cwe":            finding.get("cwe", ""),
+            "masvs":          finding.get("masvs", ""),
+            "owasp":          finding.get("owasp", ""),
+        })
+    return findings
+
+
+def _persist_extraction(tmpdir: str, scan_id: str):
+    """
+    Copy source files from the APK ZIP extraction into the persistent scan
+    directory so the code viewer can access smali/xml/dex-string files even
+    without jadx. Dispatches to the shared `scan_storage.persist_tree` helper
+    which uses a much higher file cap and broader extension set than the old
+    implementation (old cap: 2000 files / 500 KB and ~16 exts; see bug report).
+    """
+    scan_storage.persist_tree(
+        tmpdir, scan_id, "apk_extract",
+        extra_binary_dump=True,   # also dump .dex / .so printable strings
+    )
+
+
+def _extract_strings_for_viewer(data: bytes, min_len: int = 6) -> str:
+    """Extract printable strings from binary for code viewer display."""
+    result, current = [], []
+    for byte in data:
+        if 32 <= byte < 127:
+            current.append(chr(byte))
+        else:
+            if len(current) >= min_len:
+                result.append("".join(current))
+            current = []
+    if len(current) >= min_len:
+        result.append("".join(current))
+    header = f"// Extracted strings from binary file\n// {len(result)} strings found\n// jadx/apktool not available — showing raw string extraction\n\n"
+    return header + "\n".join(result)
+
+
+def _sdk_to_version(sdk: int) -> str:
+    mapping = {
+        16: "4.1", 17: "4.2", 18: "4.3", 19: "4.4",
+        21: "5.0", 22: "5.1", 23: "6.0", 24: "7.0",
+        25: "7.1", 26: "8.0", 27: "8.1", 28: "9",
+        29: "10",  30: "11",  31: "12",  32: "12L",
+        33: "13",  34: "14",
+    }
+    return mapping.get(sdk, str(sdk))

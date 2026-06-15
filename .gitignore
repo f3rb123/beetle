@@ -1,0 +1,15 @@
+.claude/
+.codex
+node_modules/
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+dist/
+build/
+coverage/
+*.log
+.vscode/
+.idea/

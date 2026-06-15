@@ -1,0 +1,64 @@
+services:
+  backend:
+    build: ./backend
+    container_name: cortex-backend
+    volumes:
+      - cortex-uploads:/tmp/cortex
+      - cortex-data:/data
+    environment:
+      - MAX_UPLOAD_SIZE=200
+      - CORTEX_DATA_DIR=/data
+      - JADX_PATH=/opt/jadx/bin/jadx
+      - APKTOOL_PATH=/usr/local/bin/apktool
+    restart: unless-stopped
+    # Resource limits — JADX + Apktool + SAST on a large APK can burn an entire
+    # host if unbounded. Override per-deployment via environment if you run
+    # bigger boxes.
+    mem_limit: ${CORTEX_BACKEND_MEM:-6g}
+    memswap_limit: ${CORTEX_BACKEND_MEM:-6g}
+    cpus: ${CORTEX_BACKEND_CPUS:-4.0}
+    pids_limit: 512
+    # Drop all Linux capabilities — the backend never needs root privileges
+    # once the image is built; the Dockerfile already switches to the `cortex`
+    # user. no-new-privileges blocks setuid escalation from a compromised tool.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # Use GET (-qO-) not --spider (HEAD) — FastAPI's /api/health only allows GET.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # The analyzers and decompilers write to /tmp/cortex and /data (mounted
+    # volumes). Everything else stays read-only at the container layer.
+    read_only: true
+    tmpfs:
+      - /tmp:size=2g,mode=1777
+
+  frontend:
+    build: ./frontend
+    container_name: cortex-frontend
+    ports:
+      - "9005:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: ${CORTEX_FRONTEND_MEM:-256m}
+    cpus: ${CORTEX_FRONTEND_CPUS:-1.0}
+    pids_limit: 128
+    # NOTE: the stock nginx image runs its entrypoint as root and needs
+    # CAP_CHOWN / CAP_SETUID / CAP_SETGID to prepare /var/cache/nginx and
+    # drop privileges to the `nginx` user. `cap_drop: ALL` breaks it.
+    # If you need hardening here, switch the base image to
+    # `nginxinc/nginx-unprivileged` in frontend/Dockerfile and re-enable
+    # cap_drop. For now we only keep no-new-privileges.
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  cortex-uploads:
+  cortex-data:
