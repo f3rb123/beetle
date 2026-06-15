@@ -48,7 +48,7 @@ export default function Login() {
           <div className="login-card__logo-ring">
             <ShieldCheck size={26} strokeWidth={1.75} className="login-card__icon" />
           </div>
-          <h1 className="login-card__title">Cortex</h1>
+          <h1 className="login-card__title">Beetle</h1>
           <p className="login-card__sub">Mobile Security Platform</p>
         </div>
 

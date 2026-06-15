@@ -431,7 +431,7 @@ export default function Home() {
               <span>way a hacker does.</span>
             </h1>
             <p>
-              Cortex turns mobile package analysis into a readable, white-based security workspace with linked evidence,
+              Beetle turns mobile package analysis into a readable, white-based security workspace with linked evidence,
               structured findings, and a cleaner path from triage to remediation.
             </p>
 

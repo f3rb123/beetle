@@ -1057,7 +1057,7 @@ export default function Results() {
             </div>
           </nav>
 
-          <div className="workspace-sidebar__footer">Cortex v3.3 · Security Analysis</div>
+          <div className="workspace-sidebar__footer">Beetle v3.3 · Security Analysis</div>
         </aside>
 
         <main className="workspace-main">

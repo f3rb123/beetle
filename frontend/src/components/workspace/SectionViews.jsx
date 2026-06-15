@@ -2969,7 +2969,7 @@ function ComponentsSection({ results }) {
         >
           <EmptyState
             title="No bundled components detected"
-            description="Cortex could not identify any known OSS library versions in this app's native binaries. This usually means the app has no native dependencies, or their version strings were stripped."
+            description="Beetle could not identify any known OSS library versions in this app's native binaries. This usually means the app has no native dependencies, or their version strings were stripped."
           />
         </Panel>
       </div>

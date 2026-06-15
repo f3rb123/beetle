@@ -4,6 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
+# Project Identity
+
+Public product name: Beetle
+
+Legacy/internal project name: Cortex
+
+When discussing the project, always refer to it as Beetle unless specifically discussing legacy implementation details.
+
 ## Development Commands
 
 ### Run with Docker (primary workflow)

@@ -293,7 +293,7 @@ def generate_compliance_pdf(
         rightMargin=20 * mm,
         topMargin=15 * mm,
         bottomMargin=15 * mm,
-        title=f"Cortex {fw['name']} Compliance Report — {app_name}",
+        title=f"Beetle {fw['name']} Compliance Report — {app_name}",
         author=author,
     )
 
@@ -641,7 +641,7 @@ def _draw_footer(canv, doc, results, T, fw_name):
     canv.setFillColor(T["text_sub"])
     app = results.get("app_name", "")
     date_str = datetime.utcnow().strftime("%Y-%m-%d")
-    canv.drawString(20 * mm, 8 * mm, f"Cortex — {fw_name} Compliance Report — {app} — {date_str}")
+    canv.drawString(20 * mm, 8 * mm, f"Beetle — {fw_name} Compliance Report — {app} — {date_str}")
     canv.drawRightString(PAGE_W - 20 * mm, 8 * mm, f"Page {doc.page}")
     canv.restoreState()
 

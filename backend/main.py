@@ -121,7 +121,7 @@ logging.basicConfig(level=logging.INFO, format="[%(name)s] %(levelname)s %(messa
 log = logging.getLogger("cortex")
 
 app = FastAPI(
-    title="Cortex API",
+    title="Beetle API",
     description="Mobile Recon Framework",
     version="3.2.0",
 )

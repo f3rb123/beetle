@@ -4,12 +4,12 @@ export default function BrandLogo({ animated = false, size = 'default', showWord
       <div className={`brand-mark${animated ? ' brand-mark--animated' : ''}`} aria-hidden="true">
         <span className="brand-mark__ring" />
         <span className="brand-mark__ring brand-mark__ring--offset" />
-        <span className="brand-mark__core">C</span>
+        <span className="brand-mark__core">B</span>
       </div>
 
       {showWordmark ? (
         <div className="brand-lockup__text">
-          <div className="brand-lockup__title">Cortex</div>
+          <div className="brand-lockup__title">Beetle</div>
           <div className="brand-lockup__subtitle">{subtitle}</div>
         </div>
       ) : null}

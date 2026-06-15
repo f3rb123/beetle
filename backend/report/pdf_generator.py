@@ -83,7 +83,7 @@ def generate_pdf(results: dict, output_path: str, theme: str = "light", prepared
         rightMargin=20 * mm,
         topMargin=15 * mm,
         bottomMargin=15 * mm,
-        title=f"Cortex Report — {results.get('app_name', 'App')}",
+        title=f"Beetle Report — {results.get('app_name', 'App')}",
         author=report_author,
     )
 
@@ -244,7 +244,7 @@ def _executive_summary(story, results, T, styles):
 
     summary_text = (
         f"This report presents the findings from a static security analysis of the {platform} application "
-        f"<b>{results.get('app_name', 'the target app')}</b> using Cortex Mobile Recon Framework. "
+        f"<b>{results.get('app_name', 'the target app')}</b> using Beetle Mobile Recon Framework. "
         f"The analysis identified <b>{total_issues} total issues</b> across {len(findings)} findings, "
         f"including <b>{critical} critical</b> and <b>{high} high severity</b> items requiring immediate attention. "
         f"Additionally, <b>{len(secrets)} potential hardcoded secrets</b> were detected in the app bundle."
@@ -826,7 +826,7 @@ def _draw_page_footer(canv, doc, results, T):
     canv.setFillColor(T["text_sub"])
 
     footer_y = 10 * mm
-    canv.drawString(20 * mm, footer_y, f"Cortex — Mobile Recon Framework | {results.get('app_name', '')} | Confidential")
+    canv.drawString(20 * mm, footer_y, f"Beetle — Mobile Recon Framework | {results.get('app_name', '')} | Confidential")
     canv.drawRightString(PAGE_W - 20 * mm, footer_y, f"Page {doc.page}")
     canv.setStrokeColor(T["border"])
     canv.line(20 * mm, footer_y + 4 * mm, PAGE_W - 20 * mm, footer_y + 4 * mm)
