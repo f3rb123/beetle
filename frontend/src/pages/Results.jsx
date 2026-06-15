@@ -386,7 +386,7 @@ function CiGateModal({ results, onClose }) {
   -d @scan_results.json | jq .verdict`
 
   const _s = '$'
-  const ghActionsYaml = `name: Cortex Security Gate
+  const ghActionsYaml = `name: Beetle Security Gate
 on: [push, pull_request]
 
 jobs:

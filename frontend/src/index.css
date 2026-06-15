@@ -5260,17 +5260,13 @@ a:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 56px;
-  height: 56px;
-  border-radius: 16px;
-  background: linear-gradient(135deg, rgba(0, 200, 150, 0.2) 0%, rgba(10, 63, 52, 0.3) 100%);
-  border: 1px solid rgba(0, 200, 150, 0.3);
   margin-bottom: 16px;
-  box-shadow: 0 0 24px rgba(0, 200, 150, 0.15);
 }
 
-.login-card__icon {
-  color: #00c896;
+.login-card__logo {
+  width: 80px;
+  height: 80px;
+  object-fit: contain;
 }
 
 .login-card__title {

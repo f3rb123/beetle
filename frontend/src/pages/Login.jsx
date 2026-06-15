@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { ShieldCheck } from 'lucide-react'
 import { login, getToken } from '../lib/auth.js'
+import beetleIcon from '../assets/beetle-icon.png'
 
 export default function Login() {
   const navigate  = useNavigate()
@@ -46,10 +46,10 @@ export default function Login() {
       <div className="login-card">
         <div className="login-card__header">
           <div className="login-card__logo-ring">
-            <ShieldCheck size={26} strokeWidth={1.75} className="login-card__icon" />
+            <img src={beetleIcon} alt="Beetle" className="login-card__logo" />
           </div>
           <h1 className="login-card__title">Beetle</h1>
-          <p className="login-card__sub">Mobile Security Platform</p>
+          <p className="login-card__sub">Mobile Static Security Framework</p>
         </div>
 
         <form className="login-form" onSubmit={handleSubmit} autoComplete="on">
