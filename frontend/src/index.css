@@ -917,10 +917,13 @@ a:focus-visible {
   width: 56px;
   height: 56px;
   border-radius: 18px;
-  background: var(--gradient-brand);
-  color: white;
-  box-shadow: 0 18px 34px rgba(10, 63, 52, 0.18);
   overflow: hidden;
+}
+
+.brand-mark__img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .brand-lockup--compact .brand-mark {
@@ -934,25 +937,12 @@ a:focus-visible {
   height: 44px;
 }
 
-.brand-mark__ring,
-.brand-mark__ring--offset {
-  position: absolute;
-  inset: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  border-radius: 14px;
-}
-
-.brand-mark__ring--offset {
-  inset: 14px;
-  opacity: 0.72;
-}
-
-.brand-mark__core {
-  position: relative;
-  z-index: 1;
-  font-size: 1.25rem;
-  font-weight: 900;
-  letter-spacing: -0.08em;
+.brand-logo-full {
+  height: 56px;
+  width: auto;
+  max-width: 100%;
+  object-fit: contain;
+  display: block;
 }
 
 .brand-mark--animated {

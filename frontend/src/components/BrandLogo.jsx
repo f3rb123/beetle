@@ -1,10 +1,29 @@
+import beetleLogo from '../assets/beetle-logo.png'
+import beetleIcon from '../assets/beetle-icon.png'
+
 export default function BrandLogo({ animated = false, size = 'default', showWordmark = true, subtitle = 'Mobile Static Security Workspace' }) {
+  // beetle-logo.png is the full lockup (wordmark + tagline baked in) — used for
+  // primary/full branding. beetle-icon.png is the standalone mark used for
+  // compact / sidebar / icon-only contexts, where the wordmark and subtitle are
+  // rendered as text beside it to preserve the existing layout.
+  const useFullLockup = size === 'default' && showWordmark
+
+  if (useFullLockup) {
+    return (
+      <div className={`brand-lockup brand-lockup--${size}`}>
+        <img
+          src={beetleLogo}
+          alt="Beetle"
+          className={`brand-logo-full${animated ? ' brand-mark--animated' : ''}`}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className={`brand-lockup brand-lockup--${size}`}>
       <div className={`brand-mark${animated ? ' brand-mark--animated' : ''}`} aria-hidden="true">
-        <span className="brand-mark__ring" />
-        <span className="brand-mark__ring brand-mark__ring--offset" />
-        <span className="brand-mark__core">B</span>
+        <img src={beetleIcon} alt="" className="brand-mark__img" />
       </div>
 
       {showWordmark ? (
