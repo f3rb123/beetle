@@ -10,6 +10,12 @@ services:
       - CORTEX_DATA_DIR=/data
       - JADX_PATH=/opt/jadx/bin/jadx
       - APKTOOL_PATH=/usr/local/bin/apktool
+      # Cap the jadx JVM heap (jadx only — does not affect apktool or any other
+      # tool). Keep this comfortably below mem_limit (6g below) so the JVM's
+      # non-heap memory (metaspace, thread stacks, GC, off-heap) fits inside the
+      # cgroup and jadx is not OOM-killed (exit 137). Unset this to restore
+      # jadx's default MaxRAMPercentage sizing. Accepts e.g. 1g / 2g / 4g / 4096m.
+      - CORTEX_JADX_HEAP=4g
     restart: unless-stopped
     # Resource limits — JADX + Apktool + SAST on a large APK can burn an entire
     # host if unbounded. Override per-deployment via environment if you run

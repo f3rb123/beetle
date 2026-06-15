@@ -43,6 +43,8 @@ Optional:
 ANTHROPIC_API_KEY=...        # AI enrichment (Claude Haiku)
 VIRUSTOTAL_API_KEY=...       # VirusTotal hash lookups
 CORTEX_DISABLE_LIVE_CHECKS=1 # Skip Firebase/S3/secret probing
+CORTEX_JADX_HEAP=4g          # jadx-only JVM max heap (e.g. 1g/2g/4g/4096m). Unset = jadx default sizing.
+                             # Keep below the container mem_limit (6g) to avoid OOM kills (exit 137).
 ```
 
 ### Backend (bare metal)

@@ -4,6 +4,7 @@ Runs jadx (Java decompile) and apktool (resource extract) on APKs.
 Falls back gracefully if tools are unavailable.
 """
 import os
+import re
 import subprocess
 import shutil
 import logging
@@ -16,10 +17,70 @@ JADX_PATH    = os.environ.get("JADX_PATH", "jadx")
 APKTOOL_PATH = os.environ.get("APKTOOL_PATH", "apktool")
 SCAN_DIR     = Path(os.environ.get("CORTEX_SCAN_DIR", "/tmp/cortex/scans"))
 
+# Optional explicit JVM max-heap for jadx ONLY (e.g. "4g", "2048m"). When unset,
+# jadx keeps its built-in default sizing (MaxRAMPercentage), preserving the
+# previous behavior exactly. Scoped to the jadx subprocess so apktool / other
+# tooling and the global JVM environment are never affected. Invalid values are
+# ignored with a warning rather than failing the scan.
+JADX_HEAP = os.environ.get("CORTEX_JADX_HEAP", "").strip()
+_HEAP_RE = re.compile(r"^\d+[kmgtKMGT]$")
+
+
+def _jadx_subprocess_env():
+    """Return the environment dict for the jadx subprocess, or None to inherit.
+
+    Returning None (the unset / invalid case) makes `subprocess.run` use the
+    inherited environment unchanged — i.e. identical to the prior behavior.
+    When CORTEX_JADX_HEAP is a valid heap size we copy the environment and add
+    `-Xmx<heap>` via JAVA_OPTS for this call only; we never mutate os.environ,
+    so apktool and everything else are untouched.
+    """
+    if not JADX_HEAP:
+        return None
+    if not _HEAP_RE.match(JADX_HEAP):
+        log.warning(
+            f"Ignoring invalid CORTEX_JADX_HEAP={JADX_HEAP!r} — expected a JVM "
+            "heap size such as '1g', '2g' or '4096m'. Using jadx default heap."
+        )
+        return None
+    env = os.environ.copy()
+    xmx = f"-Xmx{JADX_HEAP}"
+    existing = (env.get("JAVA_OPTS") or "").strip()
+    env["JAVA_OPTS"] = f"{existing} {xmx}".strip() if existing else xmx
+    log.info(f"Applying jadx heap cap {xmx} (CORTEX_JADX_HEAP)")
+    return env
+
 try:
     from analyzers.scan_storage import resolve_source_file as _storage_resolve
 except Exception:
     _storage_resolve = None
+
+
+def _describe_jadx_failure(returncode, stdout: str, stderr: str) -> str:
+    """Build a human-readable reason for a jadx run that produced no output.
+
+    jadx rarely writes a clean error to stderr: it logs to stdout, and a
+    container OOM-kill terminates the JVM with SIGKILL, leaving BOTH streams
+    empty with only a non-zero return code behind. The old code surfaced
+    `stderr[:200]` alone, which is why the real reason was lost ("jadx produced
+    no output: " with an empty tail). We therefore fold the return code first,
+    then the stderr tail, then the stdout tail into the message.
+    """
+    # OOM / killed: subprocess reports SIGKILL as -9; Docker/shells surface 137.
+    if returncode in (-9, 137):
+        return (
+            f"jadx was killed (exit {returncode}, likely out-of-memory / SIGKILL). "
+            "Raise container memory (CORTEX_BACKEND_MEM) or cap the jadx heap "
+            "(CORTEX_JADX_HEAP)."
+        )
+    # Any other fatal signal — POSIX reports these as negative return codes.
+    if isinstance(returncode, int) and returncode < 0:
+        return f"jadx terminated by signal {-returncode} (exit {returncode})."
+
+    stderr_tail = (stderr or "").strip()[-300:]
+    stdout_tail = (stdout or "").strip()[-300:]
+    detail = stderr_tail or stdout_tail or "no diagnostic output on stdout/stderr"
+    return f"jadx exited {returncode}: {detail}"
 
 
 def jadx_available() -> bool:
@@ -89,19 +150,33 @@ def decompile_apk(apk_path: str, scan_id: str) -> dict:
             result = subprocess.run(
                 [JADX_PATH, "-d", jadx_dir, "--no-debug-info", "--no-res",
                  "--threads-count", "4", "--show-bad-code", apk_path],
-                capture_output=True, timeout=jadx_timeout, text=True
+                capture_output=True, timeout=jadx_timeout, text=True,
+                env=_jadx_subprocess_env(),
             )
             if os.path.exists(jadx_dir) and os.listdir(jadx_dir):
-                log.info(f"[{scan_id}] jadx complete")
+                log.info(f"[{scan_id}] jadx complete (exit {result.returncode})")
                 return True, None
-            return False, f"jadx produced no output: {result.stderr[:200]}"
+            # No output. The reason is almost never in stderr alone — jadx logs to
+            # stdout, and an OOM/SIGKILL leaves both streams empty with only a
+            # non-zero return code. Capture all three so the failure is
+            # diagnosable from both the logs and decompile_info.errors.
+            reason = _describe_jadx_failure(result.returncode, result.stdout, result.stderr)
+            log.warning(
+                f"[{scan_id}] jadx produced no output — {reason} | "
+                f"rc={result.returncode} "
+                f"stdout_tail={result.stdout[-500:]!r} "
+                f"stderr_tail={result.stderr[-500:]!r}"
+            )
+            return False, f"jadx produced no output: {reason}"
         except subprocess.TimeoutExpired:
             # Even on timeout, jadx may have written partial output — keep it.
             if os.path.exists(jadx_dir) and os.listdir(jadx_dir):
                 log.info(f"[{scan_id}] jadx timed out but produced partial output — using it")
                 return True, f"jadx timed out after {jadx_timeout}s (partial output kept)"
+            log.warning(f"[{scan_id}] jadx timed out after {jadx_timeout}s with no output — falling back to apktool/smali")
             return False, f"jadx timed out after {jadx_timeout}s — falling back to apktool/smali"
         except Exception as e:
+            log.warning(f"[{scan_id}] jadx invocation error: {e}")
             return False, f"jadx error: {e}"
 
     def _run_apktool() -> tuple[bool, str | None]:

@@ -400,6 +400,33 @@ export function getPrimaryEvidence(finding = {}) {
   return entries[0] || null
 }
 
+// Extensions that ONLY exist when jadx successfully decompiled the APK.
+// smali (apktool), classes.dex string dumps (classes.dex.txt) and
+// manifest/resource/xml/json all resolve from apktool/ or apk_extract/
+// regardless of jadx, so they must stay viewable when jadx failed.
+const JAVA_SOURCE_EXTS = ['.java', '.kt', '.kts']
+
+/**
+ * Decide whether the code viewer can resolve a given evidence path for a scan.
+ *
+ * Only Java/Kotlin source is produced exclusively by jadx; when jadx output is
+ * unavailable (decompileInfo.tools_used has no 'jadx') those links would 404.
+ * Everything else (smali, classes.dex.txt, xml, etc.) is still resolvable.
+ *
+ * Backward-compatible: when decompileInfo is missing (older scans, or callers
+ * that don't pass it) we never hide a link we cannot prove is broken.
+ */
+export function canViewSource(path, decompileInfo) {
+  if (!path) return false
+  if (!decompileInfo) return true
+  const lower = String(path).toLowerCase()
+  const dot = lower.lastIndexOf('.')
+  const ext = dot >= 0 ? lower.slice(dot) : ''
+  if (!JAVA_SOURCE_EXTS.includes(ext)) return true
+  const tools = Array.isArray(decompileInfo.tools_used) ? decompileInfo.tools_used : []
+  return tools.includes('jadx')
+}
+
 export function countLinkedFindings(findings = []) {
   return findings.filter(item => Boolean(getPrimaryEvidence(item)?.path)).length
 }

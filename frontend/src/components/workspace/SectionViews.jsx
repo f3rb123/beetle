@@ -26,6 +26,7 @@ import { apiFetch } from '../../lib/auth.js'
 import {
   SEVERITY_META,
   SEVERITY_ORDER,
+  canViewSource,
   countLinkedFindings,
   formatDuration,
   formatFileSize,
@@ -292,9 +293,32 @@ function Tag({ children, tone = 'neutral' }) {
   return <span className={`tag tag--${tone}`}>{children}</span>
 }
 
-function FileLinkButton({ path, lines, onOpenCode, label = 'Open code' }) {
+const JAVA_SOURCE_UNAVAILABLE_TIP =
+  'Java/Kotlin source is unavailable for this scan — JADX decompilation produced ' +
+  'no output (see the Source section for details). smali, manifest and resource ' +
+  'evidence remain viewable.'
+
+function FileLinkButton({ path, lines, onOpenCode, label = 'Open code', decompileInfo }) {
   if (!path || !onOpenCode) return null
   const normalizedLines = normLines(lines)
+
+  // Only gate when decompile metadata is supplied. Without it we never hide a
+  // link we can't prove is broken (older scans / callers that don't pass it).
+  const available = decompileInfo === undefined ? true : canViewSource(path, decompileInfo)
+  if (!available) {
+    return (
+      <button
+        type="button"
+        className="button button--secondary button--small"
+        disabled
+        aria-disabled="true"
+        title={JAVA_SOURCE_UNAVAILABLE_TIP}
+      >
+        <FileCode2 size={14} />
+        {label}
+      </button>
+    )
+  }
 
   return (
     <button type="button" className="button button--secondary button--small" onClick={() => onOpenCode(path, normalizedLines)}>
@@ -464,7 +488,7 @@ function AIEnrichmentPanel({ finding, appContext }) {
   )
 }
 
-function FindingsList({ findings, onOpenCode, emptyTitle = 'No findings found', emptyDescription = 'This section has no issues for the current filter.', getFindingTriage, getFindingNote, setFindingTriage }) {
+function FindingsList({ findings, onOpenCode, emptyTitle = 'No findings found', emptyDescription = 'This section has no issues for the current filter.', getFindingTriage, getFindingNote, setFindingTriage, decompileInfo }) {
   const [openItems, setOpenItems] = useState(() => Object.fromEntries(findings.slice(0, 1).map((finding, index) => [`${finding.title}-${index}`, true])))
 
   useEffect(() => {
@@ -547,7 +571,7 @@ function FindingsList({ findings, onOpenCode, emptyTitle = 'No findings found', 
                     onChange={(state, note) => setFindingTriage(finding, state, note)}
                   />
                 )}
-                {primary?.path ? <span onClick={event => event.stopPropagation()}><FileLinkButton path={primary.path} lines={primary.lines} onOpenCode={onOpenCode} label="View Code" /></span> : null}
+                {primary?.path ? <span onClick={event => event.stopPropagation()}><FileLinkButton path={primary.path} lines={primary.lines} onOpenCode={onOpenCode} label="View Code" decompileInfo={decompileInfo} /></span> : null}
                 <span className="finding-card__signal" style={{ color: severity.text }}>
                   <ChevronRight size={16} />
                 </span>
@@ -604,6 +628,7 @@ function FindingsList({ findings, onOpenCode, emptyTitle = 'No findings found', 
                             path={entry.path}
                             lines={entry.lines}
                             onOpenCode={onOpenCode}
+                            decompileInfo={decompileInfo}
                             label={entry.lines[0] ? `Open :${entry.lines[0]}` : 'View Code'}
                           />
                         </div>
@@ -1083,6 +1108,7 @@ function DashboardSection({ results, onNavigateSection, onOpenCode, viewMode }) 
           <div className="sec-list">
             {critHighFindings.map(finding => {
               const evidence = getPrimaryEvidence(finding)
+              const evidenceViewable = evidence && canViewSource(evidence.path, results.decompile_info)
               return (
                 <div key={finding.id || finding.title} className={`sec-list-item sec-list-item--${finding.severity}`}>
                   <div className="sec-list-item__header">
@@ -1091,9 +1117,15 @@ function DashboardSection({ results, onNavigateSection, onOpenCode, viewMode }) 
                       <span className="sec-list-item__name">{finding.title}</span>
                     </div>
                     {evidence && onOpenCode && (
-                      <button type="button" className="icon-button" title="Open in code viewer" onClick={() => onOpenCode(evidence.path, evidence.lines)}>
-                        <ArrowUpRight size={14} />
-                      </button>
+                      evidenceViewable ? (
+                        <button type="button" className="icon-button" title="Open in code viewer" onClick={() => onOpenCode(evidence.path, evidence.lines)}>
+                          <ArrowUpRight size={14} />
+                        </button>
+                      ) : (
+                        <button type="button" className="icon-button" disabled aria-disabled="true" title={JAVA_SOURCE_UNAVAILABLE_TIP}>
+                          <ArrowUpRight size={14} />
+                        </button>
+                      )
                     )}
                   </div>
                   {finding.description && <div className="sec-list-item__desc">{finding.description}</div>}
@@ -1281,6 +1313,7 @@ function FindingsSection({ results, onOpenCode, viewMode }) {
       <FindingsList
         findings={filtered}
         onOpenCode={onOpenCode}
+        decompileInfo={results.decompile_info}
         getFindingTriage={getFindingTriage}
         getFindingNote={getFindingNote}
         setFindingTriage={setFindingTriage}
@@ -1679,6 +1712,7 @@ function CodeAnalysisSection({ results, scanId, onOpenCode }) {
         <FindingsList
           findings={sastFindings}
           onOpenCode={onOpenCode}
+          decompileInfo={results.decompile_info}
           emptyTitle="No code analysis findings"
           emptyDescription="This scan did not return SAST-specific detections."
         />
