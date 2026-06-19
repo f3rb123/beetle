@@ -16,6 +16,11 @@ services:
       # cgroup and jadx is not OOM-killed (exit 137). Unset this to restore
       # jadx's default MaxRAMPercentage sizing. Accepts e.g. 1g / 2g / 4g / 4096m.
       - CORTEX_JADX_HEAP=4g
+      # Writable HOME/XDG base for jadx runtime state (plugin store, cache).
+      # Required under read_only:true so jadx 1.5.0 can create
+      # $HOME/.config/jadx/plugins/installed. Points at the /tmp tmpfs below
+      # (ephemeral by design — no plugins are installed). jadx-scoped only.
+      - CORTEX_JADX_STATE_DIR=/tmp/jadx
     restart: unless-stopped
     # Resource limits — JADX + Apktool + SAST on a large APK can burn an entire
     # host if unbounded. Override per-deployment via environment if you run

@@ -45,6 +45,9 @@ VIRUSTOTAL_API_KEY=...       # VirusTotal hash lookups
 CORTEX_DISABLE_LIVE_CHECKS=1 # Skip Firebase/S3/secret probing
 CORTEX_JADX_HEAP=4g          # jadx-only JVM max heap (e.g. 1g/2g/4g/4096m). Unset = jadx default sizing.
                              # Keep below the container mem_limit (6g) to avoid OOM kills (exit 137).
+CORTEX_JADX_STATE_DIR=/tmp/jadx  # Writable HOME/XDG base for jadx runtime state (plugin store, cache).
+                             # Required under read_only:true (jadx 1.5.0 creates ~/.config/jadx/...).
+                             # Defaults to /tmp/jadx (tmpfs); jadx-scoped only, ephemeral by design.
 ```
 
 ### Backend (bare metal)

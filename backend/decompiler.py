@@ -25,29 +25,58 @@ SCAN_DIR     = Path(os.environ.get("CORTEX_SCAN_DIR", "/tmp/cortex/scans"))
 JADX_HEAP = os.environ.get("CORTEX_JADX_HEAP", "").strip()
 _HEAP_RE = re.compile(r"^\d+[kmgtKMGT]$")
 
+# Writable base for jadx runtime state (plugin store, cache, config). Under a
+# read-only root filesystem jadx 1.5.0 fails at startup because it cannot create
+# $HOME/.config/jadx/plugins/installed. We redirect HOME + the XDG base dirs here
+# — defaulting to the tmpfs already mounted at /tmp — scoped to the jadx
+# subprocess only, so the read-only hardening stays fully intact.
+JADX_STATE_DIR = os.environ.get("CORTEX_JADX_STATE_DIR", "/tmp/jadx").strip() or "/tmp/jadx"
+
 
 def _jadx_subprocess_env():
-    """Return the environment dict for the jadx subprocess, or None to inherit.
+    """Build the environment for the jadx subprocess (scoped to that call only).
 
-    Returning None (the unset / invalid case) makes `subprocess.run` use the
-    inherited environment unchanged — i.e. identical to the prior behavior.
-    When CORTEX_JADX_HEAP is a valid heap size we copy the environment and add
-    `-Xmx<heap>` via JAVA_OPTS for this call only; we never mutate os.environ,
-    so apktool and everything else are untouched.
+    Always returns an env dict — never None — because jadx needs a writable
+    HOME/XDG location to initialize its plugin store under a read-only rootfs.
+    We copy os.environ (never mutate it) so apktool, Python and the global
+    environment are untouched, then:
+
+      * redirect HOME / XDG_CONFIG_HOME / XDG_CACHE_HOME / XDG_DATA_HOME under
+        CORTEX_JADX_STATE_DIR (tmpfs by default), and
+      * optionally append `-Xmx<heap>` via JAVA_OPTS when CORTEX_JADX_HEAP is a
+        valid size (unchanged behavior; invalid values are warned and ignored).
     """
-    if not JADX_HEAP:
-        return None
-    if not _HEAP_RE.match(JADX_HEAP):
-        log.warning(
-            f"Ignoring invalid CORTEX_JADX_HEAP={JADX_HEAP!r} — expected a JVM "
-            "heap size such as '1g', '2g' or '4096m'. Using jadx default heap."
-        )
-        return None
     env = os.environ.copy()
-    xmx = f"-Xmx{JADX_HEAP}"
-    existing = (env.get("JAVA_OPTS") or "").strip()
-    env["JAVA_OPTS"] = f"{existing} {xmx}".strip() if existing else xmx
-    log.info(f"Applying jadx heap cap {xmx} (CORTEX_JADX_HEAP)")
+
+    # --- jadx runtime-state redirect (HOME + XDG base dirs) ------------------
+    config_dir = os.path.join(JADX_STATE_DIR, ".config")
+    cache_dir  = os.path.join(JADX_STATE_DIR, ".cache")
+    data_dir   = os.path.join(JADX_STATE_DIR, ".local", "share")
+    try:
+        for d in (config_dir, cache_dir, data_dir):
+            os.makedirs(d, exist_ok=True)
+    except OSError as e:
+        # Don't fail the scan — jadx will attempt creation itself and the
+        # failure (if any) is now captured by _describe_jadx_failure().
+        log.warning(f"Could not pre-create jadx state dir under {JADX_STATE_DIR!r}: {e}")
+    env["HOME"] = JADX_STATE_DIR
+    env["XDG_CONFIG_HOME"] = config_dir
+    env["XDG_CACHE_HOME"] = cache_dir
+    env["XDG_DATA_HOME"] = data_dir
+
+    # --- optional heap cap (unchanged semantics) ----------------------------
+    if JADX_HEAP:
+        if _HEAP_RE.match(JADX_HEAP):
+            xmx = f"-Xmx{JADX_HEAP}"
+            existing = (env.get("JAVA_OPTS") or "").strip()
+            env["JAVA_OPTS"] = f"{existing} {xmx}".strip() if existing else xmx
+            log.info(f"Applying jadx heap cap {xmx} (CORTEX_JADX_HEAP)")
+        else:
+            log.warning(
+                f"Ignoring invalid CORTEX_JADX_HEAP={JADX_HEAP!r} — expected a JVM "
+                "heap size such as '1g', '2g' or '4096m'. Using jadx default heap."
+            )
+
     return env
 
 try:
