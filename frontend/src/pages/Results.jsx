@@ -9,7 +9,6 @@ import {
   Bug,
   CheckCircle2,
   ChevronLeft,
-  ChevronDown,
   CircleGauge,
   Code2,
   Copy,
@@ -766,8 +765,6 @@ export default function Results() {
   const [loading, setLoading] = useState(!location.state?.results)
   const [error, setError] = useState('')
   const [viewMode, setViewMode] = useState(() => window.localStorage.getItem('cortex-view-mode') || 'quick')
-  const [collapsedGroups, setCollapsedGroups] = useState({})
-  const toggleGroup = (id) => setCollapsedGroups(prev => ({ ...prev, [id]: !prev[id] }))
   const [exportOpen, setExportOpen] = useState(false)
   const [gateOpen, setGateOpen]     = useState(false)
   const [codeState, setCodeState] = useState({
@@ -1036,54 +1033,28 @@ export default function Results() {
           </div>
 
           <nav className="workspace-nav">
-            {visibleGroups.map(group => {
-              const open = !collapsedGroups[group.title]
-              return (
-                <div className="nav-group" key={group.title}>
+            <div className="workspace-nav__list">
+              {navItems.map(item => {
+                const Icon = SECTION_ICONS[item.id] || ShieldCheck
+                const active = item.id === resolvedSectionId
+                const badgeCount = counts[item.id]
+
+                return (
                   <button
+                    key={item.id}
                     type="button"
-                    className="nav-group__header"
-                    onClick={() => toggleGroup(group.title)}
-                    aria-expanded={open}
+                    className={`workspace-nav__item${active ? ' is-active' : ''}`}
+                    onClick={() => navigate(`/scans/${scanId}/${item.id}`)}
                   >
-                    <span>{group.title}</span>
-                    <ChevronDown size={12} className={`nav-group__chev${open ? ' is-open' : ''}`} />
+                    <span className="workspace-nav__item-icon"><Icon size={16} /></span>
+                    <span className="workspace-nav__item-copy">
+                      <span>{item.label}</span>
+                    </span>
+                    {badgeCount ? <span className="workspace-nav__item-count">{badgeCount}</span> : null}
                   </button>
-                  {open && (
-                    <div className="nav-group__items">
-                      {group.items.map(item => {
-                        const Icon = SECTION_ICONS[item.id] || ShieldCheck
-                        const active = item.id === resolvedSectionId
-                        const badgeCount = counts[item.id]
-                        // Severity-weight the Findings count so the sidebar reads as a heatmap.
-                        let countTone = ''
-                        if (item.id === 'findings') {
-                          const sev = results.severity_summary || {}
-                          if (sev.critical) countTone = ' is-critical'
-                          else if (sev.high) countTone = ' is-high'
-                          else if (sev.medium) countTone = ' is-medium'
-                        }
-                        const label = SECTION_LABEL_OVERRIDES[item.id] || item.label
-                        return (
-                          <button
-                            key={item.id}
-                            type="button"
-                            className={`workspace-nav__item${active ? ' is-active' : ''}`}
-                            onClick={() => navigate(`/scans/${scanId}/${item.id}`)}
-                          >
-                            <span className="workspace-nav__item-icon"><Icon size={16} /></span>
-                            <span className="workspace-nav__item-copy">
-                              <span>{label}</span>
-                            </span>
-                            {badgeCount ? <span className={`workspace-nav__item-count${countTone}`}>{badgeCount}</span> : null}
-                          </button>
-                        )
-                      })}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
+                )
+              })}
+            </div>
           </nav>
 
           <div className="workspace-sidebar__footer">Beetle v3.3 · Security Analysis</div>

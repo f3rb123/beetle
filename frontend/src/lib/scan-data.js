@@ -104,13 +104,11 @@ export const deriveSeveritySummary = (findings = []) => {
 }
 
 export const SEVERITY_META = {
-  // Critical dominates (dark maroon); High is unmistakably a different red;
-  // Low uses a deep teal-green so it never reads as brand/"good".
-  critical: { label: 'Critical', text: '#7F1D1D', bg: '#fdeaea', border: '#f3b4b4', accent: '#7F1D1D' },
-  high: { label: 'High', text: '#DC2626', bg: '#fde9e9', border: '#f7a8a8', accent: '#DC2626' },
-  medium: { label: 'Medium', text: '#B45309', bg: '#FEF3C7', border: '#f8d77b', accent: '#F59E0B' },
-  low: { label: 'Low', text: '#047857', bg: '#DCFCE7', border: '#a7e6c4', accent: '#10B981' },
-  info: { label: 'Info', text: '#1D4ED8', bg: '#DBEAFE', border: '#a8c7fb', accent: '#3B82F6' },
+  critical: { label: 'Critical', text: '#7F1D1D', bg: '#FEE2E2', border: '#FECACA', accent: '#7F1D1D' },
+  high: { label: 'High', text: '#DC2626', bg: '#FEE2E2', border: '#FECACA', accent: '#DC2626' },
+  medium: { label: 'Medium', text: '#F59E0B', bg: '#FEF3C7', border: '#FDE68A', accent: '#F59E0B' },
+  low: { label: 'Low', text: '#10B981', bg: '#DCFCE7', border: '#BBF7D0', accent: '#10B981' },
+  info: { label: 'Info', text: '#3B82F6', bg: '#DBEAFE', border: '#BFDBFE', accent: '#3B82F6' },
 }
 
 export const GRADE_META = {
