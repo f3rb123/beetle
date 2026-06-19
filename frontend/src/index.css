@@ -7070,3 +7070,158 @@ a:focus-visible {
   cursor: pointer;
 }
 .components-filter-toggle input { accent-color: var(--brand); cursor: pointer; }
+
+/* ════════════════════════════════════════════════════════════════════════
+   AUTHENTICATED HOME — analyst workspace reusing the login visual language
+   (dark bg + glow + grid, glass card). No marketing surfaces.
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* Reuse .login-page background/glow/grid; switch to a scrollable top-aligned column */
+.login-page--workspace {
+  align-items: stretch;
+  justify-content: flex-start;
+  overflow-y: auto;
+}
+
+.ws-home {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 920px;
+  margin: 0 auto;
+  min-height: 100vh;
+  padding: 26px 24px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.ws-home__main { display: flex; flex-direction: column; gap: 24px; flex: 1; }
+
+/* Centered brand header (reuses login-card logo/title/sub typography) */
+.ws-brand {
+  width: 100%; max-width: 560px; margin: 0 auto;
+  display: flex; flex-direction: column; align-items: center; text-align: center;
+  gap: 4px; padding-top: 6px;
+}
+.ws-brand .login-card__logo { width: 84px; height: 84px; margin-bottom: 6px; }
+.ws-brand .login-card__title { margin: 0; }
+.ws-brand .login-card__sub { margin: 0; }
+.ws-brand__actions { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+
+/* Centered footer matching the card width */
+.ws-foot {
+  width: 100%; max-width: 560px; margin: 0 auto; margin-top: auto;
+  padding: 16px 2px 6px; display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 0.8rem; color: #6e7b8a;
+}
+.ws-foot__links { display: flex; gap: 14px; }
+.ws-foot a { color: #8190a0; transition: color 0.15s; }
+.ws-foot a:hover { color: #34e2b0; }
+
+.ws-util-btn {
+  padding: 7px 13px; border-radius: 9px; cursor: pointer;
+  font: 600 12.5px/1 Inter, system-ui, sans-serif;
+  color: #c6d0db; background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.ws-util-btn:hover { color: #f1f5f9; border-color: rgba(0, 200, 150, 0.40); background: rgba(0, 200, 150, 0.06); }
+.ws-util-btn--user { color: #9fb0c0; }
+
+/* Upload card — login-card glass treatment; workflow markup unchanged */
+.upload-card--ws {
+  position: relative; z-index: 1;
+  width: 100%; max-width: 560px; margin: 0 auto;
+  display: flex; flex-direction: column; gap: 18px;
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  border: 1px solid rgba(0, 200, 150, 0.18);
+  border-radius: 20px;
+  padding: 26px 28px 22px;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.4),
+    0 32px 80px rgba(0, 0, 0, 0.5),
+    0 0 60px rgba(0, 200, 150, 0.06);
+}
+.upload-card--ws.is-dragging {
+  border-color: rgba(0, 200, 150, 0.55);
+  box-shadow: 0 0 0 1px rgba(0, 200, 150, 0.30), 0 0 60px rgba(0, 200, 150, 0.15);
+}
+.upload-card--ws .upload-card__header { display: flex; align-items: center; gap: 12px; }
+.upload-card--ws .upload-card__icon {
+  display: flex; align-items: center; justify-content: center;
+  width: 42px; height: 42px; border-radius: 12px;
+  background: rgba(0, 200, 150, 0.12); color: #34e2b0;
+  border: 1px solid rgba(0, 200, 150, 0.20);
+}
+.upload-card--ws .upload-card__title { font-size: 1rem; font-weight: 700; color: #f1f5f9; }
+.upload-card--ws .upload-card__copy { font-size: 0.82rem; color: #8190a0; }
+.upload-card--ws .upload-zone {
+  width: 100%; display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 26px 20px; border-radius: 14px; cursor: pointer;
+  border: 1.5px dashed rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.03);
+  transition: border-color 0.15s, background 0.15s;
+}
+.upload-card--ws .upload-zone:hover,
+.upload-card--ws.is-dragging .upload-zone { border-color: rgba(0, 200, 150, 0.50); background: rgba(0, 200, 150, 0.05); }
+.upload-card--ws .upload-zone__title { font-size: 0.95rem; font-weight: 600; color: #e2e8f0; word-break: break-all; text-align: center; }
+.upload-card--ws .upload-zone__copy { font-size: 0.8rem; color: #6e7b8a; text-align: center; }
+.upload-card--ws .scan-orbit__icon { color: #34e2b0; }
+.upload-card--ws .button--secondary {
+  background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12); color: #e2e8f0;
+}
+.upload-card--ws .button--secondary:hover { border-color: rgba(0, 200, 150, 0.40); color: #fff; }
+.upload-card--ws .button-row { display: flex; }
+.upload-card--ws .button-row > .button {
+  width: 100%; justify-content: center; font-weight: 700; color: #0a0f1a; border: none;
+  background: linear-gradient(135deg, #00c896 0%, #00a87e 100%);
+  box-shadow: 0 4px 20px rgba(0, 200, 150, 0.30), 0 1px 0 rgba(255, 255, 255, 0.15) inset;
+}
+.upload-card--ws .button-row > .button:disabled { opacity: 0.4; box-shadow: none; cursor: default; }
+.upload-card--ws .scan-progress { display: flex; flex-direction: column; gap: 12px; }
+.upload-card--ws .scan-progress__title { color: #e2e8f0; font-weight: 600; display: flex; align-items: center; }
+.upload-card--ws .scan-progress__copy { color: #8190a0; font-size: 0.8rem; }
+.upload-card--ws .scan-progress__percent { color: #34e2b0; font-weight: 700; font-variant-numeric: tabular-nums; }
+.upload-card--ws .scan-progress__bar { height: 6px; background: rgba(255, 255, 255, 0.08); border-radius: 999px; overflow: hidden; }
+.upload-card--ws .scan-progress__fill { height: 100%; background: linear-gradient(90deg, #00c896, #34e2b0); }
+.upload-card--ws .scan-progress__steps { display: flex; flex-wrap: wrap; gap: 6px; }
+.upload-card--ws .scan-progress__step { font-size: 0.72rem; color: #6e7b8a; padding: 3px 9px; border-radius: 999px; background: rgba(255, 255, 255, 0.04); }
+.upload-card--ws .scan-progress__step.is-active { color: #0a0f1a; background: #34e2b0; font-weight: 600; }
+.upload-card--ws .scan-live-badge { margin-left: 8px; font-size: 0.62rem; font-weight: 700; color: #0a0f1a; background: #34e2b0; padding: 1px 6px; border-radius: 4px; }
+.upload-card--ws .upload-helper { font-size: 0.74rem; color: #6e7b8a; }
+.upload-card--ws .error-callout { color: #fca5a5; background: rgba(239, 68, 68, 0.10); border: 1px solid rgba(239, 68, 68, 0.25); border-radius: 8px; padding: 9px 13px; font-size: 0.82rem; }
+
+/* Recent scans — compact dark list */
+.ws-recent { width: 100%; max-width: 560px; margin: 0 auto; }
+.ws-recent__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; padding: 0 4px; }
+.ws-recent__title { display: inline-flex; align-items: center; gap: 7px; font: 600 12px/1 Inter, system-ui, sans-serif; letter-spacing: 0.06em; text-transform: uppercase; color: #8190a0; }
+.ws-recent__count { font: 600 11px/1 Inter, system-ui, sans-serif; color: #6e7b8a; background: rgba(255, 255, 255, 0.06); padding: 3px 9px; border-radius: 999px; }
+.ws-recent__list { display: flex; flex-direction: column; gap: 6px; }
+.ws-scan-row {
+  display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+  border-radius: 12px; cursor: pointer;
+  background: rgba(15, 23, 42, 0.60);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  transition: border-color 0.14s, background 0.14s;
+}
+.ws-scan-row:hover { border-color: rgba(0, 200, 150, 0.35); background: rgba(15, 23, 42, 0.88); }
+.ws-scan-row__avatar { flex: none; width: 34px; height: 34px; border-radius: 9px; overflow: hidden; display: flex; align-items: center; justify-content: center; background: rgba(255, 255, 255, 0.06); color: #c6d0db; font-weight: 700; font-size: 0.9rem; }
+.ws-scan-row__avatar img { width: 100%; height: 100%; object-fit: cover; }
+.ws-scan-row__id { flex: 1; min-width: 0; }
+.ws-scan-row__name { font: 600 13.5px/1.3 Inter, system-ui, sans-serif; color: #e8edf3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ws-scan-row__pkg { font: 450 11.5px/1.4 'JetBrains Mono', 'Fira Code', ui-monospace, monospace; color: #6e7b8a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ws-scan-row__platform { flex: none; font: 700 10px/1 Inter, system-ui, sans-serif; color: #9fb0c0; background: rgba(255, 255, 255, 0.06); padding: 3px 7px; border-radius: 6px; }
+.ws-scan-row__grade { flex: none; font: 600 12px/1 Inter, system-ui, sans-serif; font-variant-numeric: tabular-nums; color: #c6d0db; min-width: 54px; text-align: right; }
+.ws-scan-row__time { flex: none; font: 500 11.5px/1 Inter, system-ui, sans-serif; color: #6e7b8a; min-width: 64px; text-align: right; }
+.ws-scan-row__delete { flex: none; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 8px; background: transparent; color: #5a6675; cursor: pointer; opacity: 0; transition: opacity 0.14s, color 0.14s, background 0.14s; }
+.ws-scan-row:hover .ws-scan-row__delete, .ws-scan-row:focus-within .ws-scan-row__delete { opacity: 1; }
+.ws-scan-row__delete:hover { color: #fca5a5; background: rgba(239, 68, 68, 0.12); }
+.ws-recent__empty { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 20px; border-radius: 12px; border: 1px dashed rgba(255, 255, 255, 0.10); color: #6e7b8a; font-size: 0.85rem; }
+
+@media (max-width: 560px) {
+  .ws-scan-row__grade, .ws-scan-row__time { display: none; }
+}

@@ -2,21 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   ArrowRight,
-  CheckCircle2,
   Clock3,
   FileScan,
   SearchCode,
-  ShieldCheck,
-  Sparkles,
   Trash2,
   UploadCloud,
 } from 'lucide-react'
-import BrandLogo from '../components/BrandLogo.jsx'
-import Footer from '../components/Footer.jsx'
 import SeverityBadge from '../components/SeverityBadge.jsx'
+import beetleIcon from '../assets/beetle-icon.png'
 import {
   DEFAULT_STAGE,
-  formatTimestamp,
   getPlatformCode,
   getPlatformLabel,
   getStageMeta,
@@ -67,41 +62,12 @@ async function readSSEStream(response, onEvent) {
   }
 }
 
-const FEATURE_CARDS = [
-  {
-    title: 'Evidence-linked findings',
-    copy: 'Jump from findings into the exact file and line context that triggered the detection.',
-  },
-  {
-    title: 'OWASP MASVS aligned',
-    copy: 'Review the package through mobile security standards without losing engineering detail.',
-  },
-  {
-    title: 'Quick or detailed review',
-    copy: 'Move from executive triage to deep technical evidence without changing tools.',
-  },
-  {
-    title: 'APK and IPA ready',
-    copy: 'Use one workspace for Android and iOS package analysis with consistent reporting.',
-  },
-]
-
-function HistoryBadge({ entry }) {
-  const score = entry.score ? `${entry.grade || '—'} · ${entry.score}` : entry.grade || '—'
-  const critical = entry.ss?.critical || 0
-  const high = entry.ss?.high || 0
-
-  let severity = 'low'
-  if (critical > 0) severity = 'critical'
-  else if (high > 0) severity = 'high'
-  else if ((entry.ss?.medium || 0) > 0) severity = 'medium'
-
-  return (
-    <div className="history-card__meta">
-      <span className="history-chip">{score}</span>
-      <SeverityBadge severity={severity} compact />
-    </div>
-  )
+function rowSeverity(entry) {
+  if ((entry.ss?.critical || 0) > 0) return 'critical'
+  if ((entry.ss?.high || 0) > 0) return 'high'
+  if ((entry.ss?.medium || 0) > 0) return 'medium'
+  if ((entry.ss?.low || 0) > 0) return 'low'
+  return 'info'
 }
 
 export default function Home() {
@@ -377,242 +343,205 @@ export default function Home() {
     : 'Drop a package here or browse from disk'
 
   return (
-    <div className="landing-page">
-      <div className="landing-bg landing-bg--top" />
-      <div className="landing-bg landing-bg--bottom" />
-      <div className="landing-grid-overlay" />
+    <div className="login-page login-page--workspace">
+      <div className="login-page__grid" aria-hidden="true" />
 
-      <div className="landing-shell">
-        <header className="landing-header">
-          <BrandLogo animated={loading} />
-          <div className="landing-header__trust">
-            {getToken() && (
-              <button
-                type="button"
-                className="trust-pill trust-pill--btn"
-                onClick={() => { clearAuth(); window.location.reload() }}
-                title={`Signed in as ${getUser()?.username ?? '?'} · Click to sign out`}
-              >
-                {getUser()?.username ?? 'Sign out'}
+      <div className="ws-home">
+        <main className="ws-home__main">
+          {/* Centered brand header + controls, aligned to the card width */}
+          <header className="ws-brand">
+            <img src={beetleIcon} alt="Beetle" className="login-card__logo" />
+            <h1 className="login-card__title">Beetle</h1>
+            <p className="login-card__sub">Mobile Static Security Workspace</p>
+            <nav className="ws-brand__actions">
+              {isAdmin() && (
+                <>
+                  <button
+                    type="button"
+                    className="ws-util-btn"
+                    onClick={() => navigate('/settings/webhooks')}
+                    title="Manage webhook notifications"
+                  >
+                    Webhooks
+                  </button>
+                  <button
+                    type="button"
+                    className="ws-util-btn"
+                    onClick={() => navigate('/settings/rules')}
+                    title="Custom SAST rules"
+                  >
+                    SAST Rules
+                  </button>
+                </>
+              )}
+              {getToken() && (
+                <button
+                  type="button"
+                  className="ws-util-btn ws-util-btn--user"
+                  onClick={() => { clearAuth(); window.location.reload() }}
+                  title={`Signed in as ${getUser()?.username ?? '?'} · Click to sign out`}
+                >
+                  {getUser()?.username ?? 'Sign out'}
+                </button>
+              )}
+            </nav>
+          </header>
+
+          {/* Upload card — login card visual language; workflow unchanged */}
+          <div
+            ref={uploadCardRef}
+            className={`upload-card upload-card--ws${dragging ? ' is-dragging' : ''}${loading ? ' is-loading' : ''}`}
+            onDragOver={event => {
+              event.preventDefault()
+              setDragging(true)
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={event => {
+              event.preventDefault()
+              setDragging(false)
+              pickFile(event.dataTransfer.files?.[0])
+            }}
+          >
+            <div className="upload-card__header">
+              <div className="upload-card__icon">
+                <UploadCloud size={22} />
+              </div>
+              <div>
+                <div className="upload-card__title">Upload package</div>
+                <div className="upload-card__copy">Drag and drop an APK or IPA to start a new scan.</div>
+              </div>
+            </div>
+
+            <button type="button" className="upload-zone" onClick={() => inputRef.current?.click()}>
+              <div className={`scan-orbit${loading ? ' is-active' : ''}`}>
+                <div className="scan-orbit__icon">
+                  <SearchCode size={26} />
+                </div>
+              </div>
+              <div className="upload-zone__title">{file ? file.name : 'Drop your package here'}</div>
+              <div className="upload-zone__copy">{selectedFileMeta}</div>
+              <span className="button button--secondary button--small">
+                Browse files
+                <ArrowRight size={14} />
+              </span>
+            </button>
+
+            <input ref={inputRef} type="file" accept=".apk,.ipa" hidden onChange={event => pickFile(event.target.files?.[0])} />
+
+            {loading ? (
+              <div className="scan-progress">
+                <div className="scan-progress__top">
+                  <div>
+                    <div className="scan-progress__title">
+                      Scanning in progress
+                      {streaming && <span className="scan-live-badge">LIVE</span>}
+                    </div>
+                    <div className="scan-progress__copy">{statusMessage}</div>
+                  </div>
+                  <div className="scan-progress__percent">{Math.round(progress)}%</div>
+                </div>
+
+                <div className="scan-progress__bar">
+                  <div className="scan-progress__fill" style={{ width: `${progress}%` }} />
+                </div>
+
+                <div className="scan-progress__steps">
+                  {[DEFAULT_STAGE, ...['preparing', 'decompiling', 'analyzing', 'finalizing'].map(getStageMeta)].map(stage => {
+                    const activeIndex = ['queued', 'preparing', 'decompiling', 'analyzing', 'finalizing', 'completed'].indexOf(activeStage)
+                    const currentIndex = ['queued', 'preparing', 'decompiling', 'analyzing', 'finalizing', 'completed'].indexOf(stage.id)
+                    return (
+                      <div key={stage.id} className={`scan-progress__step${currentIndex <= activeIndex ? ' is-active' : ''}`}>
+                        {stage.label}
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {activeScanId ? <div className="upload-helper">Scan ID {activeScanId.slice(0, 8)}</div> : null}
+              </div>
+            ) : null}
+
+            {error ? <div className="error-callout">{error}</div> : null}
+
+            <div className="button-row">
+              <button type="button" className="button" disabled={!file || loading} onClick={startScan}>
+                {loading ? 'Scanning…' : 'Start scan'}
               </button>
-            )}
-            {isAdmin() && (
-              <>
-                <button
-                  type="button"
-                  className="trust-pill trust-pill--btn"
-                  onClick={() => navigate('/settings/webhooks')}
-                  title="Manage webhook notifications"
-                >
-                  Webhooks
-                </button>
-                <button
-                  type="button"
-                  className="trust-pill trust-pill--btn"
-                  onClick={() => navigate('/settings/rules')}
-                  title="Custom SAST rules"
-                >
-                  SAST Rules
-                </button>
-              </>
-            )}
-            <span className="trust-pill"><ShieldCheck size={14} /> OWASP MASVS aligned</span>
-            <span className="trust-pill"><Sparkles size={14} /> Clean evidence-first workflow</span>
+            </div>
           </div>
-        </header>
 
-        <main className="landing-main">
-          <section className="hero-panel">
-            <div className="eyebrow">Mobile Static Security Workspace</div>
-            <h2>Analyze. Detect. Secure.</h2>
-            <h1>
-              See the app the
-              {' '}
-              <span>way a hacker does.</span>
-            </h1>
-            <p>
-              Beetle turns mobile package analysis into a readable, white-based security workspace with linked evidence,
-              structured findings, and a cleaner path from triage to remediation.
-            </p>
-
-            <div className="feature-grid">
-              {FEATURE_CARDS.map(card => (
-                <button
-                  key={card.title}
-                  type="button"
-                  className="feature-card"
-                  onClick={() => uploadCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
-                >
-                  <div className="feature-card__icon">
-                    <CheckCircle2 size={18} />
-                  </div>
-                  <div className="feature-card__title">{card.title}</div>
-                  <div className="feature-card__copy">{card.copy}</div>
-                </button>
-              ))}
+          {/* Recent scans — compact analyst list */}
+          <section className="ws-recent">
+            <div className="ws-recent__head">
+              <span className="ws-recent__title"><Clock3 size={14} /> Recent scans</span>
+              {history.length ? <span className="ws-recent__count">{history.length}</span> : null}
             </div>
-          </section>
 
-          <section className="landing-side">
-            <div
-              ref={uploadCardRef}
-              className={`upload-card${dragging ? ' is-dragging' : ''}${loading ? ' is-loading' : ''}`}
-              onDragOver={event => {
-                event.preventDefault()
-                setDragging(true)
-              }}
-              onDragLeave={() => setDragging(false)}
-              onDrop={event => {
-                event.preventDefault()
-                setDragging(false)
-                pickFile(event.dataTransfer.files?.[0])
-              }}
-            >
-              <div className="upload-card__header">
-                <div className="upload-card__icon">
-                  <UploadCloud size={22} />
-                </div>
-                <div>
-                  <div className="upload-card__title">Upload package</div>
-                  <div className="upload-card__copy">Drag and drop an APK or IPA to start a new scan.</div>
-                </div>
-              </div>
+            <div className="ws-recent__list">
+              {history.length ? history.slice(0, 8).map((rawEntry, index) => {
+                const appName = rawEntry.app_name || rawEntry.filename || 'Untitled scan'
+                const packageId = rawEntry.pkg || rawEntry.package || rawEntry.app_info?.package || rawEntry.app_info?.bundle_id || rawEntry.filename || ''
+                const timestamp = rawEntry.scan_time || rawEntry.created_at || rawEntry.updated_at
+                const grade = rawEntry.grade || rawEntry.score?.grade || ''
+                const scoreVal = rawEntry.score?.score ?? (typeof rawEntry.score === 'number' ? rawEntry.score : null)
+                const gradeText = scoreVal != null ? `${grade || '—'} · ${scoreVal}` : (grade || '—')
 
-              <button type="button" className="upload-zone" onClick={() => inputRef.current?.click()}>
-                <div className={`scan-orbit${loading ? ' is-active' : ''}`}>
-                  <div className="scan-orbit__icon">
-                    <SearchCode size={26} />
-                  </div>
-                </div>
-                <div className="upload-zone__title">{file ? file.name : 'Drop your package here'}</div>
-                <div className="upload-zone__copy">{selectedFileMeta}</div>
-                <span className="button button--secondary button--small">
-                  Browse files
-                  <ArrowRight size={14} />
-                </span>
-              </button>
-
-              <input ref={inputRef} type="file" accept=".apk,.ipa" hidden onChange={event => pickFile(event.target.files?.[0])} />
-
-              {loading ? (
-                <div className="scan-progress">
-                  <div className="scan-progress__top">
-                    <div>
-                      <div className="scan-progress__title">
-                        Scanning in progress
-                        {streaming && <span className="scan-live-badge">LIVE</span>}
-                      </div>
-                      <div className="scan-progress__copy">{statusMessage}</div>
+                return (
+                  <div
+                    key={rawEntry.scan_id || `${appName}-${index}`}
+                    role="button"
+                    tabIndex={0}
+                    className="ws-scan-row"
+                    onClick={() => handleHistoryClick(rawEntry.scan_id)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        handleHistoryClick(rawEntry.scan_id)
+                      }
+                    }}
+                    title="View scan results"
+                  >
+                    <div className="ws-scan-row__avatar">
+                      {rawEntry.icon_data
+                        ? <img src={rawEntry.icon_data} alt={appName} />
+                        : <span>{appName.charAt(0).toUpperCase()}</span>}
                     </div>
-                    <div className="scan-progress__percent">{Math.round(progress)}%</div>
-                  </div>
-
-                  <div className="scan-progress__bar">
-                    <div className="scan-progress__fill" style={{ width: `${progress}%` }} />
-                  </div>
-
-                  <div className="scan-progress__steps">
-                    {[DEFAULT_STAGE, ...['preparing', 'decompiling', 'analyzing', 'finalizing'].map(getStageMeta)].map(stage => {
-                      const activeIndex = ['queued', 'preparing', 'decompiling', 'analyzing', 'finalizing', 'completed'].indexOf(activeStage)
-                      const currentIndex = ['queued', 'preparing', 'decompiling', 'analyzing', 'finalizing', 'completed'].indexOf(stage.id)
-                      return (
-                        <div key={stage.id} className={`scan-progress__step${currentIndex <= activeIndex ? ' is-active' : ''}`}>
-                          {stage.label}
-                        </div>
-                      )
-                    })}
-                  </div>
-
-                  {activeScanId ? <div className="upload-helper">Scan ID {activeScanId.slice(0, 8)}</div> : null}
-                </div>
-              ) : null}
-
-              {error ? <div className="error-callout">{error}</div> : null}
-
-              <div className="button-row">
-                <button type="button" className="button" disabled={!file || loading} onClick={startScan}>
-                  {loading ? 'Scanning…' : 'Start scan'}
-                </button>
-                <div className="upload-helper">Find it before they do.</div>
-              </div>
-            </div>
-
-            <div className="history-panel">
-              <div className="panel-headline">
-                <div>
-                  <div className="panel-headline__title">Recent scans</div>
-                  <div className="panel-headline__copy">Reopen previous workspaces and continue from where you left off.</div>
-                </div>
-                <Clock3 size={16} />
-              </div>
-
-              <div className="history-list">
-                {history.length ? history.slice(0, 6).map((rawEntry, index) => {
-                  const entry = rawEntry.scan_id ? rawEntry : loadLocalHistory()[index]
-                  const appName = rawEntry.app_name || rawEntry.filename || 'Untitled scan'
-                  const packageId = rawEntry.pkg || rawEntry.package || rawEntry.app_info?.package || rawEntry.app_info?.bundle_id || rawEntry.filename || ''
-                  const timestamp = rawEntry.scan_time || rawEntry.created_at || rawEntry.updated_at
-
-                  return (
-                    <div
-                      key={rawEntry.scan_id || `${appName}-${index}`}
-                      role="button"
-                      tabIndex={0}
-                      className="history-card"
-                      onClick={() => handleHistoryClick(rawEntry.scan_id)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault()
-                          handleHistoryClick(rawEntry.scan_id)
-                        }
-                      }}
-                      title="View scan results"
+                    <div className="ws-scan-row__id">
+                      <div className="ws-scan-row__name">{appName}</div>
+                      <div className="ws-scan-row__pkg">{packageId}</div>
+                    </div>
+                    <span className="ws-scan-row__platform">{getPlatformCode(rawEntry.platform, rawEntry.filename)}</span>
+                    <span className="ws-scan-row__grade">{gradeText}</span>
+                    <SeverityBadge severity={rowSeverity(rawEntry)} compact />
+                    <span className="ws-scan-row__time">{relativeTimestamp(timestamp)}</span>
+                    <button
+                      type="button"
+                      className="ws-scan-row__delete"
+                      title="Delete this scan"
+                      aria-label="Delete this scan"
+                      onClick={(e) => handleDeleteScan(rawEntry.scan_id, e)}
                     >
-                      <button
-                        type="button"
-                        className="history-card__delete"
-                        title="Delete this scan"
-                        aria-label="Delete this scan"
-                        onClick={(e) => handleDeleteScan(rawEntry.scan_id, e)}
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                      <div className="history-card__top">
-                        <div className="history-card__app-info">
-                          <div className="history-card__avatar">
-                            {rawEntry.icon_data
-                              ? <img src={rawEntry.icon_data} alt={appName} />
-                              : <span>{appName.charAt(0).toUpperCase()}</span>
-                            }
-                          </div>
-                          <div>
-                            <div className="history-card__title">{appName}</div>
-                            <div className="history-card__copy">{packageId}</div>
-                          </div>
-                        </div>
-                        <span className="history-card__platform">{getPlatformCode(rawEntry.platform, rawEntry.filename)}</span>
-                      </div>
-
-                      <HistoryBadge entry={rawEntry} />
-
-                      <div className="history-card__bottom">
-                        <span>{relativeTimestamp(timestamp)}</span>
-                        <span>{formatTimestamp(timestamp)}</span>
-                      </div>
-                    </div>
-                  )
-                }) : (
-                  <div className="history-empty">
-                    <FileScan size={18} />
-                    <div>No previous scans yet. Your recent analyses will appear here once the first package finishes.</div>
+                      <Trash2 size={14} />
+                    </button>
                   </div>
-                )}
-              </div>
+                )
+              }) : (
+                <div className="ws-recent__empty">
+                  <FileScan size={18} />
+                  <span>No scans yet. Upload a package to begin.</span>
+                </div>
+              )}
             </div>
           </section>
         </main>
 
-        <Footer />
+        <footer className="ws-foot">
+          <span className="ws-foot__copy">Built by Althaf Noushad (f3rb)</span>
+          <span className="ws-foot__links">
+            <a href="https://www.linkedin.com/in/althaf-noushad-6a096823a" target="_blank" rel="noopener noreferrer">LinkedIn</a>
+            <a href="mailto:ferbhacker@gmail.com">Email</a>
+          </span>
+        </footer>
       </div>
     </div>
   )
