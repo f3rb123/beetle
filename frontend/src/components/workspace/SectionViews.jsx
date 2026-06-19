@@ -690,6 +690,59 @@ function FindingsList({ findings, onOpenCode, emptyTitle = 'No findings found', 
   )
 }
 
+// Phase 4: dense, triage-first table view for findings. Same data as the card
+// view; severity-anchored, sticky header, View Code + triage status inline.
+function FindingsTable({ findings, onOpenCode, decompileInfo, getFindingTriage }) {
+  if (!findings.length) {
+    return <EmptyState title="No findings match this filter" description="Try another severity filter or search phrase." />
+  }
+  return (
+    <div className="table-shell">
+      <table className="data-table findings-table">
+        <thead>
+          <tr>
+            <th>Severity</th>
+            <th>Title</th>
+            <th>Location</th>
+            <th>Category</th>
+            <th>Confidence</th>
+            <th>Status</th>
+            <th>View Code</th>
+          </tr>
+        </thead>
+        <tbody>
+          {findings.map((finding, index) => {
+            const sev = SEVERITY_META[finding.severity] ? finding.severity : 'info'
+            const primary = getEvidenceEntries(finding)[0]
+            const triageState = getFindingTriage ? getFindingTriage(finding) : 'open'
+            const triageMeta = TRIAGE_META[triageState] || TRIAGE_META.open
+            const loc = primary?.path ? `${primary.path}${primary.lines?.[0] ? `:${primary.lines[0]}` : ''}` : '—'
+            return (
+              <tr key={`${finding.title}-${index}`}>
+                <td><span className={`sev-tag sev-tag--${sev}`}>{SEVERITY_META[sev].label}</span></td>
+                <td><span className="ft-title">{finding.title}</span></td>
+                <td><span className="ft-loc" title={loc}>{loc}</span></td>
+                <td>{finding.category || '—'}</td>
+                <td className="num">{finding.confidence != null ? `${finding.confidence}%` : '—'}</td>
+                <td>
+                  <span className={`triage-state-badge triage-state-badge--${triageState}`} style={triageMeta.color ? { '--triage-color': triageMeta.color } : {}}>
+                    {triageMeta.label}
+                  </span>
+                </td>
+                <td>
+                  {primary?.path
+                    ? <FileLinkButton path={primary.path} lines={primary.lines} onOpenCode={onOpenCode} label="View Code" decompileInfo={decompileInfo} />
+                    : <span className="ft-loc">—</span>}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 function DashboardSection({ results, onNavigateSection, onOpenCode, viewMode }) {
   const info = results.app_info || {}
   const score = results.score || {}
@@ -819,8 +872,60 @@ function DashboardSection({ results, onNavigateSection, onOpenCode, viewMode }) 
     cert.expired && { label: 'Cert Expired', tone: 'critical', nav: 'cert' },
   ].filter(Boolean)
 
+  const sevTotal = SEVERITY_ORDER.reduce((sum, s) => sum + (severitySummary[s] || 0), 0)
+
   return (
     <div className="dashboard-stack">
+
+      {/* ── Phase 3: Risk Summary Banner — how bad / where / what now ── */}
+      <div className="risk-banner" style={{ '--grade-color': gradeMeta.color }}>
+        <div className="risk-banner__grade">
+          <div className="risk-banner__grade-letter">{score.grade || '—'}</div>
+          <div>
+            <div className="risk-banner__score">{score.score ?? 0}<small>/100</small></div>
+            <div className="risk-banner__grade-label">{score.grade_label || gradeMeta.label}</div>
+          </div>
+        </div>
+        <div className="risk-banner__sev">
+          <div className="risk-banner__bar" role="img" aria-label="Severity distribution">
+            {SEVERITY_ORDER.map(sev => {
+              const count = severitySummary[sev] || 0
+              if (!count) return null
+              return <span key={sev} style={{ width: `${(count / Math.max(1, sevTotal)) * 100}%`, background: SEVERITY_META[sev].accent }} title={`${count} ${SEVERITY_META[sev].label}`} />
+            })}
+          </div>
+          <div className="risk-banner__counts">
+            {SEVERITY_ORDER.map(sev => {
+              const count = severitySummary[sev] || 0
+              const toneClass = sev === 'critical' ? ' is-critical' : sev === 'high' ? ' is-high' : ''
+              return (
+                <button
+                  key={sev}
+                  type="button"
+                  className={`risk-count${toneClass}${count ? '' : ' is-zero'}`}
+                  onClick={() => onNavigateSection('findings')}
+                >
+                  <span className="risk-count__dot" style={{ background: SEVERITY_META[sev].accent }} />
+                  {SEVERITY_META[sev].label}
+                  <span className="risk-count__n">{count}</span>
+                </button>
+              )
+            })}
+            <button type="button" className="risk-count" onClick={() => onNavigateSection('surface')}>
+              Exported <span className="risk-count__n">{exportedCount}</span>
+            </button>
+            <button type="button" className="risk-count" onClick={() => onNavigateSection('browsable')}>
+              Browsable <span className="risk-count__n">{browsableCount}</span>
+            </button>
+            <button type="button" className="risk-count" onClick={() => onNavigateSection('trackers')}>
+              Trackers <span className="risk-count__n">{trackers.length}</span>
+            </button>
+            <button type="button" className="risk-count" onClick={() => onNavigateSection('secrets')}>
+              Secrets <span className="risk-count__n">{secrets.length}</span>
+            </button>
+          </div>
+        </div>
+      </div>
 
       {/* ── Quick Insight Bar ── */}
       {insightPills.length > 0 && (
@@ -1222,6 +1327,9 @@ function FindingsSection({ results, onOpenCode, viewMode }) {
 
   const scanId = results.scan_id || 'default'
   const { getFindingTriage, getFindingNote, setFindingTriage, triageCount } = useTriage(scanId)
+  // Phase 4: table view is the default triage surface; cards stay for deep review.
+  const [layout, setLayout] = useState(() => window.localStorage.getItem('beetle-findings-layout') || 'table')
+  useEffect(() => { window.localStorage.setItem('beetle-findings-layout', layout) }, [layout])
 
   const allFindings = results.findings || []
   const workingSet = viewMode === 'quick' ? allFindings.filter(isQuickFinding) : allFindings
@@ -1310,16 +1418,30 @@ function FindingsSection({ results, onOpenCode, viewMode }) {
         </div>
       </Panel>
 
-      <FindingsList
-        findings={filtered}
-        onOpenCode={onOpenCode}
-        decompileInfo={results.decompile_info}
-        getFindingTriage={getFindingTriage}
-        getFindingNote={getFindingNote}
-        setFindingTriage={setFindingTriage}
-        emptyTitle="No findings match this filter"
-        emptyDescription="Try another severity filter or search phrase."
-      />
+      <div className="findings-viewtoggle" style={{ marginBottom: 12 }}>
+        <button type="button" className={layout === 'table' ? 'is-active' : ''} onClick={() => setLayout('table')}>Table</button>
+        <button type="button" className={layout === 'card' ? 'is-active' : ''} onClick={() => setLayout('card')}>Cards</button>
+      </div>
+
+      {layout === 'table' ? (
+        <FindingsTable
+          findings={filtered}
+          onOpenCode={onOpenCode}
+          decompileInfo={results.decompile_info}
+          getFindingTriage={getFindingTriage}
+        />
+      ) : (
+        <FindingsList
+          findings={filtered}
+          onOpenCode={onOpenCode}
+          decompileInfo={results.decompile_info}
+          getFindingTriage={getFindingTriage}
+          getFindingNote={getFindingNote}
+          setFindingTriage={setFindingTriage}
+          emptyTitle="No findings match this filter"
+          emptyDescription="Try another severity filter or search phrase."
+        />
+      )}
     </div>
   )
 }
@@ -2249,6 +2371,8 @@ function SurfaceSection({ results }) {
   const toggle = key => setOpenItems(prev => ({ ...prev, [key]: !prev[key] }))
   const exportedCount = items.filter(i => i.exported).length
   const browsableCount = items.filter(i => i.browsable).length
+  // Permissionless = exported with no guarding permission — the highest-risk subset.
+  const permissionlessCount = items.filter(i => i.exported && !i.permission).length
 
   return (
     <div className="stack">
@@ -2268,9 +2392,10 @@ function SurfaceSection({ results }) {
       {items.length ? (
         <>
           <div className="metric-grid">
-            <StatCard label="Total" value={items.length} helper={`${activeType} registered in manifest.`} accent="#00C896" />
             {exportedCount > 0 && <StatCard label="Exported" value={exportedCount} helper="Reachable from outside the app." accent="#DC2626" />}
-            {browsableCount > 0 && <StatCard label="Browsable" value={browsableCount} helper="Can be triggered via deep link." accent="#3B82F6" />}
+            {permissionlessCount > 0 && <StatCard label="Permissionless" value={permissionlessCount} helper="Exported with no guarding permission — highest risk." accent="#7F1D1D" />}
+            {browsableCount > 0 && <StatCard label="Browsable" value={browsableCount} helper="Can be triggered via deep link." accent="#F59E0B" />}
+            <StatCard label="Total" value={items.length} helper={`${activeType} registered in manifest.`} accent="#6e7b8a" />
           </div>
           <Panel title={`${activeType.charAt(0).toUpperCase() + activeType.slice(1)} (${items.length})`} subtitle="Exported + browsable components are sorted first — these are your primary attack surface.">
             <div className="surface-list">
@@ -2479,11 +2604,21 @@ function BinarySection({ results }) {
           <tbody>
             {binaries.map(item => (
               <tr key={item.name}>
-                <td>{item.name}</td>
+                <td className="mono">{item.name}</td>
                 {checks.map(check => {
                   const value = item[check]
                   const ok = value === true || value === 'full' || value === 'partial'
-                  return <td key={check}>{ok ? 'Yes' : 'No'}{typeof value === 'string' && !['true', 'false'].includes(value) ? ` (${value})` : ''}</td>
+                  // "stripped" inverts: a stripped binary is the hardened/desirable state.
+                  const pass = check === 'stripped' ? ok : ok
+                  const note = typeof value === 'string' && !['true', 'false'].includes(value) ? value : ''
+                  return (
+                    <td key={check}>
+                      <span className={`checksec-pill checksec-pill--${pass ? 'pass' : 'fail'}`}>
+                        {pass ? 'Yes' : 'No'}
+                        {note ? <span className="checksec-pill__note">({note})</span> : null}
+                      </span>
+                    </td>
+                  )
                 })}
               </tr>
             ))}

@@ -1,47 +1,83 @@
 :root {
   color-scheme: light;
   font-family: Inter, 'SF Pro Display', 'Segoe UI', sans-serif;
-  --bg-main: #ffffff;
-  --bg-soft: #f8fafc;
-  --bg-muted: #f1f5f9;
+
+  /* ── Neutral foundation (Phase 1) — opaque surfaces, visible edges ── */
+  --bg-app: #f6f8fa;
+  --bg-main: #f6f8fa;
+  --bg-soft: #f9fafb;
+  --bg-muted: #eef1f4;
   --bg-strong: #e2e8f0;
-  --surface: rgba(255, 255, 255, 0.94);
-  --surface-soft: rgba(248, 250, 252, 0.92);
+  --bg-sunken: #eef1f4;
+  --bg: #f6f8fa;
+  --surface: #ffffff;
+  --surface-2: #f9fafb;
+  --surface-soft: #f9fafb;
   --surface-strong: #ffffff;
-  --panel-border: rgba(15, 23, 42, 0.08);
-  --panel-border-strong: rgba(15, 23, 42, 0.12);
-  --text-main: #0f172a;
-  --text-secondary: #475569;
-  --text-muted: #6b7280;
-  --accent: #00c896;
-  --text: #0f172a;
-  --text-primary: #0f172a;
-  --border: rgba(15, 23, 42, 0.12);
-  --bg: #f8fafc;
-  --brand-1: #00c896;
+  --panel-border: #d8dee4;
+  --panel-border-strong: #c2cad3;
+  --border: #d8dee4;
+  --border-strong: #c2cad3;
+
+  /* ── Text ── */
+  --text-1: #0b1220;
+  --text-2: #4a5663;
+  --text-3: #6e7b8a;
+  --text-main: #0b1220;
+  --text: #0b1220;
+  --text-primary: #0b1220;
+  --text-secondary: #4a5663;
+  --text-muted: #6e7b8a;
+
+  /* ── Brand demoted to a thin interactive accent (Phase 1) ── */
+  --accent: #0c8f6e;
+  --accent-weak: rgba(12, 143, 110, 0.10);
+  --focus-ring: #1f6feb;
+  --brand-1: #0c8f6e;
   --brand-2: #0a3f34;
-  --brand-1-soft: rgba(0, 200, 150, 0.14);
-  --brand-2-soft: rgba(10, 63, 52, 0.12);
+  --brand-1-soft: rgba(12, 143, 110, 0.12);
+  --brand-2-soft: rgba(10, 63, 52, 0.10);
+
+  /* ── Severity — the only saturated colors that fill area ── */
   --critical: #7f1d1d;
   --high: #dc2626;
   --medium: #f59e0b;
   --low: #10b981;
   --info: #3b82f6;
-  --shadow-soft: 0 18px 48px rgba(15, 23, 42, 0.08);
-  --shadow-medium: 0 24px 60px rgba(15, 23, 42, 0.1);
-  --shadow-large: 0 40px 90px rgba(15, 23, 42, 0.12);
-  --radius-lg: 16px;
-  --radius-xl: 20px;
-  --radius-2xl: 28px;
-  --gradient-brand: linear-gradient(135deg, #00c896 0%, #0a3f34 100%);
-  --gradient-brand-soft: linear-gradient(135deg, rgba(0, 200, 150, 0.12) 0%, rgba(10, 63, 52, 0.08) 100%);
-  --gradient-hero: linear-gradient(135deg, rgba(0, 200, 150, 0.16) 0%, rgba(10, 63, 52, 0.1) 100%);
+  --sev-crit: #7f1d1d; --sev-crit-bg: #fdeaea; --sev-crit-bd: #f3b4b4; --sev-crit-solid: #7f1d1d;
+  --sev-high: #dc2626; --sev-high-bg: #fde9e9; --sev-high-bd: #f7a8a8; --sev-high-solid: #dc2626;
+  --sev-med:  #b45309; --sev-med-bg:  #fef3c7; --sev-med-bd:  #f8d77b; --sev-med-solid:  #f59e0b;
+  --sev-low:  #047857; --sev-low-bg:  #dcfce7; --sev-low-bd:  #a7e6c4; --sev-low-solid:  #10b981;
+  --sev-info: #1d4ed8; --sev-info-bg: #dbeafe; --sev-info-bd: #a8c7fb; --sev-info-solid: #3b82f6;
+
+  /* ── Dark neutral sidebar (Phase 2) ── */
+  --side-bg: #0d1623;
+  --side-surface: #16202e;
+  --side-border: rgba(255, 255, 255, 0.07);
+  --side-text: #c6d0db;
+  --side-text-dim: #8190a0;
+  --side-active: rgba(12, 143, 110, 0.18);
+
+  --shadow-soft: 0 1px 2px rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.05);
+  --shadow-medium: 0 12px 32px rgba(15, 23, 42, 0.08);
+  --shadow-large: 0 24px 60px rgba(15, 23, 42, 0.10);
+  --radius-lg: 12px;
+  --radius-xl: 14px;
+  --radius-2xl: 16px;
+
+  --gradient-brand: linear-gradient(135deg, #0c8f6e 0%, #0a3f34 100%);
+  --gradient-brand-soft: linear-gradient(135deg, rgba(12, 143, 110, 0.10) 0%, rgba(10, 63, 52, 0.06) 100%);
+  --gradient-hero: linear-gradient(180deg, #ffffff 0%, #f9fafb 100%);
   --code-bg: #0d1117;
   --code-panel: #111827;
-  --code-border: rgba(0, 200, 150, 0.25);
+  --code-border: rgba(255, 255, 255, 0.10);
   --code-line: rgba(255, 255, 255, 0.08);
   --code-text: #e5e7eb;
   --code-muted: #94a3b8;
+
+  /* ── Typography scale (Phase 1) ── */
+  --font-sans: Inter, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
 }
 
 html {
@@ -7070,3 +7106,213 @@ a:focus-visible {
   cursor: pointer;
 }
 .components-filter-toggle input { accent-color: var(--brand); cursor: pointer; }
+
+/* ════════════════════════════════════════════════════════════════════════
+   REDESIGN OVERHAUL (Phases 2-7) — appended so it overrides earlier rules
+   by cascade order. No earlier rule is deleted; all selectors are reused.
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* Phase 1/2: kill decorative green, opaque cards with real edges */
+.workspace-hero,
+.workspace-main {
+  background: var(--bg-app) !important;
+}
+.panel,
+.dashboard-card,
+.mini-surface {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+}
+.panel:hover { border-color: var(--border-strong); }
+
+/* Phase 2: dark neutral sidebar, grouped + collapsible */
+.workspace-sidebar {
+  background: var(--side-bg) !important;
+  border-radius: var(--radius-lg);
+  padding: 16px 12px;
+  color: var(--side-text);
+  box-shadow: none;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+.workspace-sidebar__footer { color: var(--side-text-dim); }
+
+.nav-group { margin-bottom: 4px; background: transparent; border: 0; padding: 0; }
+.nav-group__header {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%; padding: 8px 10px; cursor: pointer;
+  background: transparent; border: 0; border-radius: 8px;
+  color: var(--side-text-dim);
+  font: 600 11px/16px var(--font-sans);
+  letter-spacing: 0.06em; text-transform: uppercase;
+}
+.nav-group__header:hover { color: var(--side-text); background: rgba(255, 255, 255, 0.04); }
+.nav-group__chev { transition: transform 160ms ease; opacity: 0.7; }
+.nav-group__chev.is-open { transform: rotate(180deg); }
+.nav-group__items { display: flex; flex-direction: column; gap: 2px; padding: 2px 0 6px; }
+
+.workspace-nav__item {
+  align-items: center;
+  width: 100%;
+  padding: 7px 10px;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 8px;
+  color: var(--side-text) !important;
+  text-align: left;
+  transition: background 140ms ease, color 140ms ease;
+}
+.workspace-nav__item:hover {
+  transform: none !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+}
+.workspace-nav__item.is-active {
+  transform: none !important;
+  background: var(--side-active) !important;
+  color: #fff !important;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.workspace-nav__item-icon { color: var(--side-text-dim); display: inline-flex; }
+.workspace-nav__item.is-active .workspace-nav__item-icon { color: var(--accent); }
+.workspace-nav__item-count {
+  margin-left: auto;
+  min-width: 22px; padding: 1px 7px;
+  border-radius: 999px;
+  font: 600 11px/16px var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  background: rgba(255, 255, 255, 0.10);
+  color: var(--side-text);
+  border: 0;
+}
+.workspace-nav__item-count.is-critical { background: var(--sev-crit-solid); color: #fff; }
+.workspace-nav__item-count.is-high     { background: var(--sev-high-solid); color: #fff; }
+.workspace-nav__item-count.is-medium   { background: var(--sev-med-solid); color: #3a2400; }
+.workspace-nav__item-count.is-low      { background: var(--sev-low-solid); color: #04331f; }
+
+/* Phase 3: Risk Summary Banner (dashboard focal point) */
+.risk-banner {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) 1fr;
+  gap: 18px;
+  padding: 18px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 5px solid var(--grade-color, var(--accent));
+  border-radius: var(--radius-lg);
+  margin-bottom: 14px;
+}
+.risk-banner__grade { display: flex; align-items: center; gap: 16px; }
+.risk-banner__score {
+  font: 600 40px/1 var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-1);
+}
+.risk-banner__score small { font-size: 16px; color: var(--text-3); font-weight: 500; }
+.risk-banner__grade-letter {
+  width: 56px; height: 56px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  font: 700 26px/1 var(--font-sans);
+  color: #fff; background: var(--grade-color, var(--accent));
+}
+.risk-banner__grade-label { font: 600 12px/16px var(--font-sans); color: var(--text-2); }
+.risk-banner__sev { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.risk-banner__bar {
+  display: flex; height: 10px; border-radius: 6px; overflow: hidden;
+  background: var(--bg-sunken); border: 1px solid var(--border);
+}
+.risk-banner__bar span { display: block; height: 100%; }
+.risk-banner__counts { display: flex; flex-wrap: wrap; gap: 8px; }
+.risk-count {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 6px 11px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--surface);
+  font: 600 13px/1 var(--font-sans);
+  font-variant-numeric: tabular-nums; color: var(--text-2);
+}
+.risk-count:hover { border-color: var(--border-strong); background: var(--surface-2); }
+.risk-count__dot { width: 9px; height: 9px; border-radius: 3px; }
+.risk-count__n { color: var(--text-1); font-weight: 700; }
+.risk-count.is-critical { border-color: var(--sev-crit-bd); background: var(--sev-crit-bg); }
+.risk-count.is-high     { border-color: var(--sev-high-bd); background: var(--sev-high-bg); }
+.risk-count.is-zero { opacity: 0.55; }
+
+/* Phase 4/6: severity left-rail finding cards */
+.finding-card {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-left: 4px solid var(--finding-accent, var(--border)) !important;
+  border-radius: 10px !important;
+  box-shadow: none !important;
+}
+.finding-card:hover { border-color: var(--border-strong) !important; box-shadow: var(--shadow-soft) !important; }
+.finding-card.is-open { box-shadow: var(--shadow-soft) !important; }
+
+/* Phase 4: Findings table view */
+.findings-viewtoggle { display: inline-flex; gap: 2px; padding: 2px; background: var(--bg-sunken); border: 1px solid var(--border); border-radius: 8px; }
+.findings-viewtoggle button {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px; border-radius: 6px; cursor: pointer;
+  font: 600 12.5px/1 var(--font-sans); color: var(--text-2); background: transparent;
+}
+.findings-viewtoggle button.is-active { background: var(--surface); color: var(--text-1); box-shadow: var(--shadow-soft); }
+
+/* Phase 6: modern table system (reused by every .data-table) */
+.table-shell { border: 1px solid var(--border); border-radius: 10px; overflow: auto; }
+.data-table { width: 100%; border-collapse: separate; border-spacing: 0; }
+.data-table thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--surface-2);
+  padding: 9px 14px;
+  font: 600 11.5px/16px var(--font-sans);
+  letter-spacing: 0.03em; text-transform: none;
+  color: var(--text-2);
+  border-bottom: 1px solid var(--border);
+  text-align: left; white-space: nowrap;
+}
+.data-table td {
+  padding: 9px 14px;
+  font: 400 13px/18px var(--font-sans);
+  color: var(--text-1);
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.data-table tbody tr:nth-child(even) { background: var(--surface-2); }
+.data-table tbody tr:hover { background: var(--accent-weak); }
+.data-table tbody tr:last-child td { border-bottom: 0; }
+.data-table td.mono, .data-table .mono { font: 450 12.5px/18px var(--font-mono); color: var(--text-2); }
+.data-table td.num { font-variant-numeric: tabular-nums; text-align: right; }
+
+/* Severity cell anchor in tables */
+.sev-tag {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 9px; border-radius: 999px;
+  font: 700 11px/16px var(--font-sans); letter-spacing: 0.02em;
+}
+.sev-tag::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.sev-tag--critical { color: var(--sev-crit); background: var(--sev-crit-bg); box-shadow: inset 0 0 0 1px var(--sev-crit-bd); }
+.sev-tag--high     { color: var(--sev-high); background: var(--sev-high-bg); box-shadow: inset 0 0 0 1px var(--sev-high-bd); }
+.sev-tag--medium   { color: var(--sev-med);  background: var(--sev-med-bg);  box-shadow: inset 0 0 0 1px var(--sev-med-bd); }
+.sev-tag--low      { color: var(--sev-low);  background: var(--sev-low-bg);  box-shadow: inset 0 0 0 1px var(--sev-low-bd); }
+.sev-tag--info     { color: var(--sev-info); background: var(--sev-info-bg); box-shadow: inset 0 0 0 1px var(--sev-info-bd); }
+
+.findings-table tbody tr { cursor: pointer; }
+.findings-table .ft-title { font-weight: 600; color: var(--text-1); }
+.findings-table .ft-loc { font: 450 12px/16px var(--font-mono); color: var(--text-3); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Phase 5: exported/risk badges (Attack Surface) */
+.risk-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 6px; font: 700 11px/16px var(--font-sans); }
+.risk-badge--exported { color: var(--sev-high); background: var(--sev-high-bg); box-shadow: inset 0 0 0 1px var(--sev-high-bd); }
+.risk-badge--internal { color: var(--text-2); background: var(--bg-sunken); box-shadow: inset 0 0 0 1px var(--border); }
+.risk-badge--browsable { color: var(--sev-med); background: var(--sev-med-bg); box-shadow: inset 0 0 0 1px var(--sev-med-bd); }
+
+/* Phase 7: binary hardening pass/fail pills */
+.checksec-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 9px; border-radius: 999px;
+  font: 700 11px/16px var(--font-sans);
+}
+.checksec-pill::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.checksec-pill--pass { color: var(--sev-low); background: var(--sev-low-bg); box-shadow: inset 0 0 0 1px var(--sev-low-bd); }
+.checksec-pill--fail { color: var(--sev-high); background: var(--sev-high-bg); box-shadow: inset 0 0 0 1px var(--sev-high-bd); }
+.checksec-pill__note { color: var(--text-3); font-weight: 500; }
