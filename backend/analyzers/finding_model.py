@@ -89,15 +89,69 @@ _APP_ARTIFACT_HINTS = ("androidmanifest.xml", "/res/", "res/", "classes.dex",
                        "assets/", "/assets/", ".plist", "info.plist")
 
 
+def _pkg_from_dotted(fqn: str) -> str:
+    """Drop the trailing ClassName / inner-class from a dotted FQN -> package."""
+    fqn = fqn.split("$", 1)[0]
+    segs = [s for s in fqn.split(".") if s]
+    if not segs:
+        return ""
+    # A leading capital on the last segment means it's the class, not a package.
+    if segs[-1][:1].isupper():
+        segs = segs[:-1]
+    return ".".join(segs)
+
+
+def _package_from_class_ref(s: str) -> str | None:
+    """Package from a class *reference* (not a filesystem path), else None.
+
+    Handles the formats analyzers actually emit for non-file evidence:
+      "com.app.example.SomeClass"     -> "com.app.example"   (FQN)
+      "com.app.example.SomeClass;"    -> "com.app.example"   (taint, trailing ;)
+      "Lcom/app/example/SomeClass;"   -> "com.app.example"   (JVM signature)
+      "Lcom/app/Foo$Bar;"             -> "com.app"           (inner class)
+    Returns None for real paths ("sources/com/app/Foo.java") and for plain
+    filenames so the normal path logic still applies.
+    """
+    if not s:
+        return None
+    t = s.strip()
+    # JVM type signature: Lcom/app/Foo;  (slashes + leading L + trailing ;)
+    if t.startswith("L") and "/" in t and t.rstrip().endswith(";"):
+        return _pkg_from_dotted(t[1:].rstrip(";").replace("/", "."))
+    # Anything with a path separator is a filesystem path — not a class ref.
+    if "/" in t or "\\" in t:
+        return None
+    had_semicolon = t.endswith(";")
+    t = t.rstrip(";")
+    if "." not in t:
+        return None
+    segs = [x for x in t.split("$", 1)[0].split(".") if x]
+    if len(segs) < 2:
+        return None
+    # Only treat as a class ref when it really looks like one: an explicit
+    # trailing ';' (taint/JVM origin) or a Capitalised final segment (ClassName).
+    looks_like_class = had_semicolon or segs[-1][:1].isupper()
+    if not looks_like_class:
+        return None
+    return _pkg_from_dotted(t)
+
+
 def _path_to_package(path: str) -> str:
-    """Best-effort dotted package from a decompiled source path.
+    """Best-effort dotted package from a decompiled source path or class ref.
 
     "sources/com/example/app/Foo.java" -> "com.example.app"
     "smali_classes2/androidx/work/Worker.smali" -> "androidx.work"
+    "com.app.example.SomeClass;" -> "com.app.example"   (taint class ref)
+    "Lcom/app/example/Foo;" -> "com.app.example"          (JVM signature)
     Returns "" when no package can be derived (resources, manifest, dex root).
     """
     if not path:
         return ""
+    # Class references (dotted FQN / JVM signature) come before path parsing —
+    # they have no directory layout to walk.
+    cref = _package_from_class_ref(path)
+    if cref is not None:
+        return cref
     norm = path.replace("\\", "/").strip().lstrip("./")
     parts = [p for p in norm.split("/") if p]
     if not parts:
@@ -486,6 +540,61 @@ def classify_ownership_label(path: str, app_package: str = "") -> str:
     return UNKNOWN
 
 
+# Findings that are inherently app-owned even with no file path: they come from
+# the app's OWN manifest / components / config, not from a dependency.
+_APP_SCOPED_CATEGORIES = {
+    "network security", "components", "component", "deeplinks", "deeplink",
+    "backup", "manifest", "configuration", "permissions", "attack surface",
+    "exported component", "security controls", "data storage", "platform",
+    "behavior analysis",
+}
+# Dependency / supply-chain findings describe libraries, never app code.
+_DEP_SOURCES = {"CVE-MAP", "OSV", "CVE", "OSV-SCANNER"}
+_DEP_CATEGORIES = {
+    "supply chain", "vulnerable dependency", "vulnerable dependencies",
+    "dependencies", "dependency", "components (dependency)", "cve",
+}
+
+
+def _is_dependency_finding(finding: dict) -> bool:
+    if str(finding.get("source") or "").upper() in _DEP_SOURCES:
+        return True
+    return str(finding.get("category") or "").lower() in _DEP_CATEGORIES
+
+
+def resolve_finding_ownership(finding: dict, app_package: str = "") -> tuple[str, str, str]:
+    """Authoritative ownership for a finding: (coarse, label, owner_package).
+
+    Combines path/class-ref parsing with finding-level signals so that:
+      * dotted / JVM class refs resolve to their real package (P1)
+      * manifest/component/app-config findings with NO path become APPLICATION
+        (P1) — unless they are dependency/CVE findings (those stay UNKNOWN).
+    """
+    path = _finding_path(finding)
+    label = classify_ownership_label(path, app_package)
+    coarse, owner_pkg = classify_ownership(path, app_package)
+
+    if label != UNKNOWN:
+        return coarse, label, owner_pkg
+
+    # Path gave us nothing useful. Decide from the finding's own nature.
+    if _is_dependency_finding(finding):
+        return UNKNOWN, UNKNOWN, owner_pkg
+
+    has_path = bool(path)
+    app_scoped = (
+        finding.get("evidence_type") == "manifest"
+        or str(finding.get("category") or "").lower() in _APP_SCOPED_CATEGORIES
+    )
+    # No resolvable path AND app-scoped (manifest/component/config) -> APPLICATION.
+    if not has_path and app_scoped:
+        return APP, APPLICATION, owner_pkg
+    # A manifest/config finding whose only path is an app artifact (res/manifest).
+    if app_scoped and coarse == APP:
+        return APP, APPLICATION, owner_pkg
+    return coarse, label, owner_pkg
+
+
 def is_application_code(finding) -> bool:
     """True when a finding belongs to first-party application code.
 
@@ -674,16 +783,32 @@ def _suppression_reason(finding: dict, text: str, confidence: int) -> str:
 # ── Root-detection reclassification ──────────────────────────────────────────
 _ROOT_TOKENS = (
     "which su", "/system/bin/su", "/system/xbin/su", "/sbin/su", "su -c",
+    "/system/xbin/which", "/system/bin/which",
     "busybox", "magisk", "supersu", "superuser.apk", "superuser",
     "test-keys", "rootbeer", "eu.chainfire", "com.noshufou.android.su",
     "com.thirdparty.superuser", "com.koushikdutta.superuser",
-    "com.topjohnwu.magisk", "/system/app/superuser",
+    "com.topjohnwu.magisk", "/system/app/superuser", "isrooted", "is_rooted",
+    "checkroot", "detectroot", "/su/bin", "magiskhide", "daemonsu",
+)
+
+# A quoted/bare `su` argument, used alongside a probe verb/path, is a root check
+# even when the tokens are split across exec() array args, e.g.
+#   exec(new String[]{"/system/xbin/which", "su"})
+_SU_ARG_RE = re.compile(r"""(["'\[\s,{(])su(["'\]\s,})])""", re.I)
+_ROOT_PROBE_HINTS = (
+    "which", "/system/xbin", "/system/bin", "/sbin", "/su/bin",
+    "busybox", "superuser", "stat ", "ls ", "exec",
 )
 
 
 def _looks_like_root_detection(finding: dict, text: str) -> bool:
     blob = f"{text}\n{finding.get('title', '')}".lower()
-    return any(tok in blob for tok in _ROOT_TOKENS)
+    if any(tok in blob for tok in _ROOT_TOKENS):
+        return True
+    # Split-argument form: a standalone "su" token next to a probe verb/path.
+    if _SU_ARG_RE.search(blob) and any(h in blob for h in _ROOT_PROBE_HINTS):
+        return True
+    return False
 
 
 def _reclassify_root_detection(finding: dict, text: str) -> bool:
@@ -766,25 +891,25 @@ def _is_taint(finding: dict) -> bool:
 
 
 def _group_taint_findings(findings: list[dict]) -> tuple[list[dict], int]:
-    """Collapse duplicate taint flows that share a (source_cat, sink_cat) shape.
+    """Collapse taint flows that share a sink-derived group title.
 
-    Returns (new_list, collapsed_count) where collapsed_count is how many
-    findings were absorbed into group representatives (noise removed).
+    Phase 4 (P5): group by the friendly, sink-derived title rather than by the
+    raw (source_cat, sink_cat) pair, so the multiple "User-Controlled Data
+    Logged" groups produced by different source categories merge into ONE. The
+    distinct source categories are aggregated into the group description.
+
+    Returns (new_list, collapsed_count): how many findings were absorbed.
     """
-    groups: dict[tuple, list[dict]] = {}
-    passthrough: list[dict] = []
+    groups: dict[str, list[dict]] = {}
     order: list[object] = []  # preserve first-seen ordering of groups + others
 
     for f in findings:
         if not isinstance(f, dict) or not _is_taint(f):
-            passthrough.append(f)
             order.append(f)
             continue
         tf = f.get("taint_flow") or {}
-        key = (
-            str(tf.get("source_cat") or f.get("source_cat") or "src").lower(),
-            str(tf.get("sink_cat") or f.get("sink_cat") or "sink").lower(),
-        )
+        sink_cat = str(tf.get("sink_cat") or f.get("sink_cat") or "Sensitive Sink")
+        key = _taint_group_title(sink_cat)
         if key not in groups:
             groups[key] = []
             order.append(("group", key))
@@ -806,18 +931,28 @@ def _group_taint_findings(findings: list[dict]) -> tuple[list[dict], int]:
     return result, collapsed
 
 
-def _build_taint_group(key: tuple, members: list[dict]) -> dict:
+def _build_taint_group(title: str, members: list[dict]) -> dict:
     """Synthesize one grouped finding from N taint flows (evidence preserved)."""
     rep = min(members, key=lambda m: _SEV_RANK.get(normalize_severity_label(m.get("severity")), 4))
     tf = rep.get("taint_flow") or {}
     sink_cat = tf.get("sink_cat") or rep.get("sink_cat") or "Sensitive Sink"
-    source_cat = tf.get("source_cat") or rep.get("source_cat") or "User Input"
+
+    # Distinct source categories across the merged flows (P5 aggregation).
+    source_cats = []
+    for m in members:
+        sc = (m.get("taint_flow") or {}).get("source_cat") or m.get("source_cat")
+        if sc and sc not in source_cats:
+            source_cats.append(str(sc))
+    sources_str = ", ".join(source_cats) if source_cats else "User Input"
 
     # De-duplicate evidence locations, keep insertion order.
     seen_loc = set()
     locations = []
     file_evidence = []
+    any_app = False
     for m in members:
+        if m.get("is_app_code") or m.get("ownership_label") == APPLICATION:
+            any_app = True
         loc = _taint_location(m)
         if loc in seen_loc:
             continue
@@ -838,11 +973,11 @@ def _build_taint_group(key: tuple, members: list[dict]) -> dict:
 
     grouped = dict(rep)  # inherit canonical fields/standards from representative
     grouped.update({
-        "title": _taint_group_title(sink_cat),
+        "title": title,
         "severity": best_sev,
         "category": "Taint Analysis",
         "description": (
-            f"User-controlled data from **{source_cat}** flows into "
+            f"User-controlled data from {sources_str} flows into "
             f"**{sink_cat}** in {len(locations)} location(s) without apparent "
             f"sanitization. All affected entry points are listed under Evidence."
         ),
@@ -854,6 +989,12 @@ def _build_taint_group(key: tuple, members: list[dict]) -> dict:
         "files": [e["path"] for e in file_evidence],
         "file_count": len(file_evidence),
     })
+    # If any flow lands in app code, the group is application-owned (P1).
+    if any_app:
+        grouped["ownership"] = APP
+        grouped["ownership_label"] = APPLICATION
+        grouped["ownership_badge"] = OWNERSHIP_BADGES[APPLICATION]
+        grouped["is_app_code"] = True
     # Drop single-flow fields that no longer describe the group as a whole.
     grouped.pop("call_chain", None)
     grouped.pop("snippet", None)
@@ -996,8 +1137,10 @@ def refine_findings(findings: list[dict], *, app_package: str = "",
     # 1. Per-finding annotation: label, badge, confidence, reclassification.
     reclassified_count = 0
     for f in findings:
-        path = _finding_path(f)
-        label = classify_ownership_label(path, app_package)
+        coarse, label, owner_pkg = resolve_finding_ownership(f, app_package)
+        f["ownership"] = coarse
+        if owner_pkg and not f.get("owner_package"):
+            f["owner_package"] = owner_pkg
         f["ownership_label"] = label
         f["ownership_badge"] = OWNERSHIP_BADGES.get(label, label)
         f["is_app_code"] = (label == APPLICATION)

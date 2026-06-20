@@ -631,7 +631,7 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
 
         # ── NEW: Android API Analysis ─────────────────────────────────────────
         api_started = time.perf_counter()
-        analyze_android_apis(tmpdir, results)
+        analyze_android_apis(tmpdir, results, source_dirs=preferred_source_dirs)
         _build_behavior_findings(results)
         _record_module_metric(results, "api_behavior_analysis", api_started, categories=len(results.get("android_api", {})))
 
@@ -1476,36 +1476,60 @@ def _build_behavior_findings(results: dict):
     api_results = results.get("android_api", {})
     behavior_entries = []
     seen_titles = {finding.get("title") for finding in results.get("findings", [])}
+
+    def _is_binary(p):
+        p = str(p or "").lower()
+        return p.endswith((".dex", ".so", ".dylib", ".arsc", ".odex", ".vdex", ".oat"))
+
     for category, files in api_results.items():
         rule = BEHAVIOR_RULES.get(category)
         if not rule:
             continue
+        # Phase 4 (P4): prefer real decompiled source; never attribute to a
+        # binary (classes.dex). If the only evidence is binary, emit a
+        # capability finding with no bogus source link.
+        source_files = [f for f in files if not _is_binary(f)]
+        is_capability = not source_files
+
         behavior_entries.append({
             "category": category,
             "title": rule["title"],
             "severity": rule["severity"],
             "description": rule["description"],
-            "files": files[:10],
-            "file_count": len(files),
+            "files": source_files[:10],
+            "file_count": len(source_files),
             "cwe": rule["cwe"],
             "masvs": rule["masvs"],
             "owasp": rule["owasp"],
         })
         if rule["title"] not in seen_titles:
-            results["findings"].append({
+            finding = {
                 "title": rule["title"],
                 "severity": rule["severity"],
                 "category": "Behavior Analysis",
                 "description": rule["description"],
                 "impact": rule["impact"],
                 "recommendation": rule["recommendation"],
-                "file_path": files[0] if files else "",
-                "files": files[:10],
-                "file_count": len(files),
                 "cwe": rule["cwe"],
                 "masvs": rule["masvs"],
                 "owasp": rule["owasp"],
-            })
+            }
+            if is_capability:
+                # Capability presence only — no resolvable source location.
+                finding["file_path"] = None
+                finding["files"] = []
+                finding["file_count"] = 0
+                finding["capability"] = True
+                finding["description"] += (
+                    " (Capability detected in compiled code; no decompiled "
+                    "source location available.)"
+                )
+            else:
+                finding["file_path"] = source_files[0]
+                finding["files"] = source_files[:10]
+                finding["file_count"] = len(source_files)
+                finding["file_evidence"] = [{"path": p, "lines": [], "snippet": ""} for p in source_files[:10]]
+            results["findings"].append(finding)
             seen_titles.add(rule["title"])
     results["behavior_analysis"] = behavior_entries
 

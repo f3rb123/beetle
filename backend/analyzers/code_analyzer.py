@@ -10,6 +10,38 @@ import re
 import os
 from .code_rules import CODE_RULES, IOS_CODE_RULES
 from .path_utils import normalize_relative_path
+from .evidence_scanner import is_namespace_url, classify_ip
+
+# ── Phase 4 (P2): per-match validators for noise-prone SAST rules ─────────────
+# A rule's regex can shape-match non-findings (XML namespace URLs, vector
+# drawable coordinates, version numbers). These validators run per match and
+# drop the bad ones BEFORE a finding is built, so the validators that already
+# clean the IPs/endpoints arrays now also govern SAST results.
+_STRICT_IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _validate_http_match(matched_text: str, line_text: str) -> bool:
+    """Drop http:// hits that are XML namespace / schema URIs (schemas.android.com,
+    xmlns, w3.org, …) — they are identifiers, not plaintext network endpoints."""
+    return not is_namespace_url(line_text)
+
+
+def _validate_ip_match(matched_text: str, line_text: str) -> bool:
+    """Accept only lines containing a real, routable 4-octet IPv4 literal.
+
+    The android_hardcoded_ip regex matches partials like "10.0" (from
+    android:rotation="10.0") and version/coordinate values; classify_ip rejects
+    anything that isn't a valid, non-reserved IPv4 address."""
+    for cand in _STRICT_IPV4.findall(line_text or ""):
+        if classify_ip(cand) is not None:
+            return True
+    return False
+
+
+_SAST_MATCH_VALIDATORS = {
+    "android_http_connection": _validate_http_match,
+    "android_hardcoded_ip":    _validate_ip_match,
+}
 
 try:
     import sys as _sys
@@ -48,6 +80,7 @@ def _run_rules_per_file(file_map: dict, rules: list, results: dict):
         except re.error:
             continue
 
+        validator = _SAST_MATCH_VALIDATORS.get(rule_id)
         for rel_path, content in file_map.items():
             try:
                 lines_content = content.splitlines()
@@ -56,6 +89,10 @@ def _run_rules_per_file(file_map: dict, rules: list, results: dict):
 
                 for match in pattern.finditer(content):
                     line_no = content[:match.start()].count("\n") + 1
+                    if validator:
+                        line_text = lines_content[line_no - 1] if line_no - 1 < len(lines_content) else match.group(0)
+                        if not validator(match.group(0), line_text):
+                            continue
                     if line_no not in matched_lines:
                         matched_lines.append(line_no)
                         if not first_snippet and line_no <= len(lines_content):

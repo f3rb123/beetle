@@ -42,55 +42,64 @@ def _is_valid_email_candidate(email: str) -> bool:
     return True
 
 
-def analyze_android_apis(tmpdir: str, results: dict):
+def analyze_android_apis(tmpdir: str, results: dict, source_dirs=None):
     """
     Scan extracted APK content for Android API usage categories.
     Returns grouped API findings with file references.
+
+    Phase 4 (P4): when decompiled source dirs (jadx/apktool) are available they
+    are scanned in preference to the raw APK, so behaviour/API findings attribute
+    to real .java/.smali source paths instead of the binary classes.dex.
     """
-    # Collect all text content
-    content_map = {}  # file_path -> content
-    dex_blobs = {}    # file_path -> dumped strings (fallback only)
+    # Prefer decompiled source roots; fall back to the raw extraction.
+    roots = [d for d in (source_dirs or []) if d and os.path.exists(d)] or [tmpdir]
+
+    # Collect all text content, keyed by source-root-relative path so the code
+    # viewer can resolve it later.
+    content_map = {}  # rel_path -> content
+    dex_blobs = {}    # rel_path -> dumped strings (fallback only)
     has_source = False
     seen_hashes = set()
     duplicate_skips = 0
-    for root, _, files in os.walk(tmpdir):
-        for fname in files:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in ('.smali', '.java', '.kt', '.js', '.bundle'):
+    for base in roots:
+        for root, _, files in os.walk(base):
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
                 fpath = os.path.join(root, fname)
-                try:
-                    with open(fpath, 'r', errors='replace') as f:
-                        content = f.read()
-                    content_hash = hash(content)
-                    if content_hash in seen_hashes:
-                        duplicate_skips += 1
+                rel = normalize_relative_path(os.path.relpath(fpath, base))
+                if ext in ('.smali', '.java', '.kt', '.js', '.bundle'):
+                    try:
+                        with open(fpath, 'r', errors='replace') as f:
+                            content = f.read()
+                        content_hash = hash(content)
+                        if content_hash in seen_hashes:
+                            duplicate_skips += 1
+                            continue
+                        seen_hashes.add(content_hash)
+                        content_map[rel] = content
+                        if ext in ('.java', '.kt', '.smali'):
+                            has_source = True
+                    except Exception:
                         continue
-                    seen_hashes.add(content_hash)
-                    content_map[fpath] = content
-                    if ext in ('.java', '.kt', '.smali'):
-                        has_source = True
-                except Exception:
-                    continue
-            elif ext == '.dex':
-                fpath = os.path.join(root, fname)
-                try:
-                    with open(fpath, 'rb') as f:
-                        raw = f.read()
-                    text = "".join(chr(b) if 32 <= b < 127 else " " for b in raw)
-                    dex_blobs[fpath] = text
-                except Exception:
-                    continue
+                elif ext == '.dex':
+                    try:
+                        with open(fpath, 'rb') as f:
+                            raw = f.read()
+                        text = "".join(chr(b) if 32 <= b < 127 else " " for b in raw)
+                        dex_blobs[rel] = text
+                    except Exception:
+                        continue
 
     # Only fall back to raw classes.dex strings when no real source was found —
     # otherwise classes.dex pollutes the API file lists with a binary path.
     if not has_source:
-        for fpath, text in dex_blobs.items():
+        for rel, text in dex_blobs.items():
             content_hash = hash(text)
             if content_hash in seen_hashes:
                 duplicate_skips += 1
                 continue
             seen_hashes.add(content_hash)
-            content_map[fpath] = text
+            content_map[rel] = text
 
     api_results = {}
 
@@ -98,11 +107,10 @@ def analyze_android_apis(tmpdir: str, results: dict):
         matching_files = []
         seen_files = set()
 
-        for fpath, content in content_map.items():
+        for rel, content in content_map.items():
             for pattern in patterns:
                 try:
                     if re.search(pattern, content, re.IGNORECASE):
-                        rel = normalize_relative_path(os.path.relpath(fpath, tmpdir))
                         if rel not in seen_files:
                             seen_files.add(rel)
                             matching_files.append(rel)
