@@ -836,6 +836,8 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     results["findings"] = _kept
     results["suppressed_findings"] = _suppressed
     results["finding_quality_stats"] = _quality_stats
+    # ── Phase K: executive security summary (raw → high-signal funnel) ──
+    results["executive_summary"] = finding_model.build_executive_summary(_quality_stats, _suppressed)
     finding_model.log_quality_stats(_quality_stats, platform="android")
     # ── Phase 5.4: per-finding quality report ──
     results["finding_quality_report"] = finding_model.build_finding_quality_report(_kept)

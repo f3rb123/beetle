@@ -1075,6 +1075,24 @@ def compute_signal_quality(finding: dict) -> str:
     return "LOW"
 
 
+def _has_extractable_evidence(finding: dict) -> bool:
+    """Phase A — True when a finding carries at least one concrete piece of
+    evidence an analyst can verify: a decompiled/manifest/xml/resource snippet,
+    a resolvable source path, a taint chain, or a certificate evidence block.
+    """
+    if finding.get("is_attack_chain"):
+        return True  # synthesized from its members' evidence
+    if finding.get("file_evidence") or finding.get("call_chain") or finding.get("taint_flow"):
+        return True
+    for key in ("snippet", "code_context", "evidence", "file_path", "component"):
+        if finding.get(key):
+            return True
+    # A manifest finding still awaiting enforcement carries its resolve spec.
+    if finding.get("manifest_evidence_spec"):
+        return True
+    return False
+
+
 def _evidence_count(finding: dict) -> int:
     if finding.get("grouped"):
         return _coerce_int(finding.get("evidence_count"), 1)
@@ -1551,6 +1569,12 @@ def refine_findings(findings: list[dict], *, app_package: str = "",
         f["evidence_count"] = _evidence_count(f)
         text = _finding_text(f)
         reason = _suppression_reason(f, text, _coerce_int(f.get("confidence_score"), 0))
+        # Phase A — hard evidence gate: a visible finding MUST carry at least one
+        # concrete piece of evidence (decompiled/manifest/xml/resource/cert
+        # snippet or a taint chain). Anything that cannot be evidenced is moved
+        # out of the primary list rather than shown unsupported.
+        if not reason and not _has_extractable_evidence(f):
+            reason = "no_extractable_evidence"
         f["signal_quality"] = compute_signal_quality(f)
         if reason:
             f["suppressed"] = True
@@ -1599,6 +1623,47 @@ def _build_quality_stats(raw_total: int, kept: list[dict], suppressed: list[dict
         "by_confidence_band": dict(by_band),
         "by_signal_quality": dict(by_quality),
         "suppressed_reasons": dict(Counter(f.get("suppressed_reason", "") for f in suppressed)),
+    }
+
+
+_FP_SUPPRESSION_REASONS = (
+    "hashcode_not_crypto", "import_only_no_instantiation",
+    "android_namespace_url", "no_extractable_evidence",
+)
+_NOISE_SUPPRESSION_REASONS = ("low_value_taint_sink", "framework_library_taint")
+
+
+def build_executive_summary(stats: dict, suppressed: list[dict]) -> dict:
+    """Phase K — the "top of report" funnel: raw detections → high-signal set.
+
+    Turns the internal quality stats into the analyst-facing breakdown of how
+    raw detections were reduced to the presented set (duplicates grouped,
+    library noise hidden, false positives removed, low-value flows pruned).
+    """
+    reasons = Counter(f.get("suppressed_reason", "") for f in (suppressed or []))
+    false_positives = sum(reasons.get(r, 0) for r in _FP_SUPPRESSION_REASONS)
+    low_value = sum(reasons.get(r, 0) for r in _NOISE_SUPPRESSION_REASONS)
+
+    raw = stats.get("raw_total", 0)
+    dups = stats.get("collapsed_duplicates", 0)
+    lib = stats.get("suppressed_library_count", 0)
+    high_signal = stats.get("default_view_count", 0)
+
+    return {
+        "raw_detections": raw,
+        "duplicates_grouped": dups,
+        "library_findings_hidden": lib,
+        "false_positives_suppressed": false_positives,
+        "low_value_flows_pruned": low_value,
+        "high_signal_findings": high_signal,
+        "lines": [
+            f"{raw} detections found",
+            f"{dups} duplicates grouped",
+            f"{lib} library findings hidden",
+            f"{false_positives} false positives removed",
+            f"{low_value} low-value data flows pruned",
+            f"{high_signal} high-signal findings presented",
+        ],
     }
 
 
