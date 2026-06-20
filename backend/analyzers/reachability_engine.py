@@ -239,6 +239,7 @@ def _generate_attack_paths(results: dict, ep: dict) -> None:
             "likelihood": "High" if expl >= 80 else ("Medium" if expl >= 50 else "Low"),
             "exploitability": expl,
             "severity": c.get("severity", "high"),
+            "chain_confidence": c.get("chain_confidence", "MEDIUM"),
         })
 
     # Standalone reachable, high-impact findings not already inside a chain.

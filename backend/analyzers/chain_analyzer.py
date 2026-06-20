@@ -927,11 +927,26 @@ def build_attack_chain_findings(findings: list, chains: list) -> list:
             + (["", "Contributing findings:"] + member_lines if member_lines else [])
         )
 
+        # Phase 7.5 Task 4 — chain confidence from how many contributing findings
+        # carry locatable evidence. A chain synthesized purely from manifest /
+        # permission signals (no evidenced finding members) is heuristic (LOW).
+        evidenced = sum(1 for m in members if _member_evidence(m))
+        total_members = len(members)
+        if total_members == 0:
+            chain_confidence = "LOW"
+        else:
+            ratio = evidenced / total_members
+            chain_confidence = "HIGH" if ratio >= 0.7 else ("MEDIUM" if ratio >= 0.34 else "LOW")
+        # Mirror onto the source chain dict so the dashboard / attack paths
+        # (which read quick_summary.attack_chain) can show it too.
+        chain["chain_confidence"] = chain_confidence
+
         cf = {
             "title": f"Attack Chain: {chain.get('title', 'Correlated Exploit Chain')}",
             "severity": chain.get("severity", "high"),
             "category": "Attack Chain",
             "is_attack_chain": True,
+            "chain_confidence": chain_confidence,
             "attack_chain_id": cid,
             "attack_chain_members": member_refs,
             "confidence": 90,

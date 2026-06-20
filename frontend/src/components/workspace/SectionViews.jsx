@@ -552,8 +552,9 @@ function FindingsList({ findings, onOpenCode, emptyTitle = 'No findings found', 
                         {triageMeta.label}
                       </span>
                     )}
-                    {finding.reachability ? <Tag tone={finding.reachability === 'YES' ? 'danger' : (finding.reachability === 'MAYBE' ? 'warning' : 'neutral')}>{`Reachable: ${finding.reachability}`}</Tag> : null}
+                    {finding.reachability ? <Tag tone={finding.reachability === 'YES' ? 'danger' : (finding.reachability === 'MAYBE' ? 'warning' : 'neutral')}>{`Reachable: ${finding.reachability}${finding.reachability_confidence ? ` (${finding.reachability_confidence})` : ''}`}</Tag> : null}
                     {finding.likelihood && finding.reachability === 'YES' ? <Tag tone="warning">{`Likelihood: ${finding.likelihood}`}</Tag> : null}
+                    {finding.evidence_quality ? <Tag tone={finding.evidence_quality === 'HIGH' ? 'success' : (finding.evidence_quality === 'MEDIUM' ? 'warning' : 'neutral')}>{`Evidence: ${finding.evidence_quality}`}</Tag> : null}
                     {finding.category ? <Tag>{finding.category}</Tag> : null}
                     {finding.owasp ? <Tag tone="danger">{`OWASP ${finding.owasp}`}</Tag> : null}
                     {finding.masvs ? <Tag tone="info">{finding.masvs}</Tag> : null}
@@ -599,6 +600,19 @@ function FindingsList({ findings, onOpenCode, emptyTitle = 'No findings found', 
                   </div>
                 )}
                 <div className="finding-detail-grid">
+                  <div className="mini-surface">
+                    <div className="mini-surface__label">Trust &amp; Evidence</div>
+                    <DefinitionRows items={[
+                      ['Ownership', finding.ownership_label || finding.ownership_badge],
+                      ['Reachability', finding.reachability ? `${finding.reachability}${finding.reachability_confidence ? ` — ${finding.reachability_confidence} confidence` : ''}` : null],
+                      ['Likelihood', finding.likelihood],
+                      ['Evidence Quality', finding.evidence_quality],
+                      ['Confidence', finding.confidence_score != null ? `${finding.confidence_score}%` : null],
+                      ['File', finding.file_path],
+                      ['Line', finding.line || finding.line_number],
+                    ]} />
+                  </div>
+
                   <div className="mini-surface">
                     <div className="mini-surface__label">Impact</div>
                     <div className="mini-surface__body">{finding.impact || 'Impact details were not supplied for this finding.'}</div>
@@ -804,6 +818,7 @@ function DashboardSection({ results, onNavigateSection, onOpenCode, viewMode }) 
           impact: item.impact || '',
           owasp: item.owasp || [],
           steps: item.steps || [],
+          chainConfidence: item.chain_confidence || null,
         }
       })
     : critHighFindings.slice(0, 4).map(f => ({
@@ -849,6 +864,9 @@ function DashboardSection({ results, onNavigateSection, onOpenCode, viewMode }) 
     + (execSummary.false_positives_suppressed || 0)
     + (execSummary.duplicates_grouped || 0)
   const ratingAccent = (r) => ({ critical: '#DC2626', high: '#F59E0B', medium: '#3B82F6', low: '#10b981' }[r] || '#6b7280')
+  const trust = results.trust_score || {}
+  const resolution = results.resolution_scores || {}
+  const trustAccent = (r) => ({ HIGH: '#10b981', MEDIUM: '#F59E0B', LOW: '#DC2626' }[r] || '#6b7280')
 
   return (
     <div className="dashboard-stack">
@@ -856,6 +874,7 @@ function DashboardSection({ results, onNavigateSection, onOpenCode, viewMode }) 
       {/* ── Phase 7 Executive Overview ── */}
       <div className="metric-grid">
         <StatCard label="Security Score" value={`${score.score ?? 0}/100`} helper={score.grade_label || gradeMeta.label} accent={gradeMeta.color} onClick={() => onNavigateSection('findings')} />
+        {trust.score != null && <StatCard label="Trust Score" value={`${trust.score}/100`} helper={resolution.evidence_coverage_pct != null ? `${resolution.evidence_coverage_pct}% evidence · ${resolution.source_resolution_pct}% resolved` : (trust.rating || '')} accent={trustAccent(trust.rating)} />}
         <StatCard label="Attack Surface" value={cap(attackSurfaceScore.rating)} helper={attackSurfaceScore.score != null ? `${attackSurfaceScore.score}/100` : ''} accent={ratingAccent(attackSurfaceScore.rating)} onClick={() => onNavigateSection('surface')} />
         <StatCard label="Exploitability" value={cap(exploitScore.rating)} helper={exploitScore.score != null ? `${exploitScore.score}/100` : ''} accent={ratingAccent(exploitScore.rating)} onClick={() => onNavigateSection('exploit')} />
         <StatCard label="Attack Chains" value={quickSummary.chain_count || 0} helper="Correlated exploit paths" accent="#8b5cf6" onClick={() => onNavigateSection('exploit')} />
@@ -1099,6 +1118,11 @@ function DashboardSection({ results, onNavigateSection, onOpenCode, viewMode }) 
                           {card.exploitability != null && (
                             <span className="dash-chain-card__badge dash-chain-card__badge--exploit">
                               {card.exploitability}% exploitability
+                            </span>
+                          )}
+                          {card.chainConfidence && (
+                            <span className="dash-chain-card__badge dash-chain-card__badge--exploit">
+                              {card.chainConfidence} confidence
                             </span>
                           )}
                         </div>
@@ -1365,6 +1389,9 @@ function FindingsSection({ results, onOpenCode, viewMode }) {
             </div>
             {qualityStats && (
               <span className="triage-toolbar__hint">
+                {scope === 'application' && qualityStats.suppressed_library_count != null
+                  ? <>Suppressed third-party findings: <strong>{qualityStats.suppressed_library_count}</strong> · </>
+                  : null}
                 {qualityStats.noise_reduction_pct}% noise reduced ·{' '}
                 {qualityStats.collapsed_duplicates} grouped ·{' '}
                 {qualityStats.suppressed_count} false positives suppressed
@@ -3748,6 +3775,7 @@ function ExploitabilitySection({ results }) {
                       <span className="sec-list-item__name">{p.title}</span>
                     </div>
                     {p.likelihood ? <Tag tone="warning">{`Likelihood: ${p.likelihood}`}</Tag> : <Tag tone="warning">{`Exploitability ${p.exploitability || 0}`}</Tag>}
+                    {p.chain_confidence ? <Tag tone={p.chain_confidence === 'HIGH' ? 'success' : (p.chain_confidence === 'MEDIUM' ? 'warning' : 'neutral')}>{`Confidence: ${p.chain_confidence}`}</Tag> : null}
                   </div>
                   <div className="sec-list-item__desc" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
                     {steps.join('  →  ')}

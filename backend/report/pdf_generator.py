@@ -294,6 +294,22 @@ def _executive_summary(story, results, T, styles):
                 f"({escape(str(surf.get('rating', '')))})",
                 styles["body"]))
 
+    # ── Trust score + resolution coverage (Phase 7.5) ─────────────────────────
+    trust = results.get("trust_score") or {}
+    res_scores = results.get("resolution_scores") or {}
+    if trust:
+        story.append(Spacer(1, 4 * mm))
+        story.append(Paragraph(
+            f"Trust Score: <b>{int(trust.get('score', 0))}/100</b> "
+            f"({escape(str(trust.get('rating', '')))}) — {escape(str(trust.get('meaning', '')))}",
+            styles["body"]))
+        if res_scores:
+            story.append(Paragraph(
+                f"Evidence coverage {res_scores.get('evidence_coverage_pct', 0)}% · "
+                f"source resolution {res_scores.get('source_resolution_pct', 0)}% · "
+                f"view-code {res_scores.get('view_code_coverage_pct', 0)}%",
+                styles["body"]))
+
     # ── Signal-quality funnel (Phase K) ───────────────────────────────────────
     es = results.get("executive_summary") or {}
     if es:
@@ -576,12 +592,16 @@ def _format_signal_quality(finding: dict) -> str:
     own = _OWNERSHIP_BADGE_LABELS.get(label, label)
     if own:
         parts.append(f"Ownership: {own}")
+    reach = finding.get("reachability")
+    if reach:
+        rc = finding.get("reachability_confidence")
+        parts.append(f"Reachable: {reach}" + (f" ({rc} confidence)" if rc else ""))
+    eq = finding.get("evidence_quality")
+    if eq:
+        parts.append(f"Evidence Quality: {eq}")
     conf = finding.get("confidence_score")
     if conf is not None:
         parts.append(f"Confidence: {conf}% ({finding.get('confidence_band', '')})")
-    ev = finding.get("evidence_count")
-    if ev:
-        parts.append(f"Evidence: {ev} location(s)")
     sq = finding.get("signal_quality")
     if sq:
         parts.append(f"Signal Quality: {sq}")

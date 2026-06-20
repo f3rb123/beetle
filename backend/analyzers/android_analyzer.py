@@ -30,6 +30,7 @@ from .common import (
 )
 from . import scan_storage
 from . import reachability_engine
+from . import trust_engine
 from . import finding_model
 from .code_analyzer import run_android_sast
 from .semgrep_runner import run_semgrep, semgrep_available
@@ -851,6 +852,9 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     # ── Phase 7 Task 1/2: reachability + attack-path generation. Needs the
     # exploitability + chain data posture produced; may adjust severity. ──
     reachability_engine.analyze_reachability(results)
+    # ── Phase 7.5: trust framework — evidence quality, reachability confidence,
+    # resolution coverage scores, and the overall trust score. ──
+    trust_engine.annotate_trust(results)
     # ── Phase 7 Task 5: prioritize by reachability → exploitability → severity ──
     results["findings"] = sort_findings_by_priority(results["findings"])
     # Attack-chain findings always lead the list (before normal findings).
