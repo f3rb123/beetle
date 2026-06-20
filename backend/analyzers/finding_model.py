@@ -575,6 +575,12 @@ def resolve_finding_ownership(finding: dict, app_package: str = "") -> tuple[str
     if finding.get("is_attack_chain"):
         return APP, APPLICATION, finding.get("owner_package", "")
 
+    # Phase B/E: a manifest-declared exported component is the app's exposure
+    # even when its implementing class lives in a library package. View Code may
+    # open that library class, but ownership stays APPLICATION (not hidden).
+    if finding.get("app_owned_exposure"):
+        return APP, APPLICATION, finding.get("owner_package", "")
+
     path = _finding_path(finding)
     label = classify_ownership_label(path, app_package)
     coarse, owner_pkg = classify_ownership(path, app_package)
@@ -1518,6 +1524,10 @@ def _build_quality_stats(raw_total: int, kept: list[dict], suppressed: list[dict
     high_conf = [f for f in kept if _coerce_int(f.get("confidence_score"), 0) >= 70]
     # Default view = application-owned AND high confidence AND not suppressed.
     default_view = [f for f in app_only if _coerce_int(f.get("confidence_score"), 0) >= 70]
+    # Phase E: library / framework / SDK findings are kept but hidden from the
+    # default analyst view ("39 library findings hidden"). Count them explicitly.
+    _LIB_LABELS = (THIRD_PARTY_LIBRARY, ANDROID_FRAMEWORK, GOOGLE_SDK, FIREBASE, JETPACK)
+    library_hidden = [f for f in kept if f.get("ownership_label") in _LIB_LABELS]
 
     # Noise reduction is measured against the raw (pre-Phase-3) finding count:
     # collapsed dups + suppressed FPs + library/low-confidence hidden by default.
@@ -1532,6 +1542,7 @@ def _build_quality_stats(raw_total: int, kept: list[dict], suppressed: list[dict
         "kept_total": len(kept),
         "application_only_count": len(app_only),
         "high_confidence_count": len(high_conf),
+        "suppressed_library_count": len(library_hidden),
         "default_view_count": default_n,
         "noise_reduction_pct": reduction,
         "by_ownership_label": dict(by_label),

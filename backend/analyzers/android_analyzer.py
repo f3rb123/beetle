@@ -50,6 +50,7 @@ from .evidence_scanner import (
 )
 from .path_utils import relativize_path, normalize_relative_path, make_file_evidence
 from .chain_analyzer import synthesize_attack_chains, correlate_attack_chains
+from . import posture_analyzer
 from .secret_validator import validate_secrets
 from .taint_analyzer import run_taint_analysis
 from .virustotal import run_virustotal
@@ -846,6 +847,9 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     if _ac:
         results["findings"] = _ac + [f for f in results["findings"] if not f.get("is_attack_chain")]
     results["severity_summary"] = compute_severity_summary(results["findings"])
+    # ── Phase C/F/H: attack surface inventory, exploitability, attack graph ──
+    # Runs before _build_quick_summary (which consumes results["_chain_data"]).
+    posture_analyzer.analyze_posture(results)
     _build_quick_summary(results)
     _record_module_metric(results, "finalize_results", finalize_started, finding_count=len(results.get("findings", [])))
 
@@ -1264,6 +1268,12 @@ def _process_component(elem, comp_type, pkg, results):
     if not is_exported:
         return
 
+    # Phase B: every exported-component finding below targets this component's
+    # decompiled class. Tagging file_path with the class FQN lets the source
+    # resolver open the jadx/apktool source and enable View Code (never the
+    # raw manifest binary). Patched in once at the end of the function.
+    _component_finding_start = len(results["findings"])
+
     if permission and permission_level in {"normal", "dangerous", "unknown"}:
         results["findings"].append({
             "title":          f"Weak Exported Component Permission Protection — {short_name}",
@@ -1358,6 +1368,18 @@ def _process_component(elem, comp_type, pkg, results):
                 "masvs":          "MASVS-PLATFORM-1",
                 "owasp":          "M1",
             })
+
+    # Phase B: point each exported-component finding at the component's class so
+    # the source resolver can locate decompiled source and offer View Code.
+    if full_name and "." in full_name:
+        for f in results["findings"][_component_finding_start:]:
+            f.setdefault("file_path", full_name)
+            f.setdefault("component", full_name)
+            # The exposure is the app's responsibility even when the component
+            # class is implemented by a library (e.g. an exported service backed
+            # by net.gotev.uploadservice) — keep it application-owned so it is
+            # not hidden as library noise. View Code still opens the impl class.
+            f["app_owned_exposure"] = True
 
 
 # ─── SDK detection ────────────────────────────────────────────────────────────
