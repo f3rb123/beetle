@@ -68,6 +68,39 @@ def sort_findings(findings):
     return sorted(findings, key=lambda f: SEVERITY_ORDER.get(f.get("severity", "info"), 4))
 
 
+# Phase 7 Task 5 — analyst prioritization. Reachable issues lead; within a
+# reachability tier, exploitability (with a severity-derived floor so a critical
+# never sinks below a low) then severity then confidence decide the order.
+_REACHABILITY_ORDER = {"YES": 0, "MAYBE": 1, "NO": 2}
+_EXPLOIT_FLOOR = {"critical": 85, "high": 65, "medium": 40, "low": 20, "info": 5}
+
+
+def sort_findings_by_priority(findings):
+    """Sort by: reachability → exploitability → severity → confidence.
+
+    Reachable findings always appear before unreachable ones of equal severity,
+    so the analyst sees what is actually exploitable first (never severity alone).
+    """
+    for f in findings or []:
+        f["severity"] = normalize_severity(f.get("severity"))
+
+    def key(f):
+        reach = _REACHABILITY_ORDER.get(str(f.get("reachability", "MAYBE")).upper(), 1)
+        sev = f.get("severity", "info")
+        try:
+            exploit = int(f.get("exploitability") or 0)
+        except (TypeError, ValueError):
+            exploit = 0
+        eff_exploit = max(exploit, _EXPLOIT_FLOOR.get(sev, 5))
+        try:
+            conf = int(f.get("confidence_score") or 0)
+        except (TypeError, ValueError):
+            conf = 0
+        return (reach, -eff_exploit, SEVERITY_ORDER.get(sev, 4), -conf)
+
+    return sorted(findings or [], key=key)
+
+
 # ─── Confidence ──────────────────────────────────────────────────────────────
 ALLOWED_CONFIDENCE = ("high", "medium", "low")
 

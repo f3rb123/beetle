@@ -552,6 +552,8 @@ function FindingsList({ findings, onOpenCode, emptyTitle = 'No findings found', 
                         {triageMeta.label}
                       </span>
                     )}
+                    {finding.reachability ? <Tag tone={finding.reachability === 'YES' ? 'danger' : (finding.reachability === 'MAYBE' ? 'warning' : 'neutral')}>{`Reachable: ${finding.reachability}`}</Tag> : null}
+                    {finding.likelihood && finding.reachability === 'YES' ? <Tag tone="warning">{`Likelihood: ${finding.likelihood}`}</Tag> : null}
                     {finding.category ? <Tag>{finding.category}</Tag> : null}
                     {finding.owasp ? <Tag tone="danger">{`OWASP ${finding.owasp}`}</Tag> : null}
                     {finding.masvs ? <Tag tone="info">{finding.masvs}</Tag> : null}
@@ -836,8 +838,30 @@ function DashboardSection({ results, onNavigateSection, onOpenCode, viewMode }) 
     cert.expired && { label: 'Cert Expired', tone: 'critical', nav: 'cert' },
   ].filter(Boolean)
 
+  // ── Phase 7 Task 4: executive overview cards ──
+  const attackSurfaceScore = results.attack_surface_score || {}
+  const exploitScore = results.exploitability_score || {}
+  const execSummary = results.executive_summary || {}
+  const reachSummary = results.reachability_summary || {}
+  const cap = (s) => (s ? String(s).charAt(0).toUpperCase() + String(s).slice(1) : '—')
+  const hiddenNoise = (execSummary.library_findings_hidden || 0)
+    + (execSummary.low_value_flows_pruned || 0)
+    + (execSummary.false_positives_suppressed || 0)
+    + (execSummary.duplicates_grouped || 0)
+  const ratingAccent = (r) => ({ critical: '#DC2626', high: '#F59E0B', medium: '#3B82F6', low: '#10b981' }[r] || '#6b7280')
+
   return (
     <div className="dashboard-stack">
+
+      {/* ── Phase 7 Executive Overview ── */}
+      <div className="metric-grid">
+        <StatCard label="Security Score" value={`${score.score ?? 0}/100`} helper={score.grade_label || gradeMeta.label} accent={gradeMeta.color} onClick={() => onNavigateSection('findings')} />
+        <StatCard label="Attack Surface" value={cap(attackSurfaceScore.rating)} helper={attackSurfaceScore.score != null ? `${attackSurfaceScore.score}/100` : ''} accent={ratingAccent(attackSurfaceScore.rating)} onClick={() => onNavigateSection('surface')} />
+        <StatCard label="Exploitability" value={cap(exploitScore.rating)} helper={exploitScore.score != null ? `${exploitScore.score}/100` : ''} accent={ratingAccent(exploitScore.rating)} onClick={() => onNavigateSection('exploit')} />
+        <StatCard label="Attack Chains" value={quickSummary.chain_count || 0} helper="Correlated exploit paths" accent="#8b5cf6" onClick={() => onNavigateSection('exploit')} />
+        <StatCard label="Critical Findings" value={severitySummary.critical || 0} helper={`${reachSummary.reachable || 0} reachable`} accent="#DC2626" onClick={() => onNavigateSection('findings')} />
+        <StatCard label="Hidden Noise" value={hiddenNoise} helper="Library + low-value suppressed" accent="#6b7280" />
+      </div>
 
       {/* ── Quick Insight Bar ── */}
       {insightPills.length > 0 && (
@@ -2319,7 +2343,17 @@ function SurfaceSection({ results }) {
   const items = surface[activeType] || []
   const appId = results.app_info?.package || ''
 
+  // Phase 7 Task 6: per-component risk score from the backend inventory.
+  const inv = results.exported_component_inventory || {}
+  const riskByName = {}
+  ;(inv.components || []).forEach(c => { if (c.name) riskByName[c.name] = c.risk })
+  const riskRank = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
+  const componentRisk = item => riskByName[item.name] || (item.exported && item.browsable ? 'critical' : item.exported ? 'high' : 'low')
+
   const sorted = [...items].sort((a, b) => {
+    const ra = riskRank[componentRisk(a)] ?? 4
+    const rb = riskRank[componentRisk(b)] ?? 4
+    if (ra !== rb) return ra - rb
     const score = item => (item.exported ? 2 : 0) + (item.browsable ? 1 : 0)
     return score(b) - score(a)
   })
@@ -2372,12 +2406,21 @@ function SurfaceSection({ results }) {
                         <div className="surface-item__badges">
                           {item.exported && <span className="surface-badge surface-badge--exported">EXPORTED</span>}
                           {item.browsable && <span className="surface-badge surface-badge--browsable">BROWSABLE</span>}
+                          {item.exported ? <Tag tone={componentRisk(item) === 'critical' || componentRisk(item) === 'high' ? 'danger' : (componentRisk(item) === 'medium' ? 'warning' : 'neutral')}>{`RISK: ${componentRisk(item).toUpperCase()}`}</Tag> : null}
                         </div>
                       </div>
                       <ChevronDown size={14} className={`surface-item__chevron${isOpen ? ' is-rotated' : ''}`} />
                     </button>
                     {isOpen ? (
                       <div className="surface-item__expand">
+                        <div className="surface-item__detail">
+                          <span className="surface-item__detail-label">Permission</span>
+                          <div className="tag-row">
+                            {item.permission
+                              ? <Tag tone={['signature', 'signatureOrSystem'].includes(item.permission_protection) ? 'success' : 'warning'}>{`${item.permission} (${item.permission_protection || 'unknown'})`}</Tag>
+                              : <Tag tone={item.exported ? 'danger' : 'neutral'}>{item.exported ? 'None — reachable without permission' : 'None'}</Tag>}
+                          </div>
+                        </div>
                         {(item.deeplinks || []).length ? (
                           <div className="surface-item__detail">
                             <span className="surface-item__detail-label">Deep links</span>
@@ -3642,7 +3685,7 @@ function ExploitabilitySection({ results }) {
   const deepLinks = results.deep_link_inventory || {}
   const highRisk = results.high_risk_components || []
   const summary = results.executive_summary || {}
-  const paths = graph.paths || []
+  const paths = (results.attack_paths && results.attack_paths.length) ? results.attack_paths : (graph.paths || [])
 
   const hasAny = expl.score || surf.score || paths.length || highRisk.length
   if (!hasAny) {
@@ -3693,22 +3736,31 @@ function ExploitabilitySection({ results }) {
       )}
 
       {paths.length > 0 && (
-        <Panel title={`Attack Paths (${paths.length})`} subtitle="Each path chains exploitable weaknesses from attacker input to impact.">
+        <Panel title={`Attack Paths (${paths.length})`} subtitle="Each path chains exploitable weaknesses from attacker input to concrete impact.">
           <div className="sec-list">
-            {paths.map((p, i) => (
-              <div key={p.chain_id || i} className={`sec-list-item sec-list-item--${p.severity === 'critical' ? 'high' : (p.severity || 'medium')}`}>
-                <div className="sec-list-item__header">
-                  <div className="sec-list-item__header-left">
-                    <span className="surface-badge surface-badge--exported">{(p.severity || 'medium').toUpperCase()}</span>
-                    <span className="sec-list-item__name">{p.title}</span>
+            {paths.map((p, i) => {
+              const steps = p.steps || (p.sequence || []).map(n => String(n).split(':').slice(1).join(':') || n)
+              return (
+                <div key={p.chain_id || p.title || i} className={`sec-list-item sec-list-item--${p.severity === 'critical' ? 'high' : (p.severity || 'medium')}`}>
+                  <div className="sec-list-item__header">
+                    <div className="sec-list-item__header-left">
+                      <span className="surface-badge surface-badge--exported">{(p.severity || 'medium').toUpperCase()}</span>
+                      <span className="sec-list-item__name">{p.title}</span>
+                    </div>
+                    {p.likelihood ? <Tag tone="warning">{`Likelihood: ${p.likelihood}`}</Tag> : <Tag tone="warning">{`Exploitability ${p.exploitability || 0}`}</Tag>}
                   </div>
-                  <Tag tone="warning">{`Exploitability ${p.exploitability || 0}`}</Tag>
+                  <div className="sec-list-item__desc" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                    {steps.join('  →  ')}
+                  </div>
+                  {p.impact ? (
+                    <div className="mini-surface" style={{ marginTop: '0.4rem' }}>
+                      <div className="mini-surface__label">Impact</div>
+                      <div className="mini-surface__body">{p.impact}</div>
+                    </div>
+                  ) : null}
                 </div>
-                <div className="sec-list-item__desc" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                  {(p.sequence || []).map(n => String(n).split(':').slice(1).join(':') || n).join('  →  ')}
-                </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </Panel>
       )}

@@ -2,8 +2,8 @@ export const SECTION_GROUPS = [
   {
     title: 'Overview',
     items: [
-      { id: 'dashboard', label: 'Dashboard', hint: 'Security posture, scan score, and decision-driving context.' },
-      { id: 'findings', label: 'Findings', hint: 'Prioritized vulnerabilities with evidence and remediation context.' },
+      { id: 'dashboard', label: 'Overview', hint: 'Executive overview: scores, attack chains, and decision-driving context.' },
+      { id: 'findings', label: 'Findings', hint: 'Reachability-prioritized vulnerabilities with evidence and remediation context.' },
       { id: 'compare', label: 'Compare', hint: 'Diff this scan against a previous one to validate improvements.' },
       { id: 'info', label: 'App Info', hint: 'Package identity, hashes, platform, and scan metadata.' },
     ],

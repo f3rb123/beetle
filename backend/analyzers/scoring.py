@@ -53,6 +53,14 @@ def calculate_score(results: dict) -> dict:
 
     total_deducted += secret_deductions
 
+    # ── Phase 7 Task 7 — factor-based posture breakdown ───────────────────────
+    # A descriptive per-factor view (Attack Chains, SSL, Exported Components,
+    # Secrets, WebView, Certificates, Cleartext) PLUS a small extra penalty for
+    # correlated/reachable risk that the per-severity deductions undercount: an
+    # attack chain is worse than the sum of its individually-counted findings.
+    factors, chain_penalty = _security_factors(results, findings, secrets)
+    total_deducted += chain_penalty
+
     # Bonus points for good practices
     bonuses = []
     platform = results.get("platform", "android")
@@ -111,4 +119,56 @@ def calculate_score(results: dict) -> dict:
         "deductions":     deductions,
         "bonuses":        bonuses,
         "total_bonus":    total_bonus,
+        "factors":        factors,
+        "chain_penalty":  chain_penalty,
     }
+
+
+def _security_factors(results: dict, findings: list, secrets: list) -> tuple[dict, int]:
+    """Phase 7 Task 7 — per-factor posture breakdown + a correlated-risk penalty.
+
+    Returns (factors, extra_deduction). `factors` is descriptive (no double
+    counting with the severity deductions); the extra deduction only reflects
+    reachable attack chains and overall exploitability, which the per-finding
+    severity model undercounts.
+    """
+    def _blob(f):
+        return (str(f.get("title", "")) + " " + str(f.get("category", ""))).lower()
+
+    qs = results.get("quick_summary", {}) or {}
+    chains = qs.get("attack_chain", []) or []
+    chain_count = qs.get("chain_count", len(chains))
+    exploit = (results.get("exploitability_score") or {}).get("score", 0) or 0
+    surf = results.get("attack_surface_score") or {}
+    inv = results.get("exported_component_inventory") or {}
+
+    ssl_issues = sum(1 for f in findings if "ssl" in _blob(f) or "certificate errors" in _blob(f))
+    webview_risks = sum(1 for f in findings if f.get("category") == "WebView")
+    cert_issues = sum(1 for f in findings if f.get("category") == "Certificate"
+                      and f.get("severity") in ("critical", "high", "medium"))
+    cleartext = sum(1 for f in findings if "cleartext" in _blob(f))
+    exported = inv.get("exported_total", 0)
+
+    def _status(n, hi=1):
+        return "issues" if n >= hi else "ok"
+
+    factors = {
+        "attack_chains":      {"count": chain_count, "status": "issues" if chain_count else "ok"},
+        "ssl_issues":         {"count": ssl_issues, "status": _status(ssl_issues)},
+        "exported_components": {"count": exported, "status": "review" if exported else "ok",
+                                "score": surf.get("score", 0), "rating": surf.get("rating", "low")},
+        "secrets":            {"count": len(secrets), "status": _status(len(secrets))},
+        "webview_risks":      {"count": webview_risks, "status": _status(webview_risks)},
+        "certificates":       {"count": cert_issues, "status": _status(cert_issues)},
+        "cleartext_traffic":  {"count": cleartext, "status": _status(cleartext)},
+        "exploitability":     {"score": exploit,
+                               "rating": (results.get("exploitability_score") or {}).get("rating", "low")},
+    }
+
+    # Correlated-risk penalty: chains (5 each, cap 20) + a high-exploitability tax.
+    penalty = min(chain_count * 5, 20)
+    if exploit >= 80:
+        penalty += 10
+    elif exploit >= 60:
+        penalty += 5
+    return factors, penalty

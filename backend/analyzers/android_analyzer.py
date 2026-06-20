@@ -24,11 +24,12 @@ from urllib.parse import urlparse
 from .common import (
     ns, DANGEROUS_PERMISSIONS, SDK_SIGNATURES,
     scan_files_for_secrets, scan_text_for_secrets,
-    extract_urls, sort_findings, SEVERITY_ORDER,
+    extract_urls, sort_findings, sort_findings_by_priority, SEVERITY_ORDER,
     shannon_entropy,
     normalize_severity, compute_severity_summary, dedupe_findings,
 )
 from . import scan_storage
+from . import reachability_engine
 from . import finding_model
 from .code_analyzer import run_android_sast
 from .semgrep_runner import run_semgrep, semgrep_available
@@ -842,16 +843,22 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     # ── Phase 5.4: per-finding quality report ──
     results["finding_quality_report"] = finding_model.build_finding_quality_report(_kept)
     finding_model.log_finding_quality_report(results["finding_quality_report"], platform="android")
-    # Severity summary / score now reflect the cleaned (deduped, de-FP'd) set.
+    # Normalize severities before posture/reachability read them.
     results["findings"] = sort_findings(results["findings"])
-    # Phase 6 Task 2: attack-chain findings always lead the list (before normal findings).
-    _ac = [f for f in results["findings"] if f.get("is_attack_chain")]
-    if _ac:
-        results["findings"] = _ac + [f for f in results["findings"] if not f.get("is_attack_chain")]
-    results["severity_summary"] = compute_severity_summary(results["findings"])
     # ── Phase C/F/H: attack surface inventory, exploitability, attack graph ──
     # Runs before _build_quick_summary (which consumes results["_chain_data"]).
     posture_analyzer.analyze_posture(results)
+    # ── Phase 7 Task 1/2: reachability + attack-path generation. Needs the
+    # exploitability + chain data posture produced; may adjust severity. ──
+    reachability_engine.analyze_reachability(results)
+    # ── Phase 7 Task 5: prioritize by reachability → exploitability → severity ──
+    results["findings"] = sort_findings_by_priority(results["findings"])
+    # Attack-chain findings always lead the list (before normal findings).
+    _ac = [f for f in results["findings"] if f.get("is_attack_chain")]
+    if _ac:
+        results["findings"] = _ac + [f for f in results["findings"] if not f.get("is_attack_chain")]
+    # Severity influence (reachability) changed severities — recompute summary.
+    results["severity_summary"] = compute_severity_summary(results["findings"])
     _build_quick_summary(results)
     _record_module_metric(results, "finalize_results", finalize_started, finding_count=len(results.get("findings", [])))
 
