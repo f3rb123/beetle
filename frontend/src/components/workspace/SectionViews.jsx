@@ -559,7 +559,13 @@ function FindingsList({ findings, onOpenCode, emptyTitle = 'No findings found', 
                       ? <Tag tone="info">Semgrep</Tag>
                       : (finding.source === 'SAST' || finding.rule_id ? <Tag tone="info">SAST</Tag> : null)
                     }
-                    {finding.confidence != null ? <Tag>{finding.confidence}% confidence</Tag> : null}
+                    {finding.ownership_badge ? <Tag tone={finding.is_app_code ? 'success' : 'neutral'}>{finding.ownership_badge}</Tag> : null}
+                    {finding.confidence_score != null
+                      ? <Tag tone={finding.confidence_score >= 70 ? 'success' : (finding.confidence_score >= 40 ? 'warning' : 'neutral')}>{finding.confidence_score}% confidence</Tag>
+                      : (finding.confidence != null ? <Tag>{finding.confidence}% confidence</Tag> : null)
+                    }
+                    {finding.signal_quality ? <Tag tone={finding.signal_quality === 'HIGH' ? 'success' : (finding.signal_quality === 'MEDIUM' ? 'warning' : 'neutral')}>{`Signal: ${finding.signal_quality}`}</Tag> : null}
+                    {finding.grouped && finding.group_member_count ? <Tag tone="info">{`${finding.evidence_count} locations`}</Tag> : null}
                   </div>
                 <div className="finding-card__summary-copy">{summary}</div>
               </div>
@@ -1219,12 +1225,27 @@ function FindingsSection({ results, onOpenCode, viewMode }) {
   const [search, setSearch] = useState('')
   const [showTriaged, setShowTriaged] = useState(false)
   const [triageFilter, setTriageFilter] = useState('all')  // 'all' | triage state id
+  // Phase 3 signal-quality filters. Defaults: application-only, hide <70 confidence.
+  const [scope, setScope] = useState('application')          // 'application' | 'all'
+  const [showLowConfidence, setShowLowConfidence] = useState(false)
 
   const scanId = results.scan_id || 'default'
   const { getFindingTriage, getFindingNote, setFindingTriage, triageCount } = useTriage(scanId)
 
   const allFindings = results.findings || []
-  const workingSet = viewMode === 'quick' ? allFindings.filter(isQuickFinding) : allFindings
+  const qualityStats = results.finding_quality_stats || null
+  // Whether the backend annotated these findings (Phase 3+ scans).
+  const hasQualitySignals = allFindings.some(f => f && (f.ownership_label != null || f.confidence_score != null))
+
+  const scopedSet = allFindings.filter(finding => {
+    if (!hasQualitySignals) return true  // pre-Phase-3 scan: never hide anything
+    // Application Only hides library / framework / SDK findings.
+    if (scope === 'application' && !(finding.is_app_code ?? finding.ownership_label === 'APPLICATION')) return false
+    // Confidence gate (default hides informational/suspicious < 70).
+    if (!showLowConfidence && finding.confidence_score != null && finding.confidence_score < 70) return false
+    return true
+  })
+  const workingSet = viewMode === 'quick' ? scopedSet.filter(isQuickFinding) : scopedSet
 
   const filtered = workingSet.filter(finding => {
     if (severity !== 'all' && finding.severity !== severity) return false
@@ -1241,6 +1262,12 @@ function FindingsSection({ results, onOpenCode, viewMode }) {
       .filter(Boolean)
       .some(value => String(value).toLowerCase().includes(query))
   })
+
+  // Counts for the scope toggle chips (independent of the active scope).
+  const appOnlyCount = hasQualitySignals
+    ? allFindings.filter(f => (f.is_app_code ?? f.ownership_label === 'APPLICATION') && (f.confidence_score == null || f.confidence_score >= 70)).length
+    : allFindings.length
+  const allCount = allFindings.length
 
   const openCount    = workingSet.filter(f => getFindingTriage(f) === 'open').length
   const triagedCount = workingSet.filter(f => getFindingTriage(f) !== 'open').length
@@ -1270,6 +1297,46 @@ function FindingsSection({ results, onOpenCode, viewMode }) {
             })}
           </div>
         </div>
+
+        {/* Phase 3 signal-quality controls */}
+        {hasQualitySignals && (
+          <div className="triage-toolbar">
+            <div className="triage-toolbar__left">
+              <span className="triage-toolbar__label">Scope:</span>
+              <button
+                type="button"
+                className={`filter-chip${scope === 'application' ? ' is-active' : ''}`}
+                onClick={() => setScope('application')}
+                title="Application-owned, high-confidence findings only"
+              >
+                Application Only ({appOnlyCount})
+              </button>
+              <button
+                type="button"
+                className={`filter-chip${scope === 'all' ? ' is-active' : ''}`}
+                onClick={() => setScope('all')}
+                title="Include library, framework and SDK findings"
+              >
+                All Findings ({allCount})
+              </button>
+              <button
+                type="button"
+                className={`filter-chip${showLowConfidence ? ' is-active' : ''}`}
+                onClick={() => setShowLowConfidence(v => !v)}
+                title="Show findings below 70% confidence (informational / suspicious)"
+              >
+                {showLowConfidence ? 'Hide low confidence' : 'Show low confidence'}
+              </button>
+            </div>
+            {qualityStats && (
+              <span className="triage-toolbar__hint">
+                {qualityStats.noise_reduction_pct}% noise reduced ·{' '}
+                {qualityStats.collapsed_duplicates} grouped ·{' '}
+                {qualityStats.suppressed_count} false positives suppressed
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Triage controls row */}
         <div className="triage-toolbar">

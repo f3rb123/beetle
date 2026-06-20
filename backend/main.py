@@ -1138,13 +1138,17 @@ async def generate_report(payload: dict, _user: dict = Depends(_require_auth)):
         results = payload.get("results")
         theme = payload.get("theme", "light")
         prepared_by = payload.get("prepared_by", "")
+        # Phase 3: default to the high-signal, application-only report. Clients
+        # can request the full export with findings_scope="all".
+        findings_scope = payload.get("findings_scope", "application")
 
         if not results:
             raise HTTPException(400, detail="Missing results payload")
 
         scan_id = results.get("scan_id", str(uuid.uuid4()))
         report_path = REPORT_DIR / f"cortex_{scan_id}.pdf"
-        generate_pdf(results, str(report_path), theme=theme, prepared_by=prepared_by)
+        generate_pdf(results, str(report_path), theme=theme, prepared_by=prepared_by,
+                     findings_scope=findings_scope)
 
         app_name = results.get("app_name", "report")
         filename = f"cortex_{app_name}_{theme}.pdf"

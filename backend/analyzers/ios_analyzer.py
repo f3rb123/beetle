@@ -367,6 +367,15 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     # ── Phase 2: finding inventory & noise analysis (internal diagnostics) ──
     results["finding_diagnostics"] = finding_model.build_finding_diagnostics(results["findings"])
     finding_model.log_finding_analysis(results["finding_diagnostics"], platform="ios")
+    # ── Phase 3: signal quality — library filtering, confidence, dedup, FP suppression ──
+    _kept, _suppressed, _quality_stats = finding_model.refine_findings(
+        results["findings"], app_package=_app_pkg, platform="ios",
+    )
+    results["findings"] = _kept
+    results["suppressed_findings"] = _suppressed
+    results["finding_quality_stats"] = _quality_stats
+    finding_model.log_quality_stats(_quality_stats, platform="ios")
+    # Severity summary / score now reflect the cleaned (deduped, de-FP'd) set.
     results["findings"] = sort_findings(results["findings"])
     results["severity_summary"] = compute_severity_summary(results["findings"])
 

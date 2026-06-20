@@ -72,9 +72,18 @@ SEVERITY_LABELS = {
 PAGE_W, PAGE_H = A4
 
 
-def generate_pdf(results: dict, output_path: str, theme: str = "light", prepared_by: str = ""):
+def generate_pdf(results: dict, output_path: str, theme: str = "light", prepared_by: str = "",
+                 findings_scope: str = "application"):
+    """Render the PDF report.
+
+    findings_scope:
+      "application" (default) — only application-owned, high-confidence findings
+                                (Phase 3 default; the high-signal report).
+      "all"                   — every kept finding regardless of ownership/confidence.
+    """
     T = THEMES.get(theme, THEMES["light"])
     report_author = prepared_by.strip() or "Security Analyst"
+    results["_report_findings_scope"] = findings_scope if findings_scope in ("application", "all") else "application"
 
     doc = SimpleDocTemplate(
         output_path,
@@ -344,8 +353,36 @@ def _permissions_section(story, results, T, styles):
 
 
 # ─── Findings ─────────────────────────────────────────────────────────────────
+def _visible_findings(results):
+    """Apply the Phase 3 default presentation filter for the report.
+
+    Default ("application") shows only application-owned, high-confidence
+    (>=70) findings. "all" shows every kept finding. Findings predating Phase 3
+    (no ownership_label/confidence_score) are always shown so old scans don't
+    silently lose their report body.
+    """
+    findings = results.get("findings", []) or []
+    scope = results.get("_report_findings_scope", "application")
+    if scope == "all":
+        return findings
+
+    visible = []
+    for f in findings:
+        label = f.get("ownership_label")
+        conf = f.get("confidence_score")
+        if label is None and conf is None:
+            visible.append(f)  # pre-Phase-3 finding; don't hide it
+            continue
+        if not f.get("is_app_code", label == "APPLICATION"):
+            continue
+        if conf is not None and conf < 70:
+            continue
+        visible.append(f)
+    return visible
+
+
 def _findings_section(story, results, T, styles):
-    findings = results.get("findings", [])
+    findings = _visible_findings(results)
     real_findings = [f for f in findings if f.get("severity") != "info"]
     info_findings = [f for f in findings if f.get("severity") == "info"]
 
@@ -355,6 +392,19 @@ def _findings_section(story, results, T, styles):
     story.append(PageBreak())
     story.append(Paragraph("Security Findings", styles["section_title"]))
     story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
+
+    scope = results.get("_report_findings_scope", "application")
+    stats = results.get("finding_quality_stats") or {}
+    if scope == "application" and stats:
+        story.append(Spacer(1, 2 * mm))
+        story.append(Paragraph(
+            f"Showing {len(findings)} high-signal, application-owned finding(s). "
+            f"{stats.get('suppressed_count', 0)} false positive(s) suppressed, "
+            f"{stats.get('collapsed_duplicates', 0)} duplicate(s) grouped, "
+            f"{stats.get('reclassified_controls', 0)} security control(s) reclassified. "
+            f"Library / framework / low-confidence findings are available in the full export.",
+            styles["caption"],
+        ))
     story.append(Spacer(1, 6 * mm))
 
     for i, finding in enumerate(real_findings + info_findings):
@@ -383,6 +433,9 @@ def _findings_section(story, results, T, styles):
         ]))
 
         content_rows = []
+        signal_bits = _format_signal_quality(finding)
+        if signal_bits:
+            content_rows.append(["Signal", signal_bits])
         if finding.get("description"):
             content_rows.append(["Description", finding["description"]])
         evidence_text = _format_finding_evidence(finding)
@@ -452,6 +505,34 @@ def _format_finding_evidence(finding: dict) -> str:
         snippets.append(f"<font face='Courier'>{escape(str(code_context)[:320])}</font>")
 
     return "<br/><br/>".join(snippets)
+
+
+_OWNERSHIP_BADGE_LABELS = {
+    "APPLICATION": "Application", "THIRD_PARTY_LIBRARY": "Third-Party Library",
+    "ANDROID_FRAMEWORK": "Framework", "GOOGLE_SDK": "Google SDK",
+    "FIREBASE": "Firebase", "JETPACK": "Jetpack", "UNKNOWN": "Unknown",
+}
+
+
+def _format_signal_quality(finding: dict) -> str:
+    """Render the Phase 3 ownership / confidence / evidence line for a finding."""
+    label = finding.get("ownership_label")
+    if label is None and finding.get("confidence_score") is None:
+        return ""  # pre-Phase-3 finding
+    parts = []
+    own = _OWNERSHIP_BADGE_LABELS.get(label, label)
+    if own:
+        parts.append(f"Ownership: {own}")
+    conf = finding.get("confidence_score")
+    if conf is not None:
+        parts.append(f"Confidence: {conf}% ({finding.get('confidence_band', '')})")
+    ev = finding.get("evidence_count")
+    if ev:
+        parts.append(f"Evidence: {ev} location(s)")
+    sq = finding.get("signal_quality")
+    if sq:
+        parts.append(f"Signal Quality: {sq}")
+    return "  •  ".join(p for p in parts if p)
 
 
 def _format_standards(finding: dict) -> str:
