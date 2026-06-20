@@ -29,6 +29,7 @@ from .common import (
     normalize_severity, compute_severity_summary, dedupe_findings,
 )
 from . import scan_storage
+from . import finding_model
 from .code_analyzer import run_android_sast
 from .semgrep_runner import run_semgrep, semgrep_available
 from .osv_scanner import scan_dependencies
@@ -799,6 +800,12 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     # summary AFTER validation layer runs so counts and findings always match.
     # Dedupe BEFORE sorting / summary / scoring so all three agree.
     results["findings"] = dedupe_findings(results["findings"])
+    # ── Phase 0/1: canonical normalization + ownership (additive, non-destructive) ──
+    _app_pkg = results.get("app_info", {}).get("package", "")
+    finding_model.canonicalize_findings(results["findings"], _app_pkg)
+    results["ownership_metrics"] = finding_model.emit_diagnostics(
+        results["findings"], platform="android", app_package=_app_pkg,
+    )
     results["findings"] = sort_findings(results["findings"])
     results["severity_summary"] = compute_severity_summary(results["findings"])
     _build_quick_summary(results)
