@@ -1,0 +1,209 @@
+{
+  "generated_at": "2026-06-20T18:23:04.712152Z",
+  "tool": "Cortex / Beetle",
+  "success_criteria": {
+    "trust_score": "> 80",
+    "evidence_coverage_pct": "> 95",
+    "source_resolution_pct": "> 95",
+    "view_code_coverage_pct": "> 95",
+    "pdf_success": "== True"
+  },
+  "targets_pass": false,
+  "apps_run": 3,
+  "apps_meeting_targets": 1,
+  "apps_skipped": [
+    {
+      "name": "Signal",
+      "type": "real_world",
+      "reason": "APK not found in /tmp/cortex"
+    },
+    {
+      "name": "Firefox Android",
+      "type": "real_world",
+      "reason": "APK not found in /tmp/cortex"
+    },
+    {
+      "name": "Banking App (template)",
+      "type": "template",
+      "reason": "template profile \u2014 supply an APK to run"
+    },
+    {
+      "name": "Enterprise App (template)",
+      "type": "template",
+      "reason": "template profile \u2014 supply an APK to run"
+    }
+  ],
+  "comparison_mobsf": {
+    "detection_coverage": {
+      "cortex": 3,
+      "mobsf": 3,
+      "note": "Both cover manifest/code/cert/secrets/deps broadly."
+    },
+    "evidence_quality": {
+      "cortex": 3,
+      "mobsf": 2,
+      "note": "Cortex: exact file+line+snippet per finding."
+    },
+    "view_code_quality": {
+      "cortex": 3,
+      "mobsf": 1,
+      "note": "Cortex resolves findings to decompiled source + jump-to-line."
+    },
+    "false_positive_rate": {
+      "cortex": 3,
+      "mobsf": 1,
+      "note": "Cortex suppresses library/framework noise by ownership."
+    },
+    "ownership_awareness": {
+      "cortex": 3,
+      "mobsf": 0,
+      "note": "Cortex classifies app vs library/SDK/framework."
+    },
+    "attack_chain_detection": {
+      "cortex": 3,
+      "mobsf": 0,
+      "note": "Cortex correlates findings into exploit chains."
+    },
+    "analyst_usability": {
+      "cortex": 3,
+      "mobsf": 1,
+      "note": "Cortex adds reachability, exploitability, prioritization."
+    },
+    "report_quality": {
+      "cortex": 3,
+      "mobsf": 2,
+      "note": "Cortex: robust PDF + executive/trust summaries."
+    }
+  },
+  "apps": [
+    {
+      "app": "Damn Vulnerable Bank (DVBA)",
+      "key": "dvba",
+      "type": "vulnerable",
+      "version": "1.0",
+      "package": "com.app.damnvulnerablebank",
+      "apk_size_mb": 4,
+      "total_findings": 40,
+      "suppressed_findings": 43,
+      "attack_chains": 2,
+      "attack_chain_ids": [
+        "crypto_failure",
+        "webview_rce"
+      ],
+      "trust_score": 77,
+      "trust_rating": "HIGH",
+      "evidence_coverage_pct": 100,
+      "source_resolution_pct": 100,
+      "view_code_coverage_pct": 100,
+      "source_not_applicable": 4,
+      "signal_findings": 21,
+      "noise_findings": 62,
+      "signal_ratio": 0.525,
+      "ownership_certainty_pct": 57,
+      "ownership_breakdown": {
+        "APPLICATION": 21,
+        "UNKNOWN": 17,
+        "JETPACK": 2
+      },
+      "attack_chain_coverage_pct": 100,
+      "missing_expected_chains": [],
+      "false_positive_rate_pct": 50.6,
+      "pdf_success": true,
+      "pdf_detail": "43 KB",
+      "gate_pass": false,
+      "gate_failures": [
+        "trust_score=77 (need > 80)"
+      ]
+    },
+    {
+      "app": "InsecureShop",
+      "key": "insecureshop",
+      "type": "vulnerable",
+      "version": "1.0",
+      "package": "com.insecureshop",
+      "apk_size_mb": 5,
+      "total_findings": 45,
+      "suppressed_findings": 40,
+      "attack_chains": 5,
+      "attack_chain_ids": [
+        "crypto_failure",
+        "debug_backup_exfil",
+        "intent_injection",
+        "permission_data_leak",
+        "webview_rce"
+      ],
+      "trust_score": 84,
+      "trust_rating": "HIGH",
+      "evidence_coverage_pct": 100,
+      "source_resolution_pct": 100,
+      "view_code_coverage_pct": 100,
+      "source_not_applicable": 3,
+      "signal_findings": 22,
+      "noise_findings": 63,
+      "signal_ratio": 0.489,
+      "ownership_certainty_pct": 98,
+      "ownership_breakdown": {
+        "APPLICATION": 22,
+        "JETPACK": 15,
+        "UNKNOWN": 1,
+        "ANDROID_FRAMEWORK": 4,
+        "THIRD_PARTY_LIBRARY": 1,
+        "GOOGLE_SDK": 2
+      },
+      "attack_chain_coverage_pct": 100,
+      "missing_expected_chains": [],
+      "false_positive_rate_pct": 45.5,
+      "pdf_success": true,
+      "pdf_detail": "48 KB",
+      "gate_pass": true,
+      "gate_failures": []
+    },
+    {
+      "app": "Washington Post",
+      "key": "washingtonpost",
+      "type": "real_world",
+      "version": "7.4.1",
+      "package": "com.washingtonpost.android",
+      "apk_size_mb": 85,
+      "total_findings": 74,
+      "suppressed_findings": 2,
+      "attack_chains": 4,
+      "attack_chain_ids": [
+        "crypto_failure",
+        "intent_injection",
+        "permission_data_leak",
+        "webview_rce"
+      ],
+      "trust_score": 80,
+      "trust_rating": "HIGH",
+      "evidence_coverage_pct": 100,
+      "source_resolution_pct": 97,
+      "view_code_coverage_pct": 97,
+      "source_not_applicable": 6,
+      "signal_findings": 39,
+      "noise_findings": 37,
+      "signal_ratio": 0.527,
+      "ownership_certainty_pct": 66,
+      "ownership_breakdown": {
+        "APPLICATION": 39,
+        "UNKNOWN": 25,
+        "GOOGLE_SDK": 4,
+        "THIRD_PARTY_LIBRARY": 3,
+        "ANDROID_FRAMEWORK": 3
+      },
+      "attack_chain_coverage_pct": null,
+      "missing_expected_chains": [],
+      "false_positive_rate_pct": 2.6,
+      "pdf_success": true,
+      "pdf_detail": "82 KB",
+      "gate_pass": false,
+      "gate_failures": [
+        "trust_score=80 (need > 80)"
+      ]
+    }
+  ],
+  "regressions": [],
+  "pdf_all_ok": true,
+  "merge_gate_pass": true,
+  "baseline_present": true
+}
