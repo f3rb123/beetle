@@ -137,7 +137,18 @@ def _compute_resolution_scores(results: dict, findings: list) -> None:
 
 
 def _compute_trust_score(results: dict, findings: list) -> None:
-    """Task 7 — 0-100 trust score from five weighted factors."""
+    """Trust score — "can analysts trust the findings?" — 0-100.
+
+    Measures report trustworthiness only: evidence quality, source resolution,
+    ownership certainty and chain confidence. Reachability is intentionally NOT
+    a factor here — it answers "can attackers exploit this?", a separate concern
+    already surfaced via reachability / exploitability. Including it conflated
+    exploitability with trust and double-penalised obfuscated apps (the same
+    UNKNOWN-ownership findings dragged both ownership and reachability). See the
+    Phase-8.1 root-cause analysis. Reachability analysis itself is unchanged.
+
+    Weights: evidence 35% · source 30% · ownership 20% · chain 15%.
+    """
     total = len(findings)
     if not total:
         results["trust_score"] = {"score": 100, "rating": HIGH, "factors": {},
@@ -147,7 +158,6 @@ def _compute_trust_score(results: dict, findings: list) -> None:
     eq = sum(_QUALITY_VALUE.get(f.get("evidence_quality", LOW), 25) for f in findings) / total
     src = sum(1 for f in findings if f.get("source_resolved")) / total * 100
     owned = sum(1 for f in findings if f.get("ownership_label") not in (None, "", "UNKNOWN")) / total * 100
-    reach = sum(1 for f in findings if f.get("reachability_confidence") in (HIGH, MEDIUM)) / total * 100
 
     chains = [f for f in findings if f.get("is_attack_chain")]
     if chains:
@@ -159,11 +169,10 @@ def _compute_trust_score(results: dict, findings: list) -> None:
         "evidence_quality": round(eq),
         "source_resolution": round(src),
         "ownership_certainty": round(owned),
-        "reachability_certainty": round(reach),
         "chain_confidence": round(chain_conf),
     }
     score = round(
-        0.30 * eq + 0.25 * src + 0.15 * owned + 0.15 * reach + 0.15 * chain_conf
+        0.35 * eq + 0.30 * src + 0.20 * owned + 0.15 * chain_conf
     )
     score = max(0, min(100, score))
     rating = HIGH if score >= 75 else (MEDIUM if score >= 50 else LOW)

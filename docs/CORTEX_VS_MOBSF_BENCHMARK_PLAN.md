@@ -69,7 +69,7 @@ Output directory: `CORTEX_BENCHMARK_OUT` (default `/tmp/cortex/benchmark`).
 
 | Metric | Definition | Source |
 |---|---|---|
-| **Trust Score** | 0–100 weighted blend of evidence quality, source resolution, ownership certainty, reachability certainty, chain confidence. | `results.trust_score.score` |
+| **Trust Score** | 0–100 weighted blend of evidence quality (35%), source resolution (30%), ownership certainty (20%), chain confidence (15%). Measures *report trustworthiness only*; reachability is intentionally excluded (it answers "can attackers exploit this?", surfaced separately). | `results.trust_score.score` |
 | **Evidence Coverage %** | findings carrying ≥1 concrete piece of evidence / total findings. | `results.resolution_scores.evidence_coverage_pct` |
 | **Source Resolution %** | source-applicable findings resolved to a real file / source-applicable findings. | `results.resolution_scores.source_resolution_pct` |
 | **View Code Coverage %** | source-applicable findings with a working View-Code target / source-applicable findings. | `results.resolution_scores.view_code_coverage_pct` |
