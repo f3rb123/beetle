@@ -395,9 +395,9 @@ def _permissions_section(story, results, T, styles):
     for p in sorted(dangerous, key=lambda x: ["high", "medium", "low"].index(x.get("severity", "low")) if x.get("severity") in ["high", "medium", "low"] else 3):
         color = SEVERITY_COLORS.get(p.get("severity", "info"), HexColor("#64748B"))
         rows.append([
-            Paragraph(p.get("short_name", p.get("permission", "")[:40]), styles["table_cell_mono"]),
+            Paragraph(_safe(p.get("short_name", p.get("permission", "")[:40])), styles["table_cell_mono"]),
             Paragraph(f'<font color="{color.hexval()}"><b>{p.get("severity", "").upper()}</b></font>', styles["table_cell"]),
-            Paragraph(p.get("description", ""), styles["table_cell"]),
+            Paragraph(_safe(p.get("description", "")), styles["table_cell"]),
         ])
 
     t = Table(rows, colWidths=[55 * mm, 20 * mm, 80 * mm])
@@ -682,10 +682,10 @@ def _behavior_section(story, results, T, styles):
         color = SEVERITY_COLORS.get(item.get("severity", "info"), HexColor("#64748B"))
         standards = ", ".join(filter(None, [item.get("cwe"), item.get("owasp"), item.get("masvs")]))
         rows.append([
-            Paragraph(item.get("title", ""), styles["table_cell"]),
+            Paragraph(_safe(item.get("title", "")), styles["table_cell"]),
             Paragraph(f'<font color="{color.hexval()}"><b>{item.get("severity","").upper()}</b></font>', styles["table_cell"]),
             Paragraph(str(item.get("file_count", 0)), styles["table_cell"]),
-            Paragraph(standards, styles["table_cell"]),
+            Paragraph(_safe(standards), styles["table_cell"]),
         ])
 
     t = Table(rows, colWidths=[70 * mm, 20 * mm, 15 * mm, 50 * mm])
@@ -739,11 +739,11 @@ def _domain_intel_section(story, results, T, styles):
     rows = [["Domain", "IP", "Country", "Reputation", "Risk Flags"]]
     for item in intel[:30]:
         rows.append([
-            Paragraph(item.get("domain", ""), styles["table_cell_mono"]),
-            Paragraph(item.get("ip", "") or "â€”", styles["table_cell"]),
-            Paragraph(item.get("country", "") or "â€”", styles["table_cell"]),
-            Paragraph(item.get("reputation", "") or item.get("status", ""), styles["table_cell"]),
-            Paragraph(", ".join(item.get("risk_flags", [])[:4]) or "â€”", styles["table_cell"]),
+            Paragraph(_safe(item.get("domain", "")), styles["table_cell_mono"]),
+            Paragraph(_safe(item.get("ip", "")) or "â€”", styles["table_cell"]),
+            Paragraph(_safe(item.get("country", "")) or "â€”", styles["table_cell"]),
+            Paragraph(_safe(item.get("reputation", "") or item.get("status", "")), styles["table_cell"]),
+            Paragraph(_safe(", ".join(item.get("risk_flags", [])[:4])) or "â€”", styles["table_cell"]),
         ])
 
     t = Table(rows, colWidths=[45 * mm, 25 * mm, 25 * mm, 25 * mm, 40 * mm])
@@ -807,9 +807,9 @@ def _sdks_section(story, results, T, styles):
     rows = [["SDK Name", "Category", "Package Prefix"]]
     for sdk in sorted(sdks, key=lambda s: s.get("name", "")):
         rows.append([
-            Paragraph(sdk.get("name", ""), styles["table_cell"]),
-            Paragraph(sdk.get("category", ""), styles["table_cell"]),
-            Paragraph(sdk.get("package", ""), styles["table_cell_mono"]),
+            Paragraph(_safe(sdk.get("name", "")), styles["table_cell"]),
+            Paragraph(_safe(sdk.get("category", "")), styles["table_cell"]),
+            Paragraph(_safe(sdk.get("package", "")), styles["table_cell_mono"]),
         ])
 
     t = Table(rows, colWidths=[55 * mm, 35 * mm, 65 * mm])
@@ -1224,7 +1224,7 @@ def _string_analysis_section(story, results, T, styles):
             Paragraph(cat, styles["table_cell"]),
             Paragraph(f'<font color="{color.hexval()}"><b>{info["severity"].upper()}</b></font>', styles["table_cell"]),
             Paragraph(str(info["count"]), styles["table_cell"]),
-            Paragraph(f'<font face="Courier" size="7">{samples}</font>', styles["table_cell"]),
+            Paragraph(f'<font face="Courier" size="7">{_safe(samples)}</font>', styles["table_cell"]),
         ])
 
     t = Table(rows, colWidths=[55*mm, 22*mm, 15*mm, 63*mm])
@@ -1253,9 +1253,9 @@ def _permissions_section_pdf(story, results, T, styles):
         status_colors = {"dangerous": HexColor("#DC2626"), "unknown": HexColor("#64748B"), "normal": HexColor("#16A34A")}
         color = status_colors.get(status, HexColor("#64748B"))
         rows.append([
-            Paragraph(f'<font face="Courier" size="8">{p.get("permission","")}</font>', styles["table_cell"]),
+            Paragraph(f'<font face="Courier" size="8">{_safe(p.get("permission",""))}</font>', styles["table_cell"]),
             Paragraph(f'<font color="{color.hexval()}"><b>{status.upper()}</b></font>', styles["table_cell"]),
-            Paragraph(p.get("description","")[:80], styles["table_cell"]),
+            Paragraph(_safe(p.get("description","")[:80]), styles["table_cell"]),
         ])
 
     t = Table(rows, colWidths=[70*mm, 22*mm, 63*mm])
@@ -1283,8 +1283,8 @@ def _browsable_section_pdf(story, results, T, styles):
         risk_color = SEVERITY_COLORS["high"] if has_custom else SEVERITY_COLORS["low"]
         deeplinks = ", ".join(comp.get("deeplinks", []))[:60]
         rows.append([
-            Paragraph(comp.get("short_name", ""), styles["table_cell_mono"]),
-            Paragraph(deeplinks, styles["table_cell_mono"]),
+            Paragraph(_safe(comp.get("short_name", "")), styles["table_cell_mono"]),
+            Paragraph(_safe(deeplinks), styles["table_cell_mono"]),
             Paragraph(f'<font color="{risk_color.hexval()}">{risk}</font>', styles["table_cell"]),
         ])
 
