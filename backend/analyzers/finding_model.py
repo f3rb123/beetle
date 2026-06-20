@@ -914,6 +914,42 @@ def _is_taint(finding: dict) -> bool:
         or finding.get("category") == "Taint Analysis"
 
 
+# ── Phase G: taint-flow value gate ───────────────────────────────────────────
+# Sinks that are a real injection / exfiltration primitive regardless of the
+# data's sensitivity — a tainted value reaching them is always worth surfacing.
+_HIGH_VALUE_TAINT_SINKS = {
+    "webview", "filesystem", "crypto", "execution", "sqlite", "network",
+    "reflection", "dynamicloading", "dynamic_loading",
+}
+# Sinks whose risk depends on the data: logging to logcat, intent redirects, and
+# prefs writes are low value unless the source is genuinely sensitive PII.
+_LOW_VALUE_TAINT_SINKS = {"logging", "intent", "storage"}
+# PII / privileged sources that justify keeping even a low-value sink flow.
+_PII_TAINT_SOURCES = {
+    "location", "sms", "accounts", "camera", "microphone", "clipboard",
+    "contentprovider",
+}
+
+
+def _is_low_value_taint(f: dict) -> bool:
+    """Phase G: a taint flow into a low-value sink (Log / Intent / SharedPrefs)
+    whose source is not sensitive PII — noise, not an actionable vulnerability.
+
+    High-value sinks (WebView, SQL, file write, exec, reflection, dynamic
+    loading, network) are NEVER low value; those are always prioritized.
+    """
+    if not _is_taint(f):
+        return False
+    tf = f.get("taint_flow") or {}
+    sink = str(tf.get("sink_cat") or f.get("sink_cat") or "").replace(" ", "").lower()
+    source = str(tf.get("source_cat") or f.get("source_cat") or "").replace(" ", "").lower()
+    if sink in _HIGH_VALUE_TAINT_SINKS:
+        return False
+    if sink in _LOW_VALUE_TAINT_SINKS:
+        return source not in _PII_TAINT_SOURCES
+    return False
+
+
 def _group_taint_findings(findings: list[dict]) -> tuple[list[dict], int]:
     """Collapse taint flows that share a sink-derived group title.
 
@@ -1491,12 +1527,26 @@ def refine_findings(findings: list[dict], *, app_package: str = "",
         f["confidence_score"] = conf
         f["confidence_band"] = confidence_band(conf)
 
+    # 1b. Phase G — prune low-value taint flows (Input→Log / →Intent / →prefs
+    # without sensitive PII source) BEFORE grouping so they neither inflate the
+    # report nor the collapsed-duplicate count. High-value sinks are untouched.
+    taint_pruned: list[dict] = []
+    survivors: list[dict] = []
+    for f in findings:
+        if _is_low_value_taint(f):
+            f["suppressed"] = True
+            f["suppressed_reason"] = "low_value_taint_sink"
+            taint_pruned.append(f)
+        else:
+            survivors.append(f)
+    findings = survivors
+
     # 2. Taint-flow grouping (collapses duplicates; evidence preserved).
     findings, collapsed = _group_taint_findings(findings)
 
     # 3. Suppression of known false positives + final quality scoring.
     kept: list[dict] = []
-    suppressed: list[dict] = []
+    suppressed: list[dict] = list(taint_pruned)
     for f in findings:
         f["evidence_count"] = _evidence_count(f)
         text = _finding_text(f)

@@ -211,6 +211,25 @@ def analyze_certificate(apk_path: str, results: dict):
             "owasp":          "M10",
         })
 
+    # Self-signed (subject == issuer). Expected for Android app signing (no CA
+    # chain), so INFO — but absent a debug cert it is still worth surfacing for
+    # MobSF parity and to prompt signing-key verification. Skip when already
+    # flagged as a debug cert (the stronger, more specific signal).
+    if cert_info.get("self_signed") and not cert_info.get("debug_cert"):
+        results["findings"].append({
+            "title":          "Self-Signed Signing Certificate",
+            "severity":       "info",
+            "category":       "Certificate",
+            "description":    "The APK is signed with a self-signed certificate (subject == issuer). "
+                               "This is normal for Android app signing (there is no CA chain of trust), "
+                               "but it means trust rests entirely on the signing key itself.",
+            "impact":         "No certificate authority vouches for this identity; integrity trust is pinned to the raw signing key.",
+            "recommendation": "Confirm the SHA-256 signing fingerprint matches your release key and is enrolled in Play App Signing, and keep the keystore protected.",
+            "evidence":       _cert_evidence(cert_info),
+            "masvs":          "MASVS-CODE-4",
+            "owasp":          "M7",
+        })
+
     if "v1" in cert_info["scheme"] and "v2" not in cert_info["scheme"]:
         results["findings"].append({
             "title":          "Only APK Signature Scheme v1 Used",
