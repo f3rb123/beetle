@@ -278,6 +278,44 @@ def _executive_summary(story, results, T, styles):
         t.setStyle(_table_style(T))
         story.append(t)
 
+    # ── Posture scores (Phase C / H) ──────────────────────────────────────────
+    expl = results.get("exploitability_score") or {}
+    surf = results.get("attack_surface_score") or {}
+    if expl or surf:
+        story.append(Spacer(1, 5 * mm))
+        if expl:
+            story.append(Paragraph(
+                f"Exploitability Score: <b>{int(expl.get('score', 0))}/100</b> "
+                f"({escape(str(expl.get('rating', '')))}) — {escape(str(expl.get('reason', '')))}",
+                styles["body"]))
+        if surf:
+            story.append(Paragraph(
+                f"Attack Surface Score: <b>{int(surf.get('score', 0))}/100</b> "
+                f"({escape(str(surf.get('rating', '')))})",
+                styles["body"]))
+
+    # ── Signal-quality funnel (Phase K) ───────────────────────────────────────
+    es = results.get("executive_summary") or {}
+    if es:
+        story.append(Spacer(1, 6 * mm))
+        story.append(Paragraph("Signal Quality", styles["body"]))
+        funnel = [
+            ("Raw detections",                  es.get("raw_detections", 0)),
+            ("Duplicates grouped",              es.get("duplicates_grouped", 0)),
+            ("Library findings hidden",         es.get("library_findings_hidden", 0)),
+            ("False positives removed",         es.get("false_positives_suppressed", 0)),
+            ("Low-value data flows pruned",     es.get("low_value_flows_pruned", 0)),
+            ("High-signal findings presented",  es.get("high_signal_findings", 0)),
+        ]
+        srows = [["Stage", "Count"]] + [
+            [Paragraph(escape(k), styles["table_cell"]),
+             Paragraph(f"<b>{int(v)}</b>", styles["table_cell"])]
+            for k, v in funnel
+        ]
+        st = Table(srows, colWidths=[120 * mm, 35 * mm])
+        st.setStyle(_table_style(T))
+        story.append(st)
+
 
 def _sev_desc(sev):
     return {

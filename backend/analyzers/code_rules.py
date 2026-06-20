@@ -104,6 +104,18 @@ CODE_RULES = [
         "recommendation": "Disable geolocation unless required. Implement proper user consent flow.",
     },
     {
+        "id":          "android_webview_mixed_content",
+        "title":       "WebView Mixed Content Allowed",
+        "pattern":     r"setMixedContentMode\s*\(\s*[^)]*MIXED_CONTENT_ALWAYS_ALLOW",
+        "severity":    "high",
+        "category":    "WebView",
+        "cwe":         "CWE-319",
+        "masvs":       "MASVS-NETWORK-1",
+        "owasp":       "M3",
+        "description": "WebView is set to MIXED_CONTENT_ALWAYS_ALLOW, letting an HTTPS page load HTTP sub-resources (scripts, iframes, XHR). An on-path attacker can inject content into the otherwise-secure page.",
+        "recommendation": "Use MIXED_CONTENT_NEVER_ALLOW (the default on modern Android). Serve all WebView resources over HTTPS.",
+    },
+    {
         "id":          "android_webview_local_storage",
         "title":       "WebView DOM Storage / Local Storage Enabled",
         "pattern":     r"setDomStorageEnabled\(true\)",
