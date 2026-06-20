@@ -367,6 +367,8 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     # ── Phase 2: finding inventory & noise analysis (internal diagnostics) ──
     results["finding_diagnostics"] = finding_model.build_finding_diagnostics(results["findings"])
     finding_model.log_finding_analysis(results["finding_diagnostics"], platform="ios")
+    # ── Cross-section noise scrub (endpoints / IPs / binary-dump evidence) ──
+    results["scrub_stats"] = finding_model.scrub_noise(results)
     # ── Phase 3: signal quality — library filtering, confidence, dedup, FP suppression ──
     _kept, _suppressed, _quality_stats = finding_model.refine_findings(
         results["findings"], app_package=_app_pkg, platform="ios",

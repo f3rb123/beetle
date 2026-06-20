@@ -49,6 +49,8 @@ def analyze_android_apis(tmpdir: str, results: dict):
     """
     # Collect all text content
     content_map = {}  # file_path -> content
+    dex_blobs = {}    # file_path -> dumped strings (fallback only)
+    has_source = False
     seen_hashes = set()
     duplicate_skips = 0
     for root, _, files in os.walk(tmpdir):
@@ -65,6 +67,8 @@ def analyze_android_apis(tmpdir: str, results: dict):
                         continue
                     seen_hashes.add(content_hash)
                     content_map[fpath] = content
+                    if ext in ('.java', '.kt', '.smali'):
+                        has_source = True
                 except Exception:
                     continue
             elif ext == '.dex':
@@ -73,14 +77,20 @@ def analyze_android_apis(tmpdir: str, results: dict):
                     with open(fpath, 'rb') as f:
                         raw = f.read()
                     text = "".join(chr(b) if 32 <= b < 127 else " " for b in raw)
-                    content_hash = hash(text)
-                    if content_hash in seen_hashes:
-                        duplicate_skips += 1
-                        continue
-                    seen_hashes.add(content_hash)
-                    content_map[fpath] = text
+                    dex_blobs[fpath] = text
                 except Exception:
                     continue
+
+    # Only fall back to raw classes.dex strings when no real source was found —
+    # otherwise classes.dex pollutes the API file lists with a binary path.
+    if not has_source:
+        for fpath, text in dex_blobs.items():
+            content_hash = hash(text)
+            if content_hash in seen_hashes:
+                duplicate_skips += 1
+                continue
+            seen_hashes.add(content_hash)
+            content_map[fpath] = text
 
     api_results = {}
 

@@ -406,6 +406,11 @@ export function getPrimaryEvidence(finding = {}) {
 // regardless of jadx, so they must stay viewable when jadx failed.
 const JAVA_SOURCE_EXTS = ['.java', '.kt', '.kts']
 
+// Binary artifacts (and their printable-strings dumps). Opening these in the
+// source viewer shows unreadable binary noise, not decompiled source, so the
+// View Code affordance is suppressed for them entirely.
+const BINARY_DUMP_RE = /\.(dex|so|dylib|arsc|odex|vdex|oat)(\.txt)?$/i
+
 /**
  * Decide whether the code viewer can resolve a given evidence path for a scan.
  *
@@ -418,8 +423,10 @@ const JAVA_SOURCE_EXTS = ['.java', '.kt', '.kts']
  */
 export function canViewSource(path, decompileInfo) {
   if (!path) return false
-  if (!decompileInfo) return true
   const lower = String(path).toLowerCase()
+  // Never offer to "view" a binary or its strings-dump — it isn't real source.
+  if (BINARY_DUMP_RE.test(lower)) return false
+  if (!decompileInfo) return true
   const dot = lower.lastIndexOf('.')
   const ext = dot >= 0 ? lower.slice(dot) : ''
   if (!JAVA_SOURCE_EXTS.includes(ext)) return true

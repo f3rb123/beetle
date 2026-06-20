@@ -110,16 +110,41 @@ _VERSION_DECL_RE = re.compile(
 )
 
 def classify_ip(ip_str: str) -> str | None:
-    """Returns 'private', 'public', or None if invalid/skip."""
+    """Returns 'private', 'public', or None if invalid/skip.
+
+    Rejects non-routable / reserved / documentation ranges that are pure noise
+    in a decompiled app (link-local, reserved, TEST-NET, multicast, etc.).
+    """
     try:
         ip = ipaddress.ip_address(ip_str)
-        if ip.is_loopback or ip.is_unspecified or ip.is_multicast:
-            return None
-        if ip.is_private:
-            return "private"
-        return "public"
     except ValueError:
         return None
+    if (ip.is_loopback or ip.is_unspecified or ip.is_multicast
+            or ip.is_link_local or ip.is_reserved):
+        return None
+    # RFC 5737 / RFC 6598 documentation & shared-address ranges are not real
+    # endpoints — they only appear as examples/placeholders in code.
+    if any(ip in ipaddress.ip_network(net) for net in (
+        "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "100.64.0.0/10",
+    )):
+        return None
+    if ip.is_private:
+        return "private"
+    return "public"
+
+
+# Binary string-dump artifacts: a finding/IP attributed here is never a real
+# source location (it's a printable-strings dump of a binary). We refuse to
+# surface evidence from these — the decompiled Java/Kotlin source is the truth.
+_BINARY_DUMP_SUFFIXES = (
+    ".dex", ".so", ".dylib", ".arsc", ".odex", ".vdex", ".oat",
+    ".dex.txt", ".so.txt", ".dylib.txt", ".arsc.txt",
+)
+
+
+def is_binary_dump_path(path: str) -> bool:
+    p = (path or "").replace("\\", "/").lower()
+    return p.endswith(_BINARY_DUMP_SUFFIXES)
 
 
 @lru_cache(maxsize=256)
@@ -321,6 +346,11 @@ def scan_directory_for_ips(
                 if files_scanned >= _EV_MAX_FILES:
                     break
                 if not any(fname.lower().endswith(ext) for ext in IP_EXTENSIONS):
+                    continue
+                # Never scan binary string-dumps (classes.dex.txt, *.so.txt …):
+                # they are a goldmine of emulator/version false-positive IPs and
+                # can't be opened as real source.
+                if is_binary_dump_path(fname):
                     continue
                 fpath = os.path.join(root, fname)
                 try:
@@ -1128,10 +1158,29 @@ URL_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# XML namespace / schema / spec hosts. These are URIs used as identifiers in
+# XML, manifests and licenses — never network endpoints. Matched as substrings.
+NAMESPACE_URL_HOSTS = (
+    "schemas.android.com", "schemas.microsoft.com", "schemas.openxmlformats.org",
+    "schemas.xmlsoap.org", "www.w3.org", "/www.w3.org", "xmlns",
+    "ns.adobe.com", "java.sun.com", "xml.org", "purl.org", "iana.org",
+    "apache.org/licenses", "apache.org/xml", "specs.openid.net",
+    "openid.net/specs", "docbook.org", "relaxng.org", "oasis-open.org",
+    "w3.org/2000", "w3.org/2001", "w3.org/1999", "w3.org/XML",
+)
+
 URL_SKIP = {
-    "schemas.android.com", "www.w3.org", "xmlns", "example.com",
+    "example.com", "test.com", "localhost",
     "developer.android.com", "play.google.com/store",
+    *NAMESPACE_URL_HOSTS,
 }
+
+
+def is_namespace_url(url: str) -> bool:
+    """True for XML-namespace / schema / spec URIs that are not endpoints."""
+    u = (url or "").lower()
+    return any(host in u for host in NAMESPACE_URL_HOSTS)
+
 
 def extract_urls(text: str) -> list:
     urls = set()

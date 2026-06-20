@@ -1,6 +1,44 @@
 import re
 import os
+import ipaddress
 from .path_utils import normalize_relative_path
+
+
+def _is_real_ip(val: str) -> bool:
+    """Accept only routable IPv4 literals — reject version numbers, reserved,
+    link-local, documentation and loopback ranges (the bulk of IP-shaped noise).
+    """
+    try:
+        ip = ipaddress.ip_address(val)
+    except ValueError:
+        return False
+    if ip.version != 4:
+        return False
+    if (ip.is_loopback or ip.is_unspecified or ip.is_multicast
+            or ip.is_link_local or ip.is_reserved):
+        return False
+    for net in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "100.64.0.0/10"):
+        if ip in ipaddress.ip_network(net):
+            return False
+    return True
+
+
+def _is_namespace_url(val: str) -> bool:
+    u = (val or "").lower()
+    return any(h in u for h in (
+        "schemas.android.com", "schemas.microsoft.com", "schemas.xmlsoap.org",
+        "schemas.openxmlformats.org", "www.w3.org", "/w3.org", "xmlns",
+        "ns.adobe.com", "java.sun.com", "xml.org", "purl.org",
+        "apache.org/licenses", "apache.org/xml", "openid.net/specs",
+        "specs.openid.net", "oasis-open.org", "relaxng.org", "docbook.org",
+    ))
+
+
+# Category -> value validator. A match is dropped when the validator returns False.
+_VALUE_VALIDATORS = {
+    "Hardcoded IP Address": _is_real_ip,
+    "Hidden URL / API Endpoint": lambda v: not _is_namespace_url(v),
+}
 
 # ─── String Categories ────────────────────────────────────────────────────────
 STRING_PATTERNS = [
@@ -192,6 +230,7 @@ def analyze_strings(tmpdir: str, platform: str) -> dict:
         try:
             pattern = re.compile(pat_info["pattern"], re.IGNORECASE | re.MULTILINE)
             exclusions = pat_info.get("exclude", [])
+            validator = _VALUE_VALIDATORS.get(pat_info["category"])
 
             # Track unique values and which files they came from
             value_files = {}  # value -> list of rel paths
@@ -208,6 +247,10 @@ def analyze_strings(tmpdir: str, platform: str) -> dict:
                     if len(val) > 40 and re.fullmatch(r'[0-9a-fA-F]+', val):
                         continue
                     if any(re.search(excl, val, re.IGNORECASE) for excl in exclusions):
+                        continue
+                    # Category-specific semantic validation (real IP, not a
+                    # namespace URL, …). Drops shape-matches that aren't real.
+                    if validator and not validator(val):
                         continue
 
                     # Truncate display value but keep it readable
@@ -236,8 +279,16 @@ def analyze_strings(tmpdir: str, platform: str) -> dict:
 
 
 def _collect_files(tmpdir: str, platform: str) -> dict:
-    """Return {rel_path -> content} for all scannable files."""
+    """Return {rel_path -> content} for all scannable files.
+
+    Raw .dex/.so binaries are only string-dumped as a LAST RESORT — when no
+    decompiled Java/Kotlin source exists. Otherwise their printable-strings
+    dump just duplicates the real source while attributing findings to a binary
+    file (classes.dex) that can't be opened in the source viewer.
+    """
     result = {}
+    binary_blobs = {}  # rel_path -> dumped strings (only used if no source)
+    has_source = False
     text_exts = {
         ".xml", ".json", ".properties", ".txt", ".gradle",
         ".java", ".kt", ".smali", ".js", ".ts", ".html",
@@ -255,6 +306,8 @@ def _collect_files(tmpdir: str, platform: str) -> dict:
                 try:
                     with open(fpath, "r", errors="replace") as f:
                         result[rel] = f.read()
+                    if ext in (".java", ".kt", ".smali"):
+                        has_source = True
                 except Exception:
                     continue
             elif ext in (".dex", ".so"):
@@ -262,8 +315,12 @@ def _collect_files(tmpdir: str, platform: str) -> dict:
                     with open(fpath, "rb") as f:
                         raw = f.read(8 * 1024 * 1024)
                     text = "".join(chr(b) if 32 <= b < 127 else " " for b in raw)
-                    result[rel] = text
+                    binary_blobs[rel] = text
                 except Exception:
                     continue
+
+    # Fallback only: surface dex/so strings when decompilation produced nothing.
+    if not has_source:
+        result.update(binary_blobs)
 
     return result

@@ -888,6 +888,95 @@ def _evidence_count(finding: dict) -> int:
     return 0
 
 
+# ── Cross-section noise scrub (endpoints / IPs / evidence paths) ─────────────
+# These run alongside Phase 3 to clean the non-finding result arrays the UI also
+# renders (Domains/Endpoints, IPs). Detectors are fixed at source too; this is a
+# defensive catch-all so a namespace URL or reserved IP can never reach a report.
+_BINARY_DUMP_SUFFIXES = (
+    ".dex", ".so", ".dylib", ".arsc", ".odex", ".vdex", ".oat",
+    ".dex.txt", ".so.txt", ".dylib.txt", ".arsc.txt",
+)
+_NAMESPACE_URL_HOSTS = (
+    "schemas.android.com", "schemas.microsoft.com", "schemas.xmlsoap.org",
+    "schemas.openxmlformats.org", "www.w3.org", "/w3.org", "xmlns",
+    "ns.adobe.com", "java.sun.com", "xml.org", "purl.org",
+    "apache.org/licenses", "apache.org/xml", "openid.net/specs",
+    "specs.openid.net", "oasis-open.org", "relaxng.org", "docbook.org",
+)
+
+
+def _is_binary_dump_path(path) -> bool:
+    return str(path or "").replace("\\", "/").lower().endswith(_BINARY_DUMP_SUFFIXES)
+
+
+def _is_namespace_url(url) -> bool:
+    u = str(url or "").lower()
+    return any(host in u for host in _NAMESPACE_URL_HOSTS)
+
+
+def _is_real_public_or_private_ip(ip_str) -> bool:
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(str(ip_str))
+    except ValueError:
+        return False
+    if (ip.is_loopback or ip.is_unspecified or ip.is_multicast
+            or ip.is_link_local or ip.is_reserved):
+        return False
+    for net in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "100.64.0.0/10"):
+        if ip in ipaddress.ip_network(net):
+            return False
+    return True
+
+
+def scrub_noise(results: dict) -> dict:
+    """Strip namespace URLs, reserved/invalid IPs and binary-dump evidence from
+    the result arrays the UI renders. Returns a small stats dict (what removed).
+    """
+    removed = {"endpoints": 0, "ips": 0, "evidence_repathed": 0}
+
+    eps = results.get("endpoints")
+    if isinstance(eps, list):
+        kept = [u for u in eps if not _is_namespace_url(u)]
+        removed["endpoints"] = len(eps) - len(kept)
+        results["endpoints"] = kept
+
+    ips = results.get("ips")
+    if isinstance(ips, list):
+        kept_ips = []
+        for entry in ips:
+            ip_val = entry.get("ip") if isinstance(entry, dict) else entry
+            path = entry.get("file_path") if isinstance(entry, dict) else ""
+            if not _is_real_public_or_private_ip(ip_val) or _is_binary_dump_path(path):
+                continue
+            kept_ips.append(entry)
+        removed["ips"] = len(ips) - len(kept_ips)
+        results["ips"] = kept_ips
+
+    # Re-point findings/secrets that landed on a binary dump to the best
+    # non-binary evidence path available; otherwise leave them (dex-only scans).
+    for coll_key in ("findings", "secrets"):
+        for item in results.get(coll_key, []) or []:
+            if not isinstance(item, dict):
+                continue
+            if _is_binary_dump_path(item.get("file_path") or item.get("full_path")):
+                alt = _first_non_binary_path(item)
+                if alt:
+                    item["file_path"] = alt
+                    removed["evidence_repathed"] += 1
+    return removed
+
+
+def _first_non_binary_path(item: dict) -> str:
+    for e in item.get("file_evidence") or []:
+        if isinstance(e, dict) and e.get("path") and not _is_binary_dump_path(e["path"]):
+            return str(e["path"])
+    for f in item.get("files") or []:
+        if f and not _is_binary_dump_path(f):
+            return str(f)
+    return ""
+
+
 # ── The Phase 3 entry point ──────────────────────────────────────────────────
 def refine_findings(findings: list[dict], *, app_package: str = "",
                     platform: str = "android") -> tuple[list[dict], list[dict], dict]:
