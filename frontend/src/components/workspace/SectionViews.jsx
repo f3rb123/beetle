@@ -3635,6 +3635,109 @@ function DependenciesSection({ results }) {
   )
 }
 
+function ExploitabilitySection({ results }) {
+  const expl = results.exploitability_score || {}
+  const surf = results.attack_surface_score || {}
+  const graph = results.attack_graph || {}
+  const deepLinks = results.deep_link_inventory || {}
+  const highRisk = results.high_risk_components || []
+  const summary = results.executive_summary || {}
+  const paths = graph.paths || []
+
+  const hasAny = expl.score || surf.score || paths.length || highRisk.length
+  if (!hasAny) {
+    return <EmptyState title="No exploitability data" description="No attack paths, exploitable chains, or exposed surface were correlated for this scan." />
+  }
+
+  const riskAccent = (rating) => ({
+    critical: '#DC2626', high: '#F59E0B', medium: '#3B82F6', low: '#10b981',
+  }[rating] || '#6b7280')
+
+  return (
+    <div className="stack">
+      <div className="metric-grid">
+        {expl.score != null && <StatCard label="Exploitability Score" value={`${expl.score}/100`} helper={expl.rating ? expl.rating.toUpperCase() : ''} accent={riskAccent(expl.rating)} />}
+        {surf.score != null && <StatCard label="Attack Surface Score" value={`${surf.score}/100`} helper={surf.rating ? surf.rating.toUpperCase() : ''} accent={riskAccent(surf.rating)} />}
+        {graph.path_count != null && <StatCard label="Attack Paths" value={graph.path_count} helper="Correlated multi-step exploit chains." accent="#8b5cf6" />}
+        {deepLinks.total != null && <StatCard label="Deep Links" value={deepLinks.total} helper={`${deepLinks.hijackable_count || 0} hijackable`} accent="#DC2626" />}
+      </div>
+
+      {expl.reason && (
+        <Panel title="Exploitability Assessment" subtitle="Why this app is reachable and exploitable.">
+          <div className="mini-surface">
+            <div className="mini-surface__label">Strongest Attack Path</div>
+            <div className="mini-surface__body">{expl.reason}</div>
+          </div>
+          {(surf.factors || []).length > 0 && (
+            <div className="mini-surface">
+              <div className="mini-surface__label">Attack Surface Factors</div>
+              <div className="mini-surface__body">
+                {surf.factors.map((f, i) => <Tag key={i} tone="warning">{f}</Tag>)}
+              </div>
+            </div>
+          )}
+        </Panel>
+      )}
+
+      {(summary.lines || []).length > 0 && (
+        <Panel title="Signal Quality" subtitle="How raw detections were reduced to the high-signal set.">
+          <DefinitionRows items={[
+            ['Raw detections', summary.raw_detections],
+            ['Duplicates grouped', summary.duplicates_grouped],
+            ['Library findings hidden', summary.library_findings_hidden],
+            ['False positives removed', summary.false_positives_suppressed],
+            ['Low-value data flows pruned', summary.low_value_flows_pruned],
+            ['High-signal findings presented', summary.high_signal_findings],
+          ]} />
+        </Panel>
+      )}
+
+      {paths.length > 0 && (
+        <Panel title={`Attack Paths (${paths.length})`} subtitle="Each path chains exploitable weaknesses from attacker input to impact.">
+          <div className="sec-list">
+            {paths.map((p, i) => (
+              <div key={p.chain_id || i} className={`sec-list-item sec-list-item--${p.severity === 'critical' ? 'high' : (p.severity || 'medium')}`}>
+                <div className="sec-list-item__header">
+                  <div className="sec-list-item__header-left">
+                    <span className="surface-badge surface-badge--exported">{(p.severity || 'medium').toUpperCase()}</span>
+                    <span className="sec-list-item__name">{p.title}</span>
+                  </div>
+                  <Tag tone="warning">{`Exploitability ${p.exploitability || 0}`}</Tag>
+                </div>
+                <div className="sec-list-item__desc" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                  {(p.sequence || []).map(n => String(n).split(':').slice(1).join(':') || n).join('  →  ')}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+
+      {highRisk.length > 0 && (
+        <Panel title={`High-Risk Exported Components (${highRisk.length})`} subtitle="Externally reachable components with elevated impact.">
+          <div className="sec-list">
+            {highRisk.map((c, i) => (
+              <div key={c.name || i} className="sec-list-item sec-list-item--high">
+                <div className="sec-list-item__header">
+                  <div className="sec-list-item__header-left">
+                    <span className="surface-badge surface-badge--exported">{(c.type || 'component').toUpperCase()}</span>
+                    <span className="sec-list-item__name">{c.short_name || c.name}</span>
+                  </div>
+                  <Tag tone="warning">{(c.risk || 'high').toUpperCase()}</Tag>
+                </div>
+                <div className="sec-list-item__desc" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                  {c.reachable_without_permission ? 'Reachable without any permission. ' : `Protected by ${c.permission || 'a permission'}. `}
+                  {(c.deeplinks || []).length > 0 ? `Deep links: ${c.deeplinks.join(', ')}` : ''}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+    </div>
+  )
+}
+
 export default function SectionViews({ sectionId, results, scanId, onNavigateSection, onOpenCode, viewMode }) {
   if (!results) return null
 
@@ -3667,6 +3770,8 @@ export default function SectionViews({ sectionId, results, scanId, onNavigateSec
       return <StringsSection {...sharedProps} />
     case 'surface':
       return <SurfaceSection {...sharedProps} />
+    case 'exploit':
+      return <ExploitabilitySection {...sharedProps} />
     case 'cert':
       return <CertSection {...sharedProps} />
     case 'endpoints':

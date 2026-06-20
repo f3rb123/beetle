@@ -25,6 +25,7 @@ export const SECTION_GROUPS = [
     items: [
       { id: 'permissions', label: 'Permissions', hint: 'Declared permissions and dangerous capability scope.' },
       { id: 'surface', label: 'Attack Surface', hint: 'Activities, services, receivers, and providers.' },
+      { id: 'exploit', label: 'Exploitability', hint: 'Attack paths, exploitability score, and high-risk component correlation.' },
       { id: 'browsable', label: 'Browsable', hint: 'Deeplinks and externally triggerable entry points.' },
       { id: 'endpoints', label: 'Endpoints', hint: 'Discovered URLs and API targets.' },
       { id: 'domains', label: 'Domains', hint: 'Domain intelligence and ownership signals.' },
