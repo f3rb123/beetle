@@ -1374,6 +1374,8 @@ def _unresolved_reason(finding: dict, claimed: list[str]) -> str:
 
 def _no_source_reason(finding: dict) -> str:
     cat = str(finding.get("category") or "").lower()
+    if cat == "certificate":
+        return "Signing-certificate finding — evidence is the certificate metadata block, not a source line."
     if "binary" in cat or "native" in cat:
         return "Native binary finding — no Java/Kotlin source location applies."
     if finding.get("capability"):
@@ -1403,13 +1405,20 @@ def validate_source_resolution(findings: list[dict], scan_id: str) -> dict:
                 claimed.append(p)
         has_claim = bool(claimed)
 
-        # Expand to resolvable candidates (class refs -> source paths).
+        # Expand to resolvable candidates. Only dotted/JVM CLASS references are
+        # rewritten to source paths; real filenames (AndroidManifest.xml,
+        # foo.json) are tried literally — otherwise "AndroidManifest.xml" would
+        # be mis-parsed as the class AndroidManifest.xml -> sources/.../xml.java
+        # and never resolve.
         candidates = []
         for p in claimed:
             if _is_binary_dump_path(p):
                 continue
-            cref = _class_ref_to_source_candidates(p)
-            candidates.extend(cref if cref else [p])
+            if _looks_classref(p):
+                cref = _class_ref_to_source_candidates(p)
+                candidates.extend(cref if cref else [p])
+            else:
+                candidates.append(p)
 
         resolved_rel = resolved_path = None
         for cand in candidates:
@@ -1449,6 +1458,35 @@ def validate_source_resolution(findings: list[dict], scan_id: str) -> dict:
                 stats["resolved"] += 1
                 continue
 
+        # Manifest / config fallback: an app-scoped manifest or configuration
+        # finding that resolved to no code line can still open the decoded
+        # AndroidManifest.xml in the viewer (Phase B fallback chain). This covers
+        # min-SDK, permission-overlap, app-links and similar manifest-derived
+        # findings that carry no explicit path.
+        if _is_manifest_viewable(f):
+            try:
+                mp = scan_storage.resolve_source_file(scan_id, "AndroidManifest.xml")
+            except Exception:
+                mp = None
+            if mp and mp.is_file():
+                line = f.get("line") if isinstance(f.get("line"), int) and f.get("line") > 0 else 0
+                snippet = f.get("snippet") if isinstance(f.get("snippet"), str) else ""
+                if not snippet and line:
+                    try:
+                        snippet = _snippet_around(mp.read_text(errors="replace").splitlines(), line)
+                    except Exception:
+                        snippet = ""
+                f["source_resolved"] = True
+                f["view_code"] = True
+                f["file_path"] = "AndroidManifest.xml"
+                f["files"] = ["AndroidManifest.xml"]
+                f["file_evidence"] = [{"path": "AndroidManifest.xml",
+                                       "lines": [line] if line else [], "snippet": snippet}]
+                f.pop("source_unavailable_reason", None)
+                f.pop("unresolved_evidence", None)
+                stats["resolved"] += 1
+                continue
+
         # Not resolved.
         f["source_resolved"] = False
         f["view_code"] = False
@@ -1459,9 +1497,39 @@ def validate_source_resolution(findings: list[dict], scan_id: str) -> dict:
             stats["unresolved_claim"] += 1
         else:
             f.pop("unresolved_evidence", None)
-            f["source_unavailable_reason"] = _no_source_reason(f)
+            reason = _no_source_reason(f)
+            f["source_unavailable_reason"] = reason
+            # Native-binary symbols and certificate metadata have no Java/Kotlin
+            # source line by nature — their evidence is the symbol / cert block.
+            # Flag them so they are reported separately, not counted as a gap.
+            if "Native binary" in reason or f.get("category") == "Certificate":
+                f["source_applicable"] = False
             stats["no_source"] += 1
     return stats
+
+
+# Categories whose findings are manifest-derived and can fall back to opening
+# the decoded AndroidManifest.xml when no code line resolves. Deliberately
+# EXCLUDES Certificate (cert block) and native Binary-Hardening (ELF symbol).
+_MANIFEST_VIEW_CATEGORIES = {
+    "configuration", "permissions", "deeplinks", "deeplink", "network security",
+    "data storage", "manifest", "attack surface", "attack chain",
+}
+
+
+def _is_manifest_viewable(finding: dict) -> bool:
+    if finding.get("evidence_type") == "manifest":
+        return True
+    cat = str(finding.get("category") or "").lower()
+    if cat == "certificate":
+        return False
+    # Native binary-hardening findings (ELF) are not manifest-viewable.
+    if cat == "binary hardening" and finding.get("evidence_type") != "manifest":
+        # Only treat as manifest-viewable if it actually came from the manifest
+        # (e.g. the missing-debuggable-flag check).
+        title = str(finding.get("title") or "").lower()
+        return "debuggable" in title or "backup" in title
+    return cat in _MANIFEST_VIEW_CATEGORIES
 
 
 # ── Finding Quality Report (Phase 5.4) ───────────────────────────────────────

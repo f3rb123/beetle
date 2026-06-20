@@ -110,19 +110,29 @@ def annotate_trust(results: dict) -> None:
 
 
 def _compute_resolution_scores(results: dict, findings: list) -> None:
-    """Task 6 — source / evidence / view-code coverage percentages."""
-    total = len(findings) or 1
-    src = sum(1 for f in findings if f.get("source_resolved"))
-    vc = sum(1 for f in findings if f.get("view_code"))
+    """Task 6 — source / evidence / view-code coverage percentages.
+
+    Coverage is measured over findings where a source line is APPLICABLE.
+    Native-binary symbols and certificate metadata (source_applicable == False)
+    have no source line by nature; they are evidence-complete and reported
+    separately rather than counted as coverage gaps.
+    """
+    total = len(findings)
+    applicable = [f for f in findings if f.get("source_applicable", True)]
+    denom = len(applicable) or 1
+    src = sum(1 for f in applicable if f.get("source_resolved"))
+    vc = sum(1 for f in applicable if f.get("view_code"))
     evi = sum(1 for f in findings if _has_any_evidence(f))
     results["resolution_scores"] = {
-        "total_findings": len(findings),
+        "total_findings": total,
+        "source_applicable": len(applicable),
+        "source_not_applicable": total - len(applicable),
         "source_resolved": src,
         "view_code_enabled": vc,
         "evidence_backed": evi,
-        "source_resolution_pct": round(src / total * 100),
-        "evidence_coverage_pct": round(evi / total * 100),
-        "view_code_coverage_pct": round(vc / total * 100),
+        "source_resolution_pct": round(src / denom * 100),
+        "evidence_coverage_pct": round(evi / (total or 1) * 100),
+        "view_code_coverage_pct": round(vc / denom * 100),
     }
 
 
