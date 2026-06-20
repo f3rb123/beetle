@@ -24,6 +24,7 @@ import hashlib
 import logging
 import os
 import re
+from collections import Counter
 
 log = logging.getLogger("cortex.findings")
 
@@ -270,3 +271,119 @@ def emit_diagnostics(findings: list[dict], *, platform: str = "android", app_pac
                 f.get("title") or "-",
             )
     return metrics
+
+
+# ── Phase 2: Finding Inventory & Noise Analysis ──────────────────────────────
+def _rule_key(finding: dict) -> str:
+    return finding.get("rule_id") or finding.get("id") or finding.get("title") or "unknown"
+
+
+def build_finding_diagnostics(findings: list[dict]) -> dict:
+    """Aggregate findings into a small, internal diagnostics object.
+
+    Pure (no logging, no mutation). Returns:
+      {
+        "top_rules": [{rule_id,title,severity,ownership,count}, ...],   # noisiest first
+        "ownership_breakdown": {total, APP, LIBRARY, SYSTEM, UNKNOWN},
+        "severity_breakdown":  {critical, high, medium, low, info},
+        "rule_frequency":      {rule_id: count, ...},                   # desc
+        "top_by_ownership":    {APP:[...], LIBRARY:[...], SYSTEM:[...], UNKNOWN:[...]},
+      }
+    Designed to answer: which rules/libraries create the most noise, and which
+    findings are candidates for suppression or confidence downgrades.
+    """
+    groups: dict[str, dict] = {}
+    sev_break: Counter = Counter()
+    own_break: Counter = Counter()
+
+    for f in findings or []:
+        if not isinstance(f, dict):
+            continue
+        key = _rule_key(f)
+        sev = (f.get("severity") or "info")
+        own = f.get("ownership") or UNKNOWN
+        sev_break[sev] += 1
+        own_break[own] += 1
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {
+                "rule_id": f.get("rule_id") or f.get("id") or key,
+                "title": "",
+                "sev": Counter(),
+                "own": Counter(),
+                "count": 0,
+            }
+        g["count"] += 1
+        g["sev"][sev] += 1
+        g["own"][own] += 1
+        if not g["title"]:
+            g["title"] = f.get("title") or key
+
+    rule_list = [
+        {
+            "rule_id": g["rule_id"],
+            "title": g["title"],
+            "severity": g["sev"].most_common(1)[0][0] if g["sev"] else "info",
+            "ownership": g["own"].most_common(1)[0][0] if g["own"] else UNKNOWN,
+            "count": g["count"],
+        }
+        for g in groups.values()
+    ]
+    # Noisiest first; stable tie-break by rule_id.
+    rule_list.sort(key=lambda r: (-r["count"], r["rule_id"]))
+
+    top_by_ownership: dict[str, list] = {}
+    for own in (APP, LIBRARY, SYSTEM, UNKNOWN):
+        top_by_ownership[own] = [
+            {"rule_id": r["rule_id"], "title": r["title"], "severity": r["severity"], "count": r["count"]}
+            for r in rule_list if r["ownership"] == own
+        ][:10]
+
+    return {
+        "top_rules": rule_list[:15],
+        "ownership_breakdown": {
+            "total": sum(own_break.values()),
+            APP: own_break.get(APP, 0),
+            LIBRARY: own_break.get(LIBRARY, 0),
+            SYSTEM: own_break.get(SYSTEM, 0),
+            UNKNOWN: own_break.get(UNKNOWN, 0),
+        },
+        "severity_breakdown": {s: sev_break.get(s, 0) for s in ("critical", "high", "medium", "low", "info")},
+        "rule_frequency": {r["rule_id"]: r["count"] for r in rule_list},
+        "top_by_ownership": top_by_ownership,
+    }
+
+
+def log_finding_analysis(diagnostics: dict, *, platform: str = "android") -> None:
+    """Emit the human-readable FINDING ANALYSIS block (INFO) and, at DEBUG,
+    the full per-rule inventory (rule_id / title / severity / ownership / count).
+    """
+    if not diagnostics:
+        return
+    ob = diagnostics.get("ownership_breakdown", {})
+    top = diagnostics.get("top_rules", [])
+
+    lines = [
+        "",
+        "===== FINDING ANALYSIS =====",
+        "",
+        f"Total Findings: {ob.get('total', 0)}",
+        "",
+        f"APP: {ob.get(APP, 0)}",
+        f"LIBRARY: {ob.get(LIBRARY, 0)}",
+        f"SYSTEM: {ob.get(SYSTEM, 0)}",
+        f"UNKNOWN: {ob.get(UNKNOWN, 0)}",
+        "",
+        "Top Rules:",
+    ]
+    for i, r in enumerate(top[:10], 1):
+        lines.append(f"{i}. {r['rule_id']} ({r['count']})")
+    lines += ["", "============================"]
+    log.info("\n".join(lines))
+
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug("Per-rule inventory (%s):", platform)
+        log.debug("%-36s %-9s %-8s %s", "RULE", "SEVERITY", "OWNER", "COUNT")
+        for r in top:
+            log.debug("%-36s %-9s %-8s %d", str(r["rule_id"])[:36], r["severity"], r["ownership"], r["count"])
+

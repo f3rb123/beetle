@@ -806,6 +806,9 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     results["ownership_metrics"] = finding_model.emit_diagnostics(
         results["findings"], platform="android", app_package=_app_pkg,
     )
+    # ── Phase 2: finding inventory & noise analysis (internal diagnostics) ──
+    results["finding_diagnostics"] = finding_model.build_finding_diagnostics(results["findings"])
+    finding_model.log_finding_analysis(results["finding_diagnostics"], platform="android")
     results["findings"] = sort_findings(results["findings"])
     results["severity_summary"] = compute_severity_summary(results["findings"])
     _build_quick_summary(results)

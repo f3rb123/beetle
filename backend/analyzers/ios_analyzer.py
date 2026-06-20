@@ -364,6 +364,9 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     results["ownership_metrics"] = finding_model.emit_diagnostics(
         results["findings"], platform="ios", app_package=_app_pkg,
     )
+    # ── Phase 2: finding inventory & noise analysis (internal diagnostics) ──
+    results["finding_diagnostics"] = finding_model.build_finding_diagnostics(results["findings"])
+    finding_model.log_finding_analysis(results["finding_diagnostics"], platform="ios")
     results["findings"] = sort_findings(results["findings"])
     results["severity_summary"] = compute_severity_summary(results["findings"])
 
