@@ -546,7 +546,7 @@ _APP_SCOPED_CATEGORIES = {
     "network security", "components", "component", "deeplinks", "deeplink",
     "backup", "manifest", "configuration", "permissions", "attack surface",
     "exported component", "security controls", "data storage", "platform",
-    "behavior analysis",
+    "behavior analysis", "binary hardening", "certificate", "attack chain",
 }
 # Dependency / supply-chain findings describe libraries, never app code.
 _DEP_SOURCES = {"CVE-MAP", "OSV", "CVE", "OSV-SCANNER"}
@@ -570,6 +570,11 @@ def resolve_finding_ownership(finding: dict, app_package: str = "") -> tuple[str
       * manifest/component/app-config findings with NO path become APPLICATION
         (P1) — unless they are dependency/CVE findings (those stay UNKNOWN).
     """
+    # Phase 6 Task 2: synthesized attack-chain findings are application-level by
+    # construction — never inherit a member's library/framework ownership.
+    if finding.get("is_attack_chain"):
+        return APP, APPLICATION, finding.get("owner_package", "")
+
     path = _finding_path(finding)
     label = classify_ownership_label(path, app_package)
     coarse, owner_pkg = classify_ownership(path, app_package)
@@ -698,6 +703,9 @@ def compute_confidence(finding: dict, text: str | None = None) -> int:
     """
     if text is None:
         text = _finding_text(finding)
+    # Phase 6: correlated attack chains are high-confidence by construction.
+    if finding.get("is_attack_chain"):
+        return 90
     # Phase 5.3: a finding that claimed a source location which could not be
     # resolved is unreliable — cap it in the informational band.
     if finding.get("unresolved_evidence"):
@@ -763,6 +771,12 @@ def _suppression_reason(finding: dict, text: str, confidence: int) -> str:
     rule_id = finding.get("rule_id") or finding.get("id") or ""
     title = str(finding.get("title") or "").lower()
     blob = f"{text}\n{finding.get('value', '')}\n{finding.get('url', '')}".lower()
+
+    # 0. Phase 6 Task 1: taint flows inside framework / library / SDK code are
+    # almost never application vulnerabilities. Keep only application-owned flows
+    # unless they participate in a correlated application attack chain.
+    if _is_taint(finding) and not is_application_code(finding) and not finding.get("in_attack_chain"):
+        return "framework_library_taint"
 
     # 1. android-namespace / xmlns / w3.org URLs are never real findings.
     if any(tok in blob for tok in _NAMESPACE_NOISE) and (
@@ -1120,6 +1134,105 @@ def _first_non_binary_path(item: dict) -> str:
         if f and not _is_binary_dump_path(f):
             return str(f)
     return ""
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 6 Task 6 — Manifest Evidence Enforcement
+# ═════════════════════════════════════════════════════════════════════════════
+# Every manifest-derived finding must carry a real manifest path, line number,
+# and the exact manifest snippet. Findings are tagged at creation with a
+# `manifest_evidence_spec` ({attr, value, anchor}); this pass resolves that spec
+# against the decoded AndroidManifest.xml and either attaches the evidence or
+# DROPS the finding entirely when no evidence line can be located.
+
+def _load_manifest_text(scan_id: str, manifest_xml: str = "") -> tuple[str, str]:
+    """Return (text, rel_path) for the decoded AndroidManifest.xml.
+
+    Prefer the apktool-decoded file on disk (real, viewable line numbers); fall
+    back to the reconstructed manifest string captured during parsing.
+    """
+    try:
+        from . import scan_storage  # lazy: avoid import cycle
+        p = scan_storage.resolve_source_file(scan_id, "AndroidManifest.xml")
+        if p and p.is_file():
+            txt = p.read_text(errors="replace")
+            if "<manifest" in txt or "<application" in txt:
+                return txt, "AndroidManifest.xml"
+    except Exception:
+        pass
+    if isinstance(manifest_xml, str) and manifest_xml.strip():
+        return manifest_xml, "AndroidManifest.xml"
+    return "", "AndroidManifest.xml"
+
+
+def _find_manifest_line(text: str, spec: dict) -> tuple[int, str]:
+    """Locate the manifest line for a spec. Returns (line_no, snippet) or (0, "")."""
+    if not text:
+        return 0, ""
+    lines = text.splitlines()
+    attr = spec.get("attr")
+    value = spec.get("value")
+    if attr:
+        if value:
+            pat = re.compile(
+                r'(?:android:)?' + re.escape(attr) + r'\s*=\s*"' + re.escape(str(value)) + r'"', re.I)
+        else:
+            pat = re.compile(r'(?:android:)?' + re.escape(attr) + r'\s*=\s*"[^"]*"', re.I)
+        for i, ln in enumerate(lines, 1):
+            if pat.search(ln):
+                return i, _snippet_around(lines, i)
+    anchor = spec.get("anchor")
+    if anchor:
+        apat = re.compile(r'<' + re.escape(anchor) + r'(\s|>|/)', re.I)
+        for i, ln in enumerate(lines, 1):
+            if apat.search(ln):
+                return i, _snippet_around(lines, i)
+    return 0, ""
+
+
+def enforce_manifest_evidence(findings: list[dict], scan_id: str,
+                              manifest_xml: str = "") -> tuple[list[dict], dict]:
+    """Attach manifest path/line/snippet to tagged findings, or drop them (P6.6).
+
+    A finding carrying `manifest_evidence_spec` MUST resolve to a real manifest
+    line. When it does, evidence is attached and the spec removed. When it does
+    not (manifest unavailable, attribute/anchor absent), the finding is dropped.
+    Returns (kept_findings, stats).
+    """
+    stats = {"checked": 0, "attached": 0, "dropped": 0, "examples": []}
+    findings = findings or []
+    if not any(isinstance(f, dict) and f.get("manifest_evidence_spec") for f in findings):
+        return findings, stats
+
+    text, mpath = _load_manifest_text(scan_id, manifest_xml)
+    kept: list[dict] = []
+    for f in findings:
+        if not isinstance(f, dict) or not f.get("manifest_evidence_spec"):
+            kept.append(f)
+            continue
+        stats["checked"] += 1
+        spec = f.get("manifest_evidence_spec") or {}
+        line, snippet = _find_manifest_line(text, spec)
+        if not line:
+            stats["dropped"] += 1
+            continue
+        f.pop("manifest_evidence_spec", None)
+        f["file_path"] = mpath
+        f["line"] = line
+        f["line_number"] = line
+        f["file_evidence"] = [{"path": mpath, "lines": [line], "snippet": snippet}]
+        f["files"] = [mpath]
+        f["snippet"] = snippet
+        f["evidence"] = snippet
+        f["evidence_type"] = "manifest"
+        stats["attached"] += 1
+        if len(stats["examples"]) < 6:
+            stats["examples"].append({
+                "title": f.get("title"), "line": line,
+                "snippet": snippet.strip(),
+            })
+        kept.append(f)
+    return kept, stats
 
 
 # ═════════════════════════════════════════════════════════════════════════════

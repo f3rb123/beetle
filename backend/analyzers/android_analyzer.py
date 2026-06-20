@@ -49,7 +49,7 @@ from .evidence_scanner import (
     scan_directory_for_jwts, extract_urls
 )
 from .path_utils import relativize_path, normalize_relative_path, make_file_evidence
-from .chain_analyzer import synthesize_attack_chains
+from .chain_analyzer import synthesize_attack_chains, correlate_attack_chains
 from .secret_validator import validate_secrets
 from .taint_analyzer import run_taint_analysis
 from .virustotal import run_virustotal
@@ -302,8 +302,10 @@ def _build_quick_summary(results: dict):
     if certificate_overview.get("overall_status") == "secure":
         secure_signals.append("Modern APK signature scheme detected")
 
-    # Attack chain synthesis
-    chain_data = synthesize_attack_chains(results)
+    # Attack chain synthesis — reuse the data computed during finalize (Phase 6
+    # Task 2) so chains are synthesized once; fall back for any caller that runs
+    # this before finalize.
+    chain_data = results.pop("_chain_data", None) or synthesize_attack_chains(results)
 
     results["quick_summary"] = {
         "total_vulnerabilities": len([finding for finding in findings if finding.get("severity") != "info"]),
@@ -803,6 +805,17 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     # ── Phase 0/1: canonical normalization + ownership (additive, non-destructive) ──
     _app_pkg = results.get("app_info", {}).get("package", "")
     finding_model.canonicalize_findings(results["findings"], _app_pkg)
+    # ── Phase 6 Task 6: manifest evidence enforcement (drop unproven manifest findings) ──
+    results["findings"], results["manifest_evidence_stats"] = finding_model.enforce_manifest_evidence(
+        results["findings"], scan_id, results.get("manifest_xml", ""),
+    )
+    # ── Phase 6 Task 2: attack-chain correlation — mark members + first-class findings ──
+    _chain_data = correlate_attack_chains(results)
+    results["_chain_data"] = _chain_data
+    _chain_findings = _chain_data.get("attack_chain_findings", [])
+    if _chain_findings:
+        finding_model.canonicalize_findings(_chain_findings, _app_pkg)
+        results["findings"] = _chain_findings + results["findings"]
     results["ownership_metrics"] = finding_model.emit_diagnostics(
         results["findings"], platform="android", app_package=_app_pkg,
     )
@@ -828,6 +841,10 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     finding_model.log_finding_quality_report(results["finding_quality_report"], platform="android")
     # Severity summary / score now reflect the cleaned (deduped, de-FP'd) set.
     results["findings"] = sort_findings(results["findings"])
+    # Phase 6 Task 2: attack-chain findings always lead the list (before normal findings).
+    _ac = [f for f in results["findings"] if f.get("is_attack_chain")]
+    if _ac:
+        results["findings"] = _ac + [f for f in results["findings"] if not f.get("is_attack_chain")]
     results["severity_summary"] = compute_severity_summary(results["findings"])
     _build_quick_summary(results)
     _record_module_metric(results, "finalize_results", finalize_started, finding_count=len(results.get("findings", [])))
@@ -956,6 +973,7 @@ def _check_app_flags(app_elem, results):
             "cwe":            "CWE-489",
             "masvs":          "MASVS-CODE-2",
             "owasp":          "M7",
+            "manifest_evidence_spec": {"attr": "debuggable", "value": "true", "anchor": "application"},
         })
     elif debuggable and debuggable.lower() in ("false", "0"):
         manifest_security["debuggable"] = {
@@ -985,10 +1003,15 @@ def _check_app_flags(app_elem, results):
             "owasp":          "M7",
             "confidence":     55,
             "validation_status": "heuristic",
+            "manifest_evidence_spec": {"anchor": "application"},
         })
 
     allow_backup = attr("allowBackup")
     if allow_backup is None or allow_backup.lower() in ("true", "1"):
+        # Explicit allowBackup="true" matches the attribute line; an unset flag
+        # (defaults to true) anchors to the <application> element it pertains to.
+        _backup_spec = ({"attr": "allowBackup", "value": "true", "anchor": "application"}
+                        if allow_backup is not None else {"anchor": "application"})
         results["findings"].append({
             "title":          "Backup Enabled — Data Extraction Risk",
             "severity":       "medium",
@@ -997,6 +1020,7 @@ def _check_app_flags(app_elem, results):
             "impact":         "Credentials, tokens, and local databases extractable without rooting the device.",
             "poc":            "adb backup -f backup.ab -noapk <package>\ndd if=backup.ab bs=24 skip=1 | python3 -c \"import zlib,sys; sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))\" | tar xvf -",
             "recommendation": "Set android:allowBackup=\"false\" or configure android:fullBackupContent with exclusion rules for sensitive files.",
+            "manifest_evidence_spec": _backup_spec,
         })
 
     cleartext = attr("usesCleartextTraffic")
@@ -1009,6 +1033,7 @@ def _check_app_flags(app_elem, results):
             "impact":         "All HTTP traffic is in cleartext — credentials, tokens, and PII exposed to network observers.",
             "poc":            "# Set up MitM proxy on same network\n# All http:// traffic will be readable in plaintext",
             "recommendation": "Remove usesCleartextTraffic or set to false. Migrate all endpoints to HTTPS.",
+            "manifest_evidence_spec": {"attr": "usesCleartextTraffic", "value": "true", "anchor": "application"},
         })
 
     test_only = attr("testOnly")
@@ -1020,6 +1045,7 @@ def _check_app_flags(app_elem, results):
             "description":    "android:testOnly=\"true\" detected. This is a test build that should never reach end users.",
             "impact":         "Test builds may have reduced security controls, debug endpoints, and verbose logging.",
             "recommendation": "Remove testOnly flag. Ensure production release builds are properly configured.",
+            "manifest_evidence_spec": {"attr": "testOnly", "value": "true", "anchor": "application"},
         })
 
 
@@ -1132,6 +1158,39 @@ def _analyze_components(apk, tmpdir, results):
             _process_component(elem, comp_type, pkg, results)
 
 
+def _exported_severity(comp_type, short_name, browsable, schemes, deeplinks, actions):
+    """Phase 6 Task 3 — contextual exploitability severity for exported components.
+
+    Severity reflects reachable impact, not a flat "medium": a plain exported
+    AboutUsActivity is LOW; one that accepts URLs/deeplinks or is named for a
+    sensitive flow is HIGH; receivers wired to sensitive system actions are
+    HIGH; providers are handled separately (always high)."""
+    name = (short_name or "").lower()
+    acts = " ".join(actions or []).lower()
+    url_like = bool(browsable) or any(s in ("http", "https") for s in (schemes or [])) or bool(deeplinks)
+    sensitive_name = any(k in name for k in (
+        "login", "auth", "pay", "transfer", "account", "admin", "webview",
+        "deeplink", "url", "browser", "sync", "upload", "download", "export",
+        "reset", "token", "oauth", "file", "share", "import",
+    ))
+    if comp_type == "activity":
+        if url_like or sensitive_name:
+            return "high"
+        return "medium" if actions else "low"
+    if comp_type == "service":
+        return "high" if sensitive_name else "medium"
+    if comp_type == "receiver":
+        sensitive_action = any(k in acts for k in (
+            "boot_completed", "sms", "telephony", "push", "gcm", "fcm",
+            "package_added", "package_removed", "connectivity", "device_admin",
+            "new_outgoing_call", "user_present",
+        ))
+        if sensitive_action or sensitive_name:
+            return "high"
+        return "medium" if actions else "low"
+    return "medium"
+
+
 def _process_component(elem, comp_type, pkg, results):
     def attr(name): return elem.get(ns(name)) or elem.get(name)
 
@@ -1223,6 +1282,8 @@ def _process_component(elem, comp_type, pkg, results):
                  f"adb shell am startservice -n {pkg}/{full_name}" if comp_type == "service" else \
                  f"adb shell am broadcast -a {actions[0] if actions else 'ACTION'} -n {pkg}/{full_name}"
 
+    exp_sev = _exported_severity(comp_type, short_name, browsable, schemes, deeplinks, actions)
+
     if comp_type == "activity" and not permission:
         if browsable and not any(s in ["http", "https"] for s in schemes):
             # Custom scheme deeplink
@@ -1237,10 +1298,21 @@ def _process_component(elem, comp_type, pkg, results):
                     "poc":            f"# Check assetlinks.json\ncurl https://{hosts[0] if hosts else 'host'}/.well-known/assetlinks.json\n\n# Test deeplink\nadb shell am start -a android.intent.action.VIEW -d '{dl}?token=test' {pkg}",
                     "recommendation": "Migrate to Android App Links (https:// with verified assetlinks.json). Validate all incoming deeplink data.",
                 })
-        elif not browsable and not actions:
+        elif browsable or schemes or deeplinks:
+            # Exported activity that accepts URLs/data — high reachable impact.
+            results["findings"].append({
+                "title":          f"Exported URL-Handling Activity — {short_name}",
+                "severity":       exp_sev,
+                "category":       "Attack Surface",
+                "description":    f"Activity `{short_name}` is exported and accepts external URL/intent data ({', '.join(deeplinks or schemes or actions) or 'intent data'}) without a permission. Attacker-controlled input reaches this entry point.",
+                "impact":         "Untrusted URLs/intents can drive sensitive in-app flows (open redirect, WebView injection, parameter tampering).",
+                "poc":            adb_intent,
+                "recommendation": "Validate all incoming URL/intent data and restrict the activity with a permission or android:exported=\"false\" if external access is not required.",
+            })
+        elif not actions:
             results["findings"].append({
                 "title":          f"Exported Activity Without Protection — {short_name}",
-                "severity":       "medium",
+                "severity":       exp_sev,
                 "category":       "Attack Surface",
                 "description":    f"Activity `{short_name}` is exported without a required permission or intent filter. Any app can launch it.",
                 "impact":         "Unauthorized activity launch may bypass authentication or trigger unintended app flows.",
@@ -1251,7 +1323,7 @@ def _process_component(elem, comp_type, pkg, results):
     elif comp_type == "service" and not permission:
         results["findings"].append({
             "title":          f"Exported Service Without Permission — {short_name}",
-            "severity":       "medium",
+            "severity":       exp_sev,
             "category":       "Attack Surface",
             "description":    f"Service `{short_name}` is exported without a required permission. Any app can bind or start it.",
             "impact":         "Third-party apps can interact with this service to trigger unintended background operations.",
@@ -1262,7 +1334,7 @@ def _process_component(elem, comp_type, pkg, results):
     elif comp_type == "receiver" and not permission:
         results["findings"].append({
             "title":          f"Exported Broadcast Receiver Without Permission — {short_name}",
-            "severity":       "medium" if actions else "low",
+            "severity":       exp_sev,
             "category":       "Attack Surface",
             "description":    f"BroadcastReceiver `{short_name}` is exported without required permission. "
                               "Any app can send broadcasts to trigger it.",
@@ -1481,6 +1553,7 @@ def _detect_session_recording_sdk_issues(tmpdir: str, all_packages: set[str], tr
 
 def _build_behavior_findings(results: dict):
     api_results = results.get("android_api", {})
+    api_evidence = results.get("android_api_evidence", {})
     behavior_entries = []
     seen_titles = {finding.get("title") for finding in results.get("findings", [])}
 
@@ -1492,11 +1565,12 @@ def _build_behavior_findings(results: dict):
         rule = BEHAVIOR_RULES.get(category)
         if not rule:
             continue
-        # Phase 4 (P4): prefer real decompiled source; never attribute to a
-        # binary (classes.dex). If the only evidence is binary, emit a
-        # capability finding with no bogus source link.
         source_files = [f for f in files if not _is_binary(f)]
-        is_capability = not source_files
+        # Phase 6 Task 4: a behaviour finding MUST carry real proof — file, line
+        # and code snippet. Evidence with a resolved line comes from
+        # api_evidence; if none exists, the finding is dropped entirely.
+        evidence = [e for e in api_evidence.get(category, [])
+                    if e.get("path") and not _is_binary(e.get("path")) and e.get("line") and e.get("snippet")]
 
         behavior_entries.append({
             "category": category,
@@ -1509,35 +1583,30 @@ def _build_behavior_findings(results: dict):
             "masvs": rule["masvs"],
             "owasp": rule["owasp"],
         })
-        if rule["title"] not in seen_titles:
-            finding = {
-                "title": rule["title"],
-                "severity": rule["severity"],
-                "category": "Behavior Analysis",
-                "description": rule["description"],
-                "impact": rule["impact"],
-                "recommendation": rule["recommendation"],
-                "cwe": rule["cwe"],
-                "masvs": rule["masvs"],
-                "owasp": rule["owasp"],
-            }
-            if is_capability:
-                # Capability presence only — no resolvable source location.
-                finding["file_path"] = None
-                finding["files"] = []
-                finding["file_count"] = 0
-                finding["capability"] = True
-                finding["description"] += (
-                    " (Capability detected in compiled code; no decompiled "
-                    "source location available.)"
-                )
-            else:
-                finding["file_path"] = source_files[0]
-                finding["files"] = source_files[:10]
-                finding["file_count"] = len(source_files)
-                finding["file_evidence"] = [{"path": p, "lines": [], "snippet": ""} for p in source_files[:10]]
-            results["findings"].append(finding)
-            seen_titles.add(rule["title"])
+        if rule["title"] in seen_titles:
+            continue
+        if not evidence:
+            # No file+line+snippet proof -> do not generate the finding.
+            continue
+        primary = evidence[0]
+        results["findings"].append({
+            "title": rule["title"],
+            "severity": rule["severity"],
+            "category": "Behavior Analysis",
+            "description": rule["description"],
+            "impact": rule["impact"],
+            "recommendation": rule["recommendation"],
+            "cwe": rule["cwe"],
+            "masvs": rule["masvs"],
+            "owasp": rule["owasp"],
+            "file_path": primary["path"],
+            "line": primary["line"],
+            "snippet": primary["snippet"],
+            "files": [e["path"] for e in evidence],
+            "file_count": len(evidence),
+            "file_evidence": [{"path": e["path"], "lines": [e["line"]], "snippet": e["snippet"]} for e in evidence],
+        })
+        seen_titles.add(rule["title"])
     results["behavior_analysis"] = behavior_entries
 
 

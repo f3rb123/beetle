@@ -124,6 +124,20 @@ SINKS: list[tuple[str, str, str, str, str]] = [
     ("android/content/Context",    "startActivity",  "Context.startActivity",    "Intent",      "medium"),
     ("android/content/Context",    "sendBroadcast",  "Context.sendBroadcast",    "Intent",      "medium"),
 
+    # Phase 6 Task 7 — additional high-value sinks
+    # WebView native bridge — tainted bridge target = potential RCE surface
+    ("android/webkit/WebView",     "addJavascriptInterface", "WebView.addJavascriptInterface", "WebView", "high"),
+    # Raw sockets — custom protocol exfiltration / SSRF-style
+    ("java/net/Socket",            "<init>",         "Socket.<init>",            "Network",     "high"),
+    ("java/net/HttpURLConnection", "setRequestProperty", "HttpURLConnection.setRequestProperty", "Network", "high"),
+    # PendingIntent — mutable/implicit pending intent hijack
+    ("android/app/PendingIntent",  "getActivity",    "PendingIntent.getActivity","Intent",      "high"),
+    ("android/app/PendingIntent",  "getBroadcast",   "PendingIntent.getBroadcast","Intent",     "high"),
+    ("android/app/PendingIntent",  "getService",     "PendingIntent.getService", "Intent",      "high"),
+    # Digest of tainted input (integrity bypass / weak token derivation)
+    ("java/security/MessageDigest","update",         "MessageDigest.update",     "Crypto",      "medium"),
+    ("java/security/MessageDigest","digest",         "MessageDigest.digest",     "Crypto",      "medium"),
+
     # Shared Prefs write
     ("android/content/SharedPreferences$Editor", "putString", "SharedPrefs.putString", "Storage", "low"),
 ]

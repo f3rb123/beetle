@@ -828,6 +828,150 @@ def _build_pentest_playbook(results: dict, chains: list) -> list:
     return steps[:10]  # cap at 10 actionable steps
 
 
+# ─── First-class attack-chain findings (Phase 6 Task 2) ──────────────────────
+# Map each chain id to the finding titles that contribute to it, so we can mark
+# member findings (in_attack_chain) and aggregate their evidence into the
+# synthesized chain finding. Keyword match is case-insensitive substring.
+CHAIN_MEMBER_KEYWORDS = {
+    "webview_rce": [
+        "WebView JavaScript", "setJavaScriptEnabled", "addJavascriptInterface",
+        "WebView SSL", "SSL Certificate Errors Ignored", "WebView File",
+        "setAllowFileAccess", "File System Access",
+    ],
+    "debug_backup_exfil": [
+        "Debuggable", "Backup Enabled", "Debug Certificate", "Content Provider",
+    ],
+    "permission_data_leak": [
+        "Cleartext", "Certificate Pinning", "HTTP Traffic",
+    ],
+    "intent_injection": [
+        "SQL", "SQLite", "ContentProvider", "Implicit Intent", "Exported",
+    ],
+    "crypto_failure": [
+        "ECB", "DES", "Weak Cipher", "MD5", "SHA-1", "Weak Hash",
+        "hardcoded key", "static key", "Hardcoded IV", "Insecure Storage",
+        "SharedPreferences",
+    ],
+    "firebase_exposure": [
+        "Firebase",
+    ],
+    "hardcoded_secret_exfil": [
+        "Credential", "Secret", "API Key", "Private Key", "Token",
+    ],
+}
+
+
+def _member_evidence(member: dict) -> list:
+    """Pull whatever locatable evidence a member finding carries."""
+    ev = []
+    fe = member.get("file_evidence")
+    if isinstance(fe, list):
+        for e in fe:
+            if isinstance(e, dict) and e.get("path"):
+                ev.append({
+                    "path": e.get("path"),
+                    "lines": e.get("lines") or ([member["line"]] if member.get("line") else []),
+                    "snippet": e.get("snippet") or member.get("snippet") or member.get("title", ""),
+                })
+    if not ev:
+        path = member.get("file_path") or member.get("file")
+        if path:
+            ev.append({
+                "path": path,
+                "lines": [member["line"]] if member.get("line") else [],
+                "snippet": member.get("snippet") or member.get("title", ""),
+            })
+    return ev
+
+
+def build_attack_chain_findings(findings: list, chains: list) -> list:
+    """Convert synthesized chains into first-class findings (Phase 6 Task 2).
+
+    For each chain: locate the contributing findings, mark them
+    `in_attack_chain=True`, aggregate their evidence, and emit one finding with
+    is_attack_chain / attack_chain_id / attack_chain_members set. Returns the new
+    finding dicts (caller prepends them so they sort ahead of normal findings).
+    """
+    chain_findings = []
+    for chain in chains or []:
+        cid = chain.get("id", "chain")
+        keywords = CHAIN_MEMBER_KEYWORDS.get(cid, [])
+        members = _all_findings(findings, *keywords) if keywords else []
+
+        member_refs = []
+        aggregated_evidence = []
+        seen_paths = set()
+        for m in members:
+            m["in_attack_chain"] = True
+            m.setdefault("attack_chain_id", cid)
+            member_refs.append({
+                "id": m.get("canonical_id") or m.get("rule_id") or m.get("id") or "",
+                "title": m.get("title", ""),
+                "severity": m.get("severity", ""),
+                "file_path": m.get("file_path") or m.get("file") or "",
+            })
+            for e in _member_evidence(m):
+                key = (e.get("path"), tuple(e.get("lines") or []))
+                if key in seen_paths:
+                    continue
+                seen_paths.add(key)
+                aggregated_evidence.append(e)
+
+        # Evidence text summarizes the steps + the contributing findings so the
+        # chain is actionable even when individual members have no source line.
+        step_lines = [f"{i}. [{s.get('severity','').upper()}] {s.get('title','')}"
+                      for i, s in enumerate(chain.get("steps", []), 1)]
+        member_lines = [f"  • {r['title']} ({r['severity']})" for r in member_refs]
+        evidence_text = "\n".join(
+            ["Chain steps:"] + step_lines
+            + (["", "Contributing findings:"] + member_lines if member_lines else [])
+        )
+
+        cf = {
+            "title": f"Attack Chain: {chain.get('title', 'Correlated Exploit Chain')}",
+            "severity": chain.get("severity", "high"),
+            "category": "Attack Chain",
+            "is_attack_chain": True,
+            "attack_chain_id": cid,
+            "attack_chain_members": member_refs,
+            "confidence": 90,
+            "confidence_score": 90,
+            "description": chain.get("narrative", ""),
+            "impact": chain.get("impact", ""),
+            "recommendation": (
+                "Break the chain by remediating any one link — the highest-severity "
+                "step is the priority. Address the contributing findings listed in the evidence."
+            ),
+            "steps": chain.get("steps", []),
+            "exploitability": chain.get("exploitability", 0),
+            "owasp": chain.get("owasp", []),
+            "masvs": chain.get("masvs", []),
+            "evidence": evidence_text,
+            "file_evidence": aggregated_evidence,
+            "files": [e["path"] for e in aggregated_evidence],
+            "evidence_count": max(len(aggregated_evidence), 1),
+            # App-level synthesized issue — owned by the application, always shown.
+            "ownership_label": "APPLICATION",
+        }
+        chain_findings.append(cf)
+    return chain_findings
+
+
+def correlate_attack_chains(results: dict) -> dict:
+    """Synthesize chains AND emit first-class chain findings (Phase 6 Task 2).
+
+    Returns the same dict as synthesize_attack_chains plus
+    `attack_chain_findings`. Member findings in results["findings"] are mutated
+    in place (in_attack_chain=True). Idempotent enough for one finalize pass.
+    """
+    chain_data = synthesize_attack_chains(results)
+    chain_findings = build_attack_chain_findings(
+        results.get("findings", []), chain_data.get("attack_chains", []),
+    )
+    chain_data["attack_chain_findings"] = chain_findings
+    return chain_data
+
+
 # ─── Main entry point ─────────────────────────────────────────────────────────
 
 def synthesize_attack_chains(results: dict) -> dict:

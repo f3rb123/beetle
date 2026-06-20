@@ -112,18 +112,6 @@ def analyze_certificate(apk_path: str, results: dict):
             except Exception:
                 pass
 
-            # Flag SHA1withRSA as weak
-            if "SHA1" in cert_info["signature_algo"].upper():
-                results["findings"].append({
-                    "title":          "Certificate Signed with SHA1withRSA — Collision Risk",
-                    "severity":       "high",
-                    "category":       "Certificate",
-                    "description":    f"APK certificate uses {cert_info['signature_algo']}. SHA-1 is cryptographically broken with known collision attacks. Google has deprecated SHA-1 signed APKs.",
-                    "recommendation": "Re-sign with SHA256withRSA or SHA256withECDSA.",
-                    "masvs":          "MASVS-CODE-4",
-                    "owasp":          "M7",
-                })
-
             # Public key
             pub = cert.public_key()
             try:
@@ -173,7 +161,25 @@ def analyze_certificate(apk_path: str, results: dict):
             "description":    f"APK is signed with a debug certificate (CN: {cert_info['subject'].get('CN', '?')}). "
                                "Debug-signed APKs should never be released to production.",
             "impact":         "Debug certs are untrusted and the private key is widely known. The app may have debug features enabled.",
-            "recommendation": "Re-sign with a proper production certificate. Generate a production keystore with `keytool`.",
+            "recommendation": "Re-sign with a proper production certificate. Generate a production keystore with `keytool`, "
+                               "configure the release signingConfig in build.gradle, and verify with `apksigner verify --print-certs`.",
+            "evidence":       _cert_evidence(cert_info),
+            "masvs":          "MASVS-CODE-4",
+            "owasp":          "M7",
+        })
+
+    # SHA-1 signature algorithm (MEDIUM). Generated here — not inline above — so
+    # the evidence block can carry the full computed fingerprints.
+    if "SHA1" in cert_info.get("signature_algo", "").upper():
+        results["findings"].append({
+            "title":          "Certificate Signed with SHA-1 — Collision Risk",
+            "severity":       "medium",
+            "category":       "Certificate",
+            "description":    f"APK certificate uses {cert_info['signature_algo']}. SHA-1 is cryptographically broken "
+                               "with practical collision attacks (SHAttered). Google has deprecated SHA-1 signed APKs.",
+            "impact":         "A SHA-1 signature offers weaker integrity guarantees than SHA-256 and may be rejected by newer tooling/stores.",
+            "recommendation": "Re-sign with SHA256withRSA or SHA256withECDSA and enable APK Signature Scheme v2+.",
+            "evidence":       _cert_evidence(cert_info),
             "masvs":          "MASVS-CODE-4",
             "owasp":          "M7",
         })
@@ -193,11 +199,14 @@ def analyze_certificate(apk_path: str, results: dict):
     key_type = cert_info.get("key_type", "")
     if key_size and "rsa" in key_type.lower() and key_size < 2048:
         results["findings"].append({
-            "title":          f"Weak RSA Key Size — {key_size} bits",
-            "severity":       "high",
+            "title":          f"Weak RSA Signing Key — {key_size}-bit",
+            "severity":       "medium",
             "category":       "Certificate",
-            "description":    f"APK is signed with an RSA-{key_size} key. Keys below 2048 bits are considered insecure.",
-            "recommendation": "Use RSA-2048 or higher, or switch to EC (P-256 or P-384) for smaller, more secure keys.",
+            "description":    f"APK is signed with an RSA-{key_size} key. RSA keys below 2048 bits (e.g. 1024-bit) are "
+                               "considered insecure and are deprecated by NIST and the CA/Browser Forum.",
+            "impact":         "A 1024-bit RSA key is within reach of well-resourced factoring attacks, weakening signature trust.",
+            "recommendation": "Re-key with RSA-2048 or higher, or switch to EC (P-256 / P-384) for smaller, stronger keys.",
+            "evidence":       _cert_evidence(cert_info),
             "masvs":          "MASVS-CRYPTO-1",
             "owasp":          "M10",
         })
@@ -222,6 +231,29 @@ def analyze_certificate(apk_path: str, results: dict):
             "masvs":          "MASVS-CODE-4",
             "owasp":          "M7",
         })
+
+
+def _cert_evidence(cert_info: dict) -> str:
+    """Human-readable evidence block built from the parsed certificate facts.
+
+    Certificate findings have no source line — their evidence IS the certificate
+    metadata (subject, signing algorithm, key, fingerprint). Presenting it as a
+    formatted block keeps these findings actionable and verifiable.
+    """
+    subj = cert_info.get("subject", {}) or {}
+    subject_str = ", ".join(f"{k}={v}" for k, v in subj.items()) or "?"
+    key_type = cert_info.get("key_type") or "?"
+    key_size = cert_info.get("key_size") or 0
+    lines = [
+        f"Subject:           {subject_str}",
+        f"Signature algo:    {cert_info.get('signature_algo') or '?'}",
+        f"Public key:        {key_type} {key_size}-bit" if key_size else f"Public key:        {key_type}",
+        f"Valid:             {cert_info.get('valid_from') or '?'} → {cert_info.get('valid_to') or '?'}",
+        f"SHA-1 fingerprint: {cert_info.get('sha1_fingerprint') or '?'}",
+        f"SHA-256 fingerprint: {cert_info.get('sha256_fingerprint') or '?'}",
+        f"Signature schemes: {', '.join(cert_info.get('scheme') or []) or '?'}",
+    ]
+    return "\n".join(lines)
 
 
 def _build_signature_overview(cert_info: dict, apk_path: str) -> dict:

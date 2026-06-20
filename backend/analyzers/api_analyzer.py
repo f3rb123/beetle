@@ -102,26 +102,43 @@ def analyze_android_apis(tmpdir: str, results: dict, source_dirs=None):
             content_map[rel] = text
 
     api_results = {}
+    api_evidence = {}  # category -> [{path, line, snippet}]  (Phase 6 Task 4)
+
+    # Source roots only — never attribute behaviour evidence to a binary dump.
+    def _is_source(rel):
+        return not str(rel).lower().endswith((".dex", ".so", ".dylib", ".arsc"))
 
     for category, patterns in ANDROID_API_CATEGORIES.items():
         matching_files = []
         seen_files = set()
+        evidence = []
 
         for rel, content in content_map.items():
             for pattern in patterns:
                 try:
-                    if re.search(pattern, content, re.IGNORECASE):
-                        if rel not in seen_files:
-                            seen_files.add(rel)
-                            matching_files.append(rel)
-                        break
+                    m = re.search(pattern, content, re.IGNORECASE)
                 except re.error:
                     continue
+                if not m:
+                    continue
+                if rel not in seen_files:
+                    seen_files.add(rel)
+                    matching_files.append(rel)
+                # Record exact line + snippet for the first source-file match.
+                if _is_source(rel) and len(evidence) < 10:
+                    line_no = content[:m.start()].count("\n") + 1
+                    src_lines = content.splitlines()
+                    snippet = src_lines[line_no - 1].strip()[:240] if line_no <= len(src_lines) else m.group(0)
+                    evidence.append({"path": rel, "line": line_no, "snippet": snippet})
+                break
 
         if matching_files:
             api_results[category] = sorted(matching_files)
+        if evidence:
+            api_evidence[category] = evidence
 
     results["android_api"] = api_results
+    results["android_api_evidence"] = api_evidence
     results["android_api_stats"] = {
         "unique_inputs": len(content_map),
         "duplicate_content_skips": duplicate_skips,
