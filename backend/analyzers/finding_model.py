@@ -698,6 +698,10 @@ def compute_confidence(finding: dict, text: str | None = None) -> int:
     """
     if text is None:
         text = _finding_text(finding)
+    # Phase 5.3: a finding that claimed a source location which could not be
+    # resolved is unreliable — cap it in the informational band.
+    if finding.get("unresolved_evidence"):
+        return 30
     rule_id = finding.get("rule_id") or finding.get("id") or ""
     sev = normalize_severity_label(finding.get("severity"))
 
@@ -1116,6 +1120,220 @@ def _first_non_binary_path(item: dict) -> str:
         if f and not _is_binary_dump_path(f):
             return str(f)
     return ""
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 5 — Source Resolution Validation + View Code gating
+# ═════════════════════════════════════════════════════════════════════════════
+# Every finding must EITHER resolve to a real source file + line, OR explicitly
+# state why source is unavailable. View Code is only offered when resolution
+# succeeds. A finding that *claims* a source location which cannot be resolved is
+# downgraded (unresolved evidence) so it never masquerades as high-confidence.
+
+def _looks_classref(p: str) -> bool:
+    """True for dotted/JVM class references (taint flow file_path), not paths."""
+    if not p:
+        return False
+    t = str(p).strip()
+    if t.startswith("L") and "/" in t and t.endswith(";"):
+        return True
+    return ("/" not in t and "\\" not in t and "." in t
+            and (t.endswith(";") or t.split("$", 1)[0].split(".")[-1][:1].isupper()))
+
+
+def _class_ref_to_source_candidates(file_path: str) -> list[str]:
+    """Candidate source rel-paths for a dotted/JVM class reference."""
+    t = str(file_path or "").strip()
+    if t.startswith("L") and "/" in t:
+        t = t[1:].rstrip(";").replace("/", ".")
+    t = t.rstrip(";")
+    if "/" in t or "\\" in t or "." not in t:
+        return []
+    outer = t.split("$", 1)[0]
+    parts = [s for s in outer.split(".") if s]
+    if len(parts) < 2:
+        return []
+    rel = "/".join(parts)
+    return [f"sources/{rel}.java", f"{rel}.java", f"smali/{rel}.smali", f"{rel}.smali"]
+
+
+def _taint_tokens(finding: dict) -> list[str]:
+    """Method-name tokens to locate the relevant line inside a resolved source."""
+    toks = []
+    tf = finding.get("taint_flow") or {}
+    for key in ("sink", "source"):
+        v = tf.get(key)
+        if v and "." in str(v):
+            toks.append(str(v).rsplit(".", 1)[-1])
+    if finding.get("method_name"):
+        toks.append(str(finding["method_name"]))
+    return [t for t in toks if t]
+
+
+def _snippet_around(lines: list[str], i: int, ctx: int = 2) -> str:
+    start = max(1, i - ctx)
+    end = min(len(lines), i + ctx)
+    out = []
+    for j in range(start, end + 1):
+        marker = ">" if j == i else " "
+        out.append(f"{marker} {j:5d} | {lines[j - 1][:300]}")
+    return "\n".join(out)
+
+
+def _locate_line(text: str, tokens: list[str]) -> tuple[int, str]:
+    if not text or not tokens:
+        return 0, ""
+    lines = text.splitlines()
+    for i, ln in enumerate(lines, 1):
+        if any(tok in ln for tok in tokens):
+            return i, _snippet_around(lines, i)
+    return 0, ""
+
+
+def _unresolved_reason(finding: dict, claimed: list[str]) -> str:
+    fp = finding.get("file_path")
+    if _looks_classref(fp):
+        return f"Decompiled source for class {str(fp).rstrip(';')} was not found in jadx/apktool output."
+    if any(_is_binary_dump_path(p) for p in claimed):
+        return "Evidence is a compiled binary artifact; no decompiled source line is available."
+    return "The referenced source file could not be resolved in the decompiled output."
+
+
+def _no_source_reason(finding: dict) -> str:
+    cat = str(finding.get("category") or "").lower()
+    if "binary" in cat or "native" in cat:
+        return "Native binary finding — no Java/Kotlin source location applies."
+    if finding.get("capability"):
+        return "Capability detected in compiled code; no decompiled source location available."
+    return "Manifest / configuration finding — no single source line (review AndroidManifest.xml)."
+
+
+def validate_source_resolution(findings: list[dict], scan_id: str) -> dict:
+    """Resolve each finding to a real source file+line or explain why not (P5.1/5.3).
+
+    Sets per finding: source_resolved (bool), view_code (bool),
+    source_unavailable_reason (str when unresolved), unresolved_evidence (bool
+    when a claimed path fails). Rewrites taint class refs to the real source
+    path + line + snippet. Returns small stats. Run BEFORE refine_findings so
+    the confidence engine can penalise unresolved evidence.
+    """
+    from . import scan_storage  # lazy: avoids import cycle
+
+    stats = {"resolved": 0, "unresolved_claim": 0, "no_source": 0}
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        # Collect claimed evidence paths (skip binary dumps outright).
+        claimed = []
+        for p in [f.get("file_path"), *( (e or {}).get("path") for e in (f.get("file_evidence") or []) ), *(f.get("files") or [])]:
+            if p and p not in claimed:
+                claimed.append(p)
+        has_claim = bool(claimed)
+
+        # Expand to resolvable candidates (class refs -> source paths).
+        candidates = []
+        for p in claimed:
+            if _is_binary_dump_path(p):
+                continue
+            cref = _class_ref_to_source_candidates(p)
+            candidates.extend(cref if cref else [p])
+
+        resolved_rel = resolved_path = None
+        for cand in candidates:
+            try:
+                rp = scan_storage.resolve_source_file(scan_id, cand)
+            except Exception:
+                rp = None
+            if rp and rp.is_file() and not _is_binary_dump_path(rp.name):
+                resolved_rel, resolved_path = cand, rp
+                break
+
+        if resolved_path is not None:
+            line = f.get("line") if isinstance(f.get("line"), int) and f.get("line") > 0 else 0
+            snippet = f.get("snippet") if isinstance(f.get("snippet"), str) else ""
+            need_locate = _looks_classref(f.get("file_path")) or not line
+            try:
+                text = resolved_path.read_text(errors="replace")
+            except Exception:
+                text = ""
+            if need_locate and text:
+                ln, snip = _locate_line(text, _taint_tokens(f) or [])
+                if ln:
+                    line, snippet = ln, snip
+            if (not snippet) and line and text:
+                snippet = _snippet_around(text.splitlines(), line)
+            # Validate snippet retrievable; if not, treat as unresolved.
+            if snippet or text:
+                f["source_resolved"] = True
+                f["view_code"] = True
+                f["file_path"] = resolved_rel
+                if line:
+                    f["line"] = line
+                f["file_evidence"] = [{"path": resolved_rel, "lines": [line] if line else [], "snippet": snippet}]
+                f["files"] = [resolved_rel]
+                f.pop("source_unavailable_reason", None)
+                f.pop("unresolved_evidence", None)
+                stats["resolved"] += 1
+                continue
+
+        # Not resolved.
+        f["source_resolved"] = False
+        f["view_code"] = False
+        non_binary_claim = any(not _is_binary_dump_path(p) for p in claimed)
+        if has_claim and non_binary_claim:
+            f["unresolved_evidence"] = True
+            f["source_unavailable_reason"] = _unresolved_reason(f, claimed)
+            stats["unresolved_claim"] += 1
+        else:
+            f.pop("unresolved_evidence", None)
+            f["source_unavailable_reason"] = _no_source_reason(f)
+            stats["no_source"] += 1
+    return stats
+
+
+# ── Finding Quality Report (Phase 5.4) ───────────────────────────────────────
+def build_finding_quality_report(findings: list[dict]) -> list[dict]:
+    """One row per finding: id, ownership, confidence, source/view-code/library."""
+    report = []
+    for f in findings or []:
+        if not isinstance(f, dict):
+            continue
+        label = f.get("ownership_label") or UNKNOWN
+        report.append({
+            "finding_id": f.get("canonical_id") or f.get("rule_id") or f.get("id") or f.get("title"),
+            "title": f.get("title"),
+            "severity": normalize_severity_label(f.get("severity")),
+            "ownership": label,
+            "confidence": _coerce_int(f.get("confidence_score"), 0),
+            "source_resolvable": bool(f.get("source_resolved")),
+            "view_code_available": bool(f.get("view_code")),
+            "library_or_framework_owned": label not in (APPLICATION, UNKNOWN, ""),
+            "source_unavailable_reason": f.get("source_unavailable_reason", ""),
+        })
+    return report
+
+
+def log_finding_quality_report(report: list[dict], *, platform: str = "android") -> None:
+    if not report:
+        return
+    resolvable = sum(1 for r in report if r["source_resolvable"])
+    viewable = sum(1 for r in report if r["view_code_available"])
+    lib = sum(1 for r in report if r["library_or_framework_owned"])
+    lines = [
+        "", "===== FINDING QUALITY REPORT =====", "",
+        f"Findings: {len(report)} | source-resolvable: {resolvable} | "
+        f"view-code: {viewable} | library/framework-owned: {lib}", "",
+        f"{'ID':<18}{'OWN':<13}{'CONF':<6}{'SRC':<5}{'VIEW':<6}{'LIB':<5}TITLE",
+    ]
+    for r in report:
+        lines.append(
+            f"{str(r['finding_id'])[:17]:<18}{r['ownership'][:12]:<13}"
+            f"{r['confidence']:<6}{('Y' if r['source_resolvable'] else 'N'):<5}"
+            f"{('Y' if r['view_code_available'] else 'N'):<6}"
+            f"{('Y' if r['library_or_framework_owned'] else 'N'):<5}{str(r['title'])[:50]}"
+        )
+    lines += ["", "=================================="]
+    log.info("\n".join(lines))
 
 
 # ── The Phase 3 entry point ──────────────────────────────────────────────────

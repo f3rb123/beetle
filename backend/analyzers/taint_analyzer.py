@@ -418,10 +418,39 @@ def _fmt_method(m) -> str:
         return "?"
 
 
+# ── Severity calibration (Phase 5.2) ─────────────────────────────────────────
+# Sources that carry inherently sensitive data — logging THESE warrants a bump.
+_SENSITIVE_SOURCES = {
+    "Location", "SMS", "Accounts", "Clipboard", "Camera", "Microphone",
+    "ContentProvider", "SharedPrefs",
+}
+# Sink categories whose risk does NOT depend on data sensitivity — a tainted
+# value reaching them is a real injection/exfiltration primitive.
+_HIGH_VALUE_SINKS = {"WebView", "FileSystem", "Crypto", "Execution", "SQLite", "Network"}
+
+
+def _calibrate_severity(sink_cat: str, source_cat: str, default_sev: str) -> str:
+    """Calibrate a taint finding's severity by sink type (Phase 5.2).
+
+    Logging sinks are LOW by default (logcat is local, API-30+ restricts read)
+    and only MEDIUM when the data is inherently sensitive. Injection/exfil sinks
+    (WebView.loadUrl, file writes, crypto, exec, SQL, network) keep their
+    higher, sink-driven severity — those are dangerous regardless of source.
+    """
+    if sink_cat == "Logging":
+        return "medium" if source_cat in _SENSITIVE_SOURCES else "low"
+    if sink_cat in ("Intent", "Storage"):
+        # Component/redirect & prefs-write risk scales with sensitivity.
+        return default_sev if source_cat in _SENSITIVE_SOURCES else "low"
+    if sink_cat in _HIGH_VALUE_SINKS:
+        return default_sev
+    return default_sev
+
+
 def _flow_to_finding(flow: dict) -> dict:
     sink_cat = flow.get("sink_cat", "Unknown")
     meta     = _SINK_META.get(sink_cat, {"cwe": "CWE-200", "masvs": "MASVS-CODE-4", "owasp": "M2"})
-    sev      = flow.get("sink_sev", "medium")
+    sev      = _calibrate_severity(sink_cat, flow.get("source_cat", ""), flow.get("sink_sev", "medium"))
     chain    = flow.get("call_chain", [])
     chain_str = " → ".join(chain) if chain else "N/A"
 

@@ -1575,6 +1575,14 @@ a:focus-visible {
   background: color-mix(in srgb, var(--finding-accent-soft, rgba(0, 200, 150, 0.1)) 90%, white 10%);
 }
 
+.finding-card__no-source {
+  font-size: 0.78rem;
+  color: var(--text-muted, #94a3b8);
+  font-style: italic;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
 .finding-card.is-open .finding-card__signal svg {
   transform: rotate(90deg);
 }

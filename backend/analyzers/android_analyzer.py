@@ -811,6 +811,10 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     finding_model.log_finding_analysis(results["finding_diagnostics"], platform="android")
     # ── Cross-section noise scrub (endpoints / IPs / binary-dump evidence) ──
     results["scrub_stats"] = finding_model.scrub_noise(results)
+    # ── Phase 5: source resolution validation (before refine so confidence sees it) ──
+    results["source_resolution_stats"] = finding_model.validate_source_resolution(
+        results["findings"], scan_id,
+    )
     # ── Phase 3: signal quality — library filtering, confidence, dedup, FP suppression ──
     _kept, _suppressed, _quality_stats = finding_model.refine_findings(
         results["findings"], app_package=_app_pkg, platform="android",
@@ -819,6 +823,9 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     results["suppressed_findings"] = _suppressed
     results["finding_quality_stats"] = _quality_stats
     finding_model.log_quality_stats(_quality_stats, platform="android")
+    # ── Phase 5.4: per-finding quality report ──
+    results["finding_quality_report"] = finding_model.build_finding_quality_report(_kept)
+    finding_model.log_finding_quality_report(results["finding_quality_report"], platform="android")
     # Severity summary / score now reflect the cleaned (deduped, de-FP'd) set.
     results["findings"] = sort_findings(results["findings"])
     results["severity_summary"] = compute_severity_summary(results["findings"])

@@ -147,9 +147,9 @@ def _cover_page(story, results, T, styles, report_author):
 
     story.append(Paragraph("SECURITY ASSESSMENT REPORT", styles["cover_label"]))
     story.append(Spacer(1, 4 * mm))
-    story.append(Paragraph(app_name, styles["cover_app"]))
+    story.append(Paragraph(escape(str(app_name)), styles["cover_app"]))
     if pkg:
-        story.append(Paragraph(pkg, styles["cover_pkg"]))
+        story.append(Paragraph(escape(str(pkg)), styles["cover_pkg"]))
 
     story.append(Spacer(1, 10 * mm))
 
@@ -417,8 +417,8 @@ def _findings_section(story, results, T, styles):
                     f'<font color="white"><b>{SEVERITY_LABELS.get(sev, sev.upper())}</b></font>',
                     ParagraphStyle("sh", fontSize=8, alignment=TA_CENTER)
                 ),
-                Paragraph(f'<b>{finding.get("title", "Finding")}</b>', styles["finding_title"]),
-                Paragraph(finding.get("category", ""), styles["finding_cat"]),
+                Paragraph(f'<b>{_safe(finding.get("title", "Finding"))}</b>', styles["finding_title"]),
+                Paragraph(_safe(finding.get("category", "")), styles["finding_cat"]),
             ]
         ]
         header_table = Table(header, colWidths=[20 * mm, 120 * mm, 15 * mm])
@@ -451,10 +451,17 @@ def _findings_section(story, results, T, styles):
         if finding.get("recommendation"):
             content_rows.append(["Recommendation", finding["recommendation"]])
 
+        # "Proof" and "Standards" are pre-built, already-escaped markup (they
+        # contain intentional <br/> / <font> tags); every other row is raw text
+        # and must be HTML-escaped before reportlab parses it as XML.
+        _PREFORMATTED = {"Proof", "Standards"}
         content_data = [
             [
-                Paragraph(label, styles["finding_label"]),
-                Paragraph(str(value).replace("\n", "<br/>"), styles["finding_value"] if label != "PoC / Commands" else styles["mono"]),
+                Paragraph(_safe(label), styles["finding_label"]),
+                Paragraph(
+                    value if label in _PREFORMATTED else _safe(value),
+                    styles["finding_value"] if label != "PoC / Commands" else styles["mono"],
+                ),
             ]
             for label, value in content_rows
         ]
@@ -478,6 +485,14 @@ def _findings_section(story, results, T, styles):
             story.append(KeepTogether([header_table, Spacer(1, 5 * mm)]))
 
 
+def _safe(text) -> str:
+    """HTML-escape dynamic text for reportlab Paragraph, preserving newlines as
+    <br/>. reportlab parses Paragraph content as XML, so any raw <, >, & in
+    findings (code snippets, generics like List<String>, XML) would otherwise
+    raise and abort PDF generation."""
+    return escape(str(text)).replace("\n", "<br/>")
+
+
 def _format_finding_evidence(finding: dict) -> str:
     snippets = []
     evidence_entries = finding.get("file_evidence") or []
@@ -488,14 +503,14 @@ def _format_finding_evidence(finding: dict) -> str:
             lines = entry.get("lines") or ([finding.get("line")] if finding.get("line") else [])
             line_str = f":{lines[0]}" if lines else ""
             snippet = entry.get("snippet") or ""
-            block = f"File: {path}{line_str}"
+            block = f"File: {escape(str(path))}{escape(str(line_str))}"
             if snippet:
                 block += f"<br/><font face='Courier'>{escape(snippet[:280])}</font>"
             snippets.append(block)
     elif finding.get("file_path") or finding.get("snippet"):
         path = finding.get("file_path") or "Unknown file"
         line = f":{finding.get('line')}" if finding.get("line") else ""
-        block = f"File: {path}{line}"
+        block = f"File: {escape(str(path))}{escape(str(line))}"
         if finding.get("snippet"):
             block += f"<br/><font face='Courier'>{escape(str(finding.get('snippet'))[:280])}</font>"
         snippets.append(block)
@@ -561,10 +576,10 @@ def _secrets_section(story, results, T, styles):
     for s in sorted(secrets, key=lambda x: ["critical","high","medium","low","info"].index(x.get("severity","info")) if x.get("severity") in ["critical","high","medium","low","info"] else 5):
         color = SEVERITY_COLORS.get(s.get("severity", "medium"), HexColor("#D97706"))
         rows.append([
-            Paragraph(s.get("name", ""), styles["table_cell"]),
+            Paragraph(escape(str(s.get("name", ""))), styles["table_cell"]),
             Paragraph(f'<font color="{color.hexval()}"><b>{s.get("severity","").upper()}</b></font>', styles["table_cell"]),
-            Paragraph(f'<font face="Courier">{s.get("value", "")}</font>', styles["table_cell"]),
-            Paragraph(s.get("source", ""), styles["table_cell"]),
+            Paragraph(f'<font face="Courier">{escape(str(s.get("value", "")))}</font>', styles["table_cell"]),
+            Paragraph(escape(str(s.get("source", ""))), styles["table_cell"]),
         ])
 
     t = Table(rows, colWidths=[55 * mm, 20 * mm, 50 * mm, 30 * mm])
@@ -585,7 +600,7 @@ def _endpoints_section(story, results, T, styles):
 
     rows = [["URL"]]
     for url in endpoints[:100]:
-        rows.append([Paragraph(f'<font face="Courier" size="8">{url}</font>', styles["table_cell"])])
+        rows.append([Paragraph(f'<font face="Courier" size="8">{escape(str(url))}</font>', styles["table_cell"])])
 
     t = Table(rows, colWidths=[155 * mm])
     t.setStyle(_table_style(T))
@@ -701,9 +716,9 @@ def _attack_surface_section(story, results, T, styles):
                 dls   = ", ".join(comp.get("deeplinks", []))[:60] or ", ".join(comp.get("actions", []))[:60] or "—"
                 perm  = comp.get("permission") or "None"
                 rows.append([
-                    Paragraph(comp.get("short_name", ""), styles["table_cell_mono"]),
-                    Paragraph(f'<font color="{SEVERITY_COLORS["high"].hexval() if perm == "None" else SEVERITY_COLORS["info"].hexval()}">{perm}</font>', styles["table_cell"]),
-                    Paragraph(dls, styles["table_cell"]),
+                    Paragraph(escape(str(comp.get("short_name", ""))), styles["table_cell_mono"]),
+                    Paragraph(f'<font color="{SEVERITY_COLORS["high"].hexval() if perm == "None" else SEVERITY_COLORS["info"].hexval()}">{escape(str(perm))}</font>', styles["table_cell"]),
+                    Paragraph(escape(str(dls)), styles["table_cell"]),
                 ])
 
             t = Table(rows, colWidths=[55 * mm, 40 * mm, 60 * mm])
@@ -714,7 +729,7 @@ def _attack_surface_section(story, results, T, styles):
         schemes = attack.get("url_schemes", [])
         if schemes:
             story.append(Paragraph("Custom URL Schemes", styles["subsection_title"]))
-            rows = [["Scheme"]] + [[Paragraph(f"{s}://", styles["table_cell_mono"])] for s in schemes]
+            rows = [["Scheme"]] + [[Paragraph(f"{escape(str(s))}://", styles["table_cell_mono"])] for s in schemes]
             t = Table(rows, colWidths=[155 * mm])
             t.setStyle(_table_style(T))
             story.append(t)

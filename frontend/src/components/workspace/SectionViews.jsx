@@ -577,7 +577,11 @@ function FindingsList({ findings, onOpenCode, emptyTitle = 'No findings found', 
                     onChange={(state, note) => setFindingTriage(finding, state, note)}
                   />
                 )}
-                {primary?.path ? <span onClick={event => event.stopPropagation()}><FileLinkButton path={primary.path} lines={primary.lines} onOpenCode={onOpenCode} label="View Code" decompileInfo={decompileInfo} /></span> : null}
+                {finding.view_code !== false && primary?.path
+                  ? <span onClick={event => event.stopPropagation()}><FileLinkButton path={primary.path} lines={primary.lines} onOpenCode={onOpenCode} label="View Code" decompileInfo={decompileInfo} /></span>
+                  : (finding.source_unavailable_reason
+                    ? <span className="finding-card__no-source" title={finding.source_unavailable_reason}>Source unavailable</span>
+                    : null)}
                 <span className="finding-card__signal" style={{ color: severity.text }}>
                   <ChevronRight size={16} />
                 </span>
@@ -618,7 +622,14 @@ function FindingsList({ findings, onOpenCode, emptyTitle = 'No findings found', 
                   </div>
                 </div>
 
-                {evidence.length > 0 ? (
+                {finding.view_code === false && finding.source_unavailable_reason ? (
+                  <div className="mini-surface">
+                    <div className="mini-surface__label">Source Location</div>
+                    <div className="mini-surface__body">{finding.source_unavailable_reason}</div>
+                  </div>
+                ) : null}
+
+                {finding.view_code !== false && evidence.length > 0 ? (
                   <div className="stack stack--tight">
                     <div className="mini-surface__label">Evidence</div>
                     <div className="evidence-stack">
