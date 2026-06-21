@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import logging
 
+from . import cloud_correlation as _cloud_correlation
 from . import cloud_intel as _cloud_intel
 from . import secret_validators as _secret_validators
 from .finding_model import classify_ownership, classify_ownership_label
@@ -735,6 +736,22 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
         s.pop("_raw", None)
         s.pop("_raw_members", None)
 
+    # ── Optional cloud attack-path correlation (Phase 9.5) — opt-in, no network. ──
+    # Correlates masked secrets + exposures into chains. Uses no raw material.
+    corr_summary = {"cloud_attack_chains": 0, "critical_chains": 0,
+                    "chain_confidence": "", "affected_providers": []}
+    results.setdefault("cloud_attack_paths", [])
+    results.setdefault("suppressed_cloud_attack_paths", [])
+    if _cloud_correlation.correlation_enabled():
+        try:
+            _chains, _supp_chains, corr_summary = _cloud_correlation.correlate(
+                visible, results.get("cloud_exposures", []),
+            )
+            results["cloud_attack_paths"] = _chains
+            results["suppressed_cloud_attack_paths"] = _supp_chains
+        except Exception:
+            log.exception("[secret_intel] cloud correlation failed; no chains emitted")
+
     suppressed_sdk = sum(1 for c in suppressed if c.get("suppressed_reason") == "third_party_sdk")
     low_conf = sum(1 for c in suppressed if c.get("suppressed_reason") == "low_confidence")
     paired_members = sum(1 for c in suppressed if c.get("suppressed_reason") == "paired")
@@ -766,6 +783,11 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
         "critical_exposures":        cloud_summary["critical_exposures"],
         "exposure_confidence":       cloud_summary["exposure_confidence"],
         "exposure_types":            cloud_summary["exposure_types"],
+        # Phase 9.5 — cloud attack-path correlation rollup (zeros when disabled).
+        "cloud_attack_chains":       corr_summary["cloud_attack_chains"],
+        "critical_chains":           corr_summary["critical_chains"],
+        "chain_confidence":          corr_summary["chain_confidence"],
+        "affected_providers":        corr_summary["affected_providers"],
     }
     results["secrets_summary"] = summary
     log.info(
