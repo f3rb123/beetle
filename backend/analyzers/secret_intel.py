@@ -266,6 +266,244 @@ def _exposure(ownership: str) -> int:
     return _OWN_EXPOSURE.get(ownership, 40)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 9.2 — Pairing, validation gating, eligibility, risk
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ─── Validation states (Task 3) ──────────────────────────────────────────────
+ST_SKIPPED = "skipped"      # not eligible, or live checks disabled → no probe
+ST_ELIGIBLE = "eligible"    # could be validated, but no probe was made (default)
+ST_VALID = "valid"          # confirmed live by a probe (live mode only)
+ST_INVALID = "invalid"      # rejected by a probe (live mode only)
+ST_ERROR = "error"          # a probe was attempted and errored
+
+
+# ─── Provider eligibility (Task 4) ───────────────────────────────────────────
+# Types a single secret can be validated on its own (a future phase performs the
+# actual probe — here we only declare the capability).
+_LONE_ELIGIBLE_TYPES = {
+    "GOOGLE_API_KEY", "GCP_API_KEY", "FIREBASE_URL", "STRIPE_SECRET",
+    "GITHUB_PAT", "GITHUB_FINE_GRAINED_PAT", "SENDGRID_API_KEY",
+    "SLACK_OAUTH_TOKEN", "SLACK_WEBHOOK", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+    "HUGGINGFACE_TOKEN", "NPM_TOKEN", "MAILCHIMP_API_KEY", "SHOPIFY_ACCESS_TOKEN",
+    "AZURE_CONNECTION_STRING",
+}
+# Composite pair types are validatable (they carry the full credential material).
+_PAIR_ELIGIBLE_TYPES = {
+    "AWS_CREDENTIAL_PAIR", "TWILIO_ACCOUNT_PAIR", "STRIPE_KEY_PAIR",
+    "FIREBASE_PAIR", "AZURE_STORAGE_PAIR",
+}
+# Types that are explicitly NOT eligible: harmless public keys, or half of a pair
+# that cannot be validated alone (no signing material without its partner).
+_NOT_ELIGIBLE_TYPES = {
+    "STRIPE_PUBLISHABLE", "MAPBOX_TOKEN", "SHOPIFY_STOREFRONT_TOKEN",
+    "AWS_ACCESS_KEY", "AWS_SECRET_KEY", "TWILIO_ACCOUNT_SID",
+    "TWILIO_AUTH_TOKEN", "AZURE_STORAGE_KEY",
+}
+
+
+def can_validate(secret: dict) -> bool:
+    """Declare whether a secret COULD be validated — without doing so (Task 4)."""
+    if secret.get("paired_into"):
+        return False  # validation happens at the composite-pair level, not the member
+    stype = secret.get("type", "")
+    if secret.get("is_pair"):
+        return stype in _PAIR_ELIGIBLE_TYPES
+    if stype in _NOT_ELIGIBLE_TYPES:
+        return False
+    return stype in _LONE_ELIGIBLE_TYPES
+
+
+def validation_state(secret: dict, eligible: bool) -> str:
+    """Resolve the validation state machine (Task 3). Default skipped; eligible
+    when a probe COULD run but did not (no network by default). valid/invalid/
+    error only ever come from an actual probe in a later/live phase."""
+    vr = secret.get("validation_result")
+    if vr in (ST_VALID, ST_INVALID, ST_ERROR):
+        return vr
+    return ST_ELIGIBLE if eligible else ST_SKIPPED
+
+
+# ─── Pairing (Task 1 / Task 2) ───────────────────────────────────────────────
+# (relationship_type, primary_type, secondary_type, pair_type, title, provider)
+_PAIR_RULES = [
+    ("aws_credential_pair", "AWS_ACCESS_KEY",  "AWS_SECRET_KEY",
+     "AWS_CREDENTIAL_PAIR", "AWS Credential Pair", "AWS"),
+    ("twilio_account_pair", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN",
+     "TWILIO_ACCOUNT_PAIR", "Twilio Account Pair", "TWILIO"),
+    ("stripe_key_pair", "STRIPE_PUBLISHABLE", "STRIPE_SECRET",
+     "STRIPE_KEY_PAIR", "Stripe Key Pair", "STRIPE"),
+    ("firebase_pair", "GOOGLE_API_KEY", "FIREBASE_URL",
+     "FIREBASE_PAIR", "Firebase Configuration Pair", "FIREBASE"),
+    ("azure_storage_pair", "AZURE_CONNECTION_STRING", "AZURE_STORAGE_KEY",
+     "AZURE_STORAGE_PAIR", "Azure Storage Pair", "AZURE"),
+]
+
+_SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def _loc(secret: dict) -> tuple[str, int]:
+    ev = secret.get("evidence") or {}
+    return (str(ev.get("file_path", "")), int(ev.get("line", 0) or 0))
+
+
+def _higher_severity(a: dict, b: dict) -> str:
+    return min((a.get("severity") or "info", b.get("severity") or "info"),
+               key=lambda s: _SEV_RANK.get(s, 4))
+
+
+def _stronger_ownership(a: dict, b: dict) -> tuple[str, str, str]:
+    """Return (ownership, ownership_label, owner_package) — APPLICATION wins."""
+    for c in (a, b):
+        if c.get("ownership") == APPLICATION:
+            return APPLICATION, c.get("ownership_label", APPLICATION), c.get("owner_package", "")
+    for c in (a, b):
+        if c.get("ownership") == UNKNOWN:
+            return UNKNOWN, c.get("ownership_label", UNKNOWN), c.get("owner_package", "")
+    return a.get("ownership", UNKNOWN), a.get("ownership_label", UNKNOWN), a.get("owner_package", "")
+
+
+def _pick_secondary(primary: dict, secondaries: list[dict], used: set) -> tuple[dict | None, str]:
+    """Greedy co-location match: same file (HIGH) > same package (MEDIUM) > any (LOW)."""
+    pf, _ = _loc(primary)
+    pp = primary.get("owner_package", "")
+    avail = [s for s in secondaries if s["id"] not in used]
+    for s in avail:
+        if _loc(s)[0] == pf and pf:
+            return s, HIGH
+    for s in avail:
+        if pp and s.get("owner_package", "") == pp:
+            return s, MEDIUM
+    if avail:
+        return avail[0], LOW
+    return None, ""
+
+
+def _member_summary(s: dict) -> dict:
+    ev = s.get("evidence") or {}
+    return {
+        "id": s.get("id"), "type": s.get("type"), "provider": s.get("provider"),
+        "masked_value": s.get("masked_value"),
+        "file_path": ev.get("file_path", ""), "line": ev.get("line", 0),
+    }
+
+
+def _make_pair(rule, a: dict, b: dict, rel_conf: str) -> dict:
+    relationship_type, _pt, _st, pair_type, title, provider = rule
+    severity = _higher_severity(a, b)
+    ownership, own_label, owner_pkg = _stronger_ownership(a, b)
+    pid = "BEETLE-PAIR-" + hashlib.sha1(
+        f"{pair_type}|{'|'.join(sorted([a.get('value_sha256',''), b.get('value_sha256','')]))}"
+        .encode("utf-8", "replace")
+    ).hexdigest()[:10]
+
+    file_evidence = []
+    for m in (a, b):
+        ev = m.get("evidence") or {}
+        file_evidence.append({
+            "path": ev.get("file_path", ""),
+            "lines": [ev.get("line", 0)] if ev.get("line") else [],
+            "snippet": ev.get("snippet", ""),
+            "type": m.get("type"),
+        })
+
+    masked_value = "; ".join(f"{m.get('type')}={m.get('masked_value')}" for m in (a, b))
+    return {
+        "id": pid,
+        "is_pair": True,
+        "provider": provider,
+        "type": pair_type,
+        "relationship_type": relationship_type,
+        "relationship_confidence": rel_conf,
+        "name": title,
+        "title": title,
+        "category": "Cloud Credentials",
+        "severity": severity,
+        "ownership": ownership,
+        "ownership_label": own_label,
+        "owner_package": owner_pkg,
+        "confidence": rel_conf,            # the pair's confidence is its linkage strength
+        "masked_value": masked_value,
+        "value": masked_value,
+        "members": [a.get("id"), b.get("id")],
+        "components": [_member_summary(a), _member_summary(b)],
+        "paired_with": [a.get("id"), b.get("id")],
+        "evidence": dict(a.get("evidence") or {}),
+        "file_evidence": file_evidence,
+        "validation_result": ST_SKIPPED,
+        "validated": False,
+        "privileges": [],
+        "description": (
+            f"A {provider} {relationship_type.replace('_', ' ')} was found: both halves of "
+            f"the credential are present in the app ({a.get('type')} + {b.get('type')}), which "
+            f"together grant usable access. Linkage confidence: {rel_conf} "
+            f"({'same file' if rel_conf == HIGH else 'same package' if rel_conf == MEDIUM else 'co-present'})."
+        ),
+        "recommendation": (
+            f"Rotate both credentials immediately and remove them from the app. "
+            f"A complete {provider} credential pair is directly usable by an attacker."
+        ),
+    }
+
+
+def _build_pairs(candidates: list[dict]) -> tuple[list[dict], set]:
+    """Build composite pair findings from co-occurring secrets. Returns
+    (pairs, used_member_ids). Deterministic: rules + members are sorted."""
+    pairs: list[dict] = []
+    used: set = set()
+    by_type: dict[str, list[dict]] = {}
+    for c in candidates:
+        by_type.setdefault(c.get("type", ""), []).append(c)
+    for lst in by_type.values():
+        lst.sort(key=_loc)
+
+    for rule in _PAIR_RULES:
+        _rt, prim_t, sec_t, _pt, _title, _prov = rule
+        prims = [c for c in by_type.get(prim_t, []) if c["id"] not in used]
+        secs = by_type.get(sec_t, [])
+        for p in prims:
+            match, rel_conf = _pick_secondary(p, secs, used)
+            if match is None:
+                continue
+            used.add(p["id"])
+            used.add(match["id"])
+            pairs.append(_make_pair(rule, p, match, rel_conf))
+    pairs.sort(key=lambda x: (_SEV_RANK.get(x.get("severity"), 4), x.get("type", "")))
+    return pairs, used
+
+
+# ─── Risk model (Task 5) ─────────────────────────────────────────────────────
+_RISK_SEV_BASE = {"critical": 90, "high": 70, "medium": 45, "low": 25, "info": 10}
+_RISK_OWN = {APPLICATION: 10, UNKNOWN: 0, THIRD_PARTY_LIBRARY: -20, FRAMEWORK: -25}
+_RISK_CONF = {HIGH: 10, MEDIUM: 0, LOW: -15}
+
+
+def _compute_risk(secret: dict) -> tuple[int, str]:
+    """Risk from severity + paired + ownership + confidence (NOT privileges)."""
+    base = _RISK_SEV_BASE.get(secret.get("severity", "info"), 10)
+    if secret.get("is_pair") or secret.get("paired_into"):
+        base += 15
+    base += _RISK_OWN.get(secret.get("ownership"), 0)
+    base += _RISK_CONF.get(secret.get("confidence"), 0)
+    score = max(0, min(100, base))
+    level = HIGH if score >= 70 else (MEDIUM if score >= 40 else LOW)
+    return score, level
+
+
+def _apply_gating(secret: dict) -> None:
+    """Attach can_validate / validation_result / risk to a secret in place."""
+    eligible = can_validate(secret)
+    secret["can_validate"] = eligible
+    secret["validation_result"] = validation_state(secret, eligible)
+    secret["validated"] = secret["validation_result"] == ST_VALID
+    risk_score, risk_level = _compute_risk(secret)
+    secret["risk_score"] = risk_score
+    secret["risk_level"] = risk_level
+    # Pairing bumps exploitability (full credential = larger blast radius).
+    if secret.get("is_pair") or secret.get("paired_into"):
+        secret["exploitability_score"] = min(100, int(secret.get("exploitability_score", 0)) + 15)
+
+
 # ─── Evidence gate (Task 4) ──────────────────────────────────────────────────
 def _evidence(secret: dict) -> tuple[str, int, str]:
     """Return (file_path, line, snippet). Empty/zero where missing."""
@@ -352,6 +590,9 @@ def _build_canonical(secret: dict, app_package: str) -> dict | None:
         "exploitability_score": exploit,
         "severity":             severity,
         "paired_with":          secret.get("paired_with") or [],
+        "is_pair":              False,
+        "paired_into":          "",
+        "relationship_type":    secret.get("relationship_type") or "",
         "suppressed_reason":    "",
         "snippet":              masked_snippet,
         "code_context":         masked_context,
@@ -377,11 +618,8 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
     Returns the secrets_summary dict.
     """
     raw = results.get("secrets") or []
-    visible: list[dict] = []
-    suppressed: list[dict] = []
+    canon: list[dict] = []
     dropped_no_evidence = 0
-    suppressed_sdk = 0
-    low_conf = 0
     providers: set[str] = set()
     scrub_pairs: list[tuple[str, str]] = []  # (raw_value, masked_value) for cross-scrub
 
@@ -396,27 +634,59 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
         if raw_value and len(raw_value) >= 6:
             scrub_pairs.append((raw_value, canonical["masked_value"]))
         providers.add(canonical["provider"])
-
+        # Provisional bucket (pairing may move a visible member to "paired").
         if canonical["ownership"] in (THIRD_PARTY_LIBRARY, FRAMEWORK):
+            canonical["_bucket"] = "sdk"
             canonical["suppressed_reason"] = "third_party_sdk"
-            suppressed_sdk += 1
-            suppressed.append(canonical)
         elif canonical["confidence"] == LOW:
+            canonical["_bucket"] = "low"
             canonical["suppressed_reason"] = "low_confidence"
-            low_conf += 1
-            suppressed.append(canonical)
         else:
-            visible.append(canonical)
+            canonical["_bucket"] = "visible"
+        canon.append(canonical)
 
     # Cross-scrub: purge every detected raw value from every secret's text fields
     # (a neighbouring secret's value can land in this one's context window).
     # Longest raw first so a longer secret containing a shorter one is masked first.
     scrub_pairs.sort(key=lambda p: len(p[0]), reverse=True)
-    for secret in visible + suppressed:
+    for secret in canon:
         _cross_scrub(secret, scrub_pairs)
 
-    validated = sum(1 for s in visible if s["validation_result"] == "valid")
-    invalid = sum(1 for s in visible if s["validation_result"] == "invalid")
+    # ── Pairing (Task 1/2): build composites from co-occurring application secrets.
+    pair_candidates = [c for c in canon if c["_bucket"] == "visible"]
+    pairs, used_member_ids = _build_pairs(pair_candidates)
+    for c in canon:
+        if c["id"] in used_member_ids:
+            c["_bucket"] = "paired"
+            c["suppressed_reason"] = "paired"
+            c["paired_into"] = next(
+                (p["id"] for p in pairs if c["id"] in p.get("members", [])), ""
+            )
+            other = [m for p in pairs if c["id"] in p.get("members", [])
+                     for m in p.get("members", []) if m != c["id"]]
+            if other:
+                c["paired_with"] = other
+                c["relationship_type"] = next(
+                    (p["relationship_type"] for p in pairs if c["id"] in p.get("members", [])), ""
+                )
+
+    # ── Validation gating + risk (Task 3/4/5) on every secret AND every pair. ──
+    for secret in canon + pairs:
+        _apply_gating(secret)
+
+    # ── Assemble final partitions. ──────────────────────────────────────────
+    visible = pairs + [c for c in canon if c["_bucket"] == "visible"]
+    suppressed = [c for c in canon if c["_bucket"] in ("sdk", "low", "paired")]
+    for c in canon + pairs:
+        c.pop("_bucket", None)
+
+    suppressed_sdk = sum(1 for c in suppressed if c.get("suppressed_reason") == "third_party_sdk")
+    low_conf = sum(1 for c in suppressed if c.get("suppressed_reason") == "low_confidence")
+    paired_members = sum(1 for c in suppressed if c.get("suppressed_reason") == "paired")
+    unpaired = sum(1 for c in visible if not c.get("is_pair"))
+    candidates = sum(1 for c in visible if c.get("can_validate"))
+    validated = sum(1 for s in visible if s["validation_result"] == ST_VALID)
+    invalid = sum(1 for s in visible if s["validation_result"] == ST_INVALID)
     high_risk = sum(1 for s in visible if s["severity"] in ("critical", "high"))
 
     results["secrets"] = visible
@@ -425,17 +695,23 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
         "validated_secrets":         validated,
         "invalid_secrets":           invalid,
         "high_risk_credentials":     high_risk,
+        "paired_credentials":        len(pairs),
+        "unpaired_credentials":      unpaired,
+        "validation_candidates":     candidates,
+        "paired_members_hidden":     paired_members,
         "suppressed_sdk_secrets":    suppressed_sdk,
         "low_confidence_suppressed": low_conf,
         "dropped_no_evidence":       dropped_no_evidence,
         "total_application_secrets": len(visible),
         "providers":                 sorted(providers),
+        "relationship_types":        sorted({p["relationship_type"] for p in pairs}),
     }
     results["secrets_summary"] = summary
     log.info(
-        "[secret_intel] app_pkg=%s | visible=%d suppressed_sdk=%d low_conf=%d "
-        "dropped_no_evidence=%d validated=%d providers=%s",
-        app_package or "?", len(visible), suppressed_sdk, low_conf,
-        dropped_no_evidence, validated, ",".join(sorted(providers)) or "-",
+        "[secret_intel] app_pkg=%s | visible=%d pairs=%d unpaired=%d candidates=%d "
+        "suppressed_sdk=%d low_conf=%d paired_hidden=%d dropped=%d providers=%s",
+        app_package or "?", len(visible), len(pairs), unpaired, candidates,
+        suppressed_sdk, low_conf, paired_members, dropped_no_evidence,
+        ",".join(sorted(providers)) or "-",
     )
     return summary
