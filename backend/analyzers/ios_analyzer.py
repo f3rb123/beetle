@@ -394,6 +394,13 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     results["findings"] = sort_findings(results["findings"])
     results["severity_summary"] = compute_severity_summary(results["findings"])
 
+    # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
+    try:
+        from . import analyst_intel
+        analyst_intel.annotate(results)
+    except Exception:
+        log.exception("[analyst_intel] failed; findings left without explanations")
+
     # ── Quick summary ─────────────────────────────────────────────────────────
     _build_ios_quick_summary(results)
 
