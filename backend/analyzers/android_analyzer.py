@@ -879,6 +879,12 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         analyst_intel.annotate(results)
     except Exception:
         log.exception("[analyst_intel] failed; findings left without explanations")
+    # ── Phase 11: MASVS coverage intelligence (deterministic, no network) ──
+    try:
+        from . import masvs_intel
+        masvs_intel.annotate(results)
+    except Exception:
+        log.exception("[masvs_intel] failed; no MASVS coverage emitted")
     _build_quick_summary(results)
     _record_module_metric(results, "finalize_results", finalize_started, finding_count=len(results.get("findings", [])))
 

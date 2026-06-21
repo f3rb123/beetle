@@ -400,6 +400,12 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         analyst_intel.annotate(results)
     except Exception:
         log.exception("[analyst_intel] failed; findings left without explanations")
+    # ── Phase 11: MASVS coverage intelligence (deterministic, no network) ──
+    try:
+        from . import masvs_intel
+        masvs_intel.annotate(results)
+    except Exception:
+        log.exception("[masvs_intel] failed; no MASVS coverage emitted")
 
     # ── Quick summary ─────────────────────────────────────────────────────────
     _build_ios_quick_summary(results)
