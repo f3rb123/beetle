@@ -73,6 +73,11 @@ export default function CodeBlockViewer({
   content = '',
   language = 'txt',
   highlightedLines = [],
+  approximate = false,
+  evidenceSource = '',
+  evidence = [],
+  evidenceIndex = 0,
+  onNavigateEvidence,
   loading = false,
   error = '',
   meta = '',
@@ -180,6 +185,39 @@ export default function CodeBlockViewer({
           ) : null}
         </div>
       </div>
+
+      {(approximate || evidenceSource || evidence.length > 1) ? (
+        <div className="code-viewer__evidence">
+          <span className={`code-viewer__line-badge${approximate ? ' is-approx' : ''}`}>
+            {primaryFocusLine
+              ? `${approximate ? '≈ line' : 'line'} ${primaryFocusLine}`
+              : 'line —'}
+          </span>
+          {approximate ? <span className="code-viewer__approx-note">approximate — resolved from evidence snippet</span> : null}
+          {evidenceSource ? <span className="code-viewer__evsrc">source: {evidenceSource}</span> : null}
+          {evidence.length > 1 && onNavigateEvidence ? (
+            <div className="code-viewer__evnav">
+              <button
+                type="button"
+                className="button button--ghost button--small"
+                onClick={() => onNavigateEvidence(Math.max(0, evidenceIndex - 1))}
+                disabled={evidenceIndex <= 0}
+              >
+                ‹ Prev evidence
+              </button>
+              <span className="code-viewer__evcount">Evidence {evidenceIndex + 1}/{evidence.length}</span>
+              <button
+                type="button"
+                className="button button--ghost button--small"
+                onClick={() => onNavigateEvidence(Math.min(evidence.length - 1, evidenceIndex + 1))}
+                disabled={evidenceIndex >= evidence.length - 1}
+              >
+                Next evidence ›
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="code-viewer__toolbar">
         <label className="code-viewer__search">

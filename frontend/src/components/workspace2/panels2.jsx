@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   ShieldCheck, ShieldAlert, Network, FileCode2, Boxes, Cpu, Bug, GitCompare,
-  Sparkles, Folder, FileText, Search, ChevronRight, ArrowUpRight, Copy,
+  Sparkles, Folder, FileText, Search, ChevronRight, ArrowUpRight, Copy, Minus,
 } from 'lucide-react'
 import { SEV_COLOR, normSev, SeverityTag, SoftTag, EmptyState, Metric } from './ui.jsx'
 import { AI_PROVIDERS, AI_ACTIONS, runAssist } from '../../lib/ai-providers.js'
@@ -364,8 +364,10 @@ export function ManifestPanel({ results }) {
   const ms = results.manifest_security || {}
   const surface = results.attack_surface || {}
   const perms = (results.permissions || {}).classified || []
-  const flag = (v, dangerWhenTrue = true) => v === undefined ? '—' : (v ? 'true' : 'false')
-  const flagLevel = v => v ? 'warn' : 'good'
+  // Android platform defaults for cleartext: targetSdk>=28 → blocked (false),
+  // pre-28 → allowed (true). Unknown targetSdk → genuinely unknown.
+  const targetSdk = Number(info.target_sdk ?? ms.target_sdk)
+  const cleartextDefault = Number.isFinite(targetSdk) ? targetSdk < 28 : null
 
   const exported = ['activities', 'services', 'receivers', 'providers']
     .map(t => [t, (surface[t] || []).filter(c => c.exported).length])
@@ -389,11 +391,12 @@ export function ManifestPanel({ results }) {
       <div className="ws-card ws-card--pad ws-section">
         <h2>App Flags</h2>
         <div className="ws-assess">
-          <FlagRow label="debuggable" value={ms.debuggable ?? info.debuggable} danger />
-          <FlagRow label="allowBackup" value={ms.allow_backup ?? ms.allowBackup} danger />
-          <FlagRow label="usesCleartextTraffic" value={ms.uses_cleartext_traffic ?? ms.usesCleartextTraffic} danger />
-          <FlagRow label="networkSecurityConfig" value={(results.network_config || {}).present} danger={false} />
+          <FlagRow label="debuggable" {...resolveFlag(ms.debuggable ?? info.debuggable, false)} danger />
+          <FlagRow label="allowBackup" {...resolveFlag(ms.allow_backup ?? ms.allowBackup, true)} danger />
+          <FlagRow label="usesCleartextTraffic" {...resolveFlag(ms.uses_cleartext_traffic ?? ms.usesCleartextTraffic, cleartextDefault)} danger />
+          <FlagRow label="networkSecurityConfig" {...resolveFlag((results.network_config || {}).present, false)} danger={false} />
         </div>
+        <p className="ws-flag-hint ws-muted">Values marked <em>platform default</em> are inferred from Android behavior when the attribute is absent from the manifest.</p>
       </div>
 
       <h2>Permissions</h2>
@@ -412,13 +415,42 @@ export function ManifestPanel({ results }) {
   )
 }
 
-function FlagRow({ label, value, danger }) {
+// Manifest flags arrive in several shapes: a bool, a string ('true'/'false'/
+// 'missing'), or an object {value|state: 'true'|'false'|'missing'}. Coerce to a
+// tri-state: true / false / undefined (genuinely unknown or "missing").
+function flagValue(v) {
+  if (v === undefined || v === null) return undefined
+  if (typeof v === 'boolean') return v
+  const s = String(typeof v === 'object' ? (v.state ?? v.value ?? '') : v).toLowerCase()
+  if (s === 'true') return true
+  if (s === 'false') return false
+  return undefined
+}
+
+// Resolve a manifest flag against an Android platform default.
+// Returns { value: bool|null, defaulted } — value is null only when truly unknown.
+function resolveFlag(declared, fallback) {
+  const v = flagValue(declared)
+  if (v === undefined) {
+    return { value: fallback === null || fallback === undefined ? null : !!fallback, defaulted: fallback !== null && fallback !== undefined }
+  }
+  return { value: v, defaulted: false }
+}
+
+function FlagRow({ label, value, defaulted, danger }) {
+  const unknown = value === null || value === undefined
   const on = value === true
   const bad = danger && on
   return (
     <div className="ws-assess__row">
-      {bad ? <ShieldAlert size={15} style={{ color: SEV_COLOR.high }} /> : <ShieldCheck size={15} style={{ color: '#067647' }} />}
-      <span style={{ color: bad ? 'var(--sev-high)' : 'var(--ws-ink-2)' }}>{label} = <b>{value === undefined ? '—' : String(on)}</b></span>
+      {unknown ? <Minus size={15} className="ws-muted" />
+        : bad ? <ShieldAlert size={15} style={{ color: SEV_COLOR.high }} />
+          : <ShieldCheck size={15} style={{ color: '#067647' }} />}
+      <span style={{ color: bad ? 'var(--sev-high)' : 'var(--ws-ink-2)' }}>{label}</span>
+      {unknown
+        ? <span className="ws-flag ws-flag--unknown">--</span>
+        : <span className={`ws-flag ws-flag--${on ? 'true' : 'false'}${bad ? ' ws-flag--bad' : ''}`}>{on ? 'TRUE' : 'FALSE'}</span>}
+      {defaulted && !unknown ? <span className="ws-flag-note">platform default</span> : null}
     </div>
   )
 }

@@ -2485,6 +2485,50 @@ a:focus-visible {
   gap: 8px;
 }
 
+/* Phase 11.85 — evidence navigation bar */
+.code-viewer__evidence {
+  position: sticky;
+  top: 63px;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--code-line);
+  background: rgba(13, 17, 23, 0.96);
+  backdrop-filter: blur(10px);
+  font-size: 0.8rem;
+  color: rgba(229, 231, 235, 0.82);
+}
+.code-viewer__line-badge {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 8px;
+  background: rgba(0, 200, 150, 0.18);
+  color: #6ee7b7;
+}
+.code-viewer__line-badge.is-approx {
+  background: rgba(234, 179, 8, 0.18);
+  color: #fbbf24;
+}
+.code-viewer__approx-note { font-style: italic; color: rgba(229, 231, 235, 0.6); }
+.code-viewer__evsrc { color: rgba(229, 231, 235, 0.7); }
+.code-viewer__evnav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.code-viewer__evcount {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.75rem;
+  color: rgba(229, 231, 235, 0.7);
+}
+/* When the evidence bar is present the search toolbar sits below it. */
+.code-viewer__evidence + .code-viewer__toolbar { top: 105px; }
+
 .code-viewer__title {
   color: var(--code-text);
   font-weight: 700;

@@ -68,7 +68,24 @@ function AppAvatar({ iconData, label, platform, filename }) {
   )
 }
 
-function WorkspaceCodeModal({ state, onClose }) {
+// Locate a finding snippet within fetched file content. Returns a 1-based line
+// number or null. Matches the most distinctive snippet line to avoid false hits.
+export function locateSnippet(content, snippet) {
+  if (!content || !snippet) return null
+  const lines = content.split('\n')
+  const candidates = String(snippet)
+    .split('\n')
+    .map(s => s.trim())
+    .filter(s => s.length > 6)
+    .sort((a, b) => b.length - a.length)
+  for (const c of candidates) {
+    const idx = lines.findIndex(l => l.includes(c))
+    if (idx >= 0) return idx + 1
+  }
+  return null
+}
+
+function WorkspaceCodeModal({ state, onClose, onNavigate }) {
   if (!state.open) return null
 
   return (
@@ -80,6 +97,11 @@ function WorkspaceCodeModal({ state, onClose }) {
           content={state.content}
           language={state.language}
           highlightedLines={state.lines}
+          approximate={state.approximate}
+          evidenceSource={state.source}
+          evidence={state.evidence}
+          evidenceIndex={state.evidenceIndex}
+          onNavigateEvidence={onNavigate}
           loading={state.loading}
           error={state.error}
           onClose={onClose}
@@ -777,6 +799,10 @@ export default function Results() {
     loading: false,
     error: '',
     meta: '',
+    approximate: false,
+    source: '',
+    evidence: [],
+    evidenceIndex: 0,
   })
 
   const handleSbomDownload = async (scanResults) => {
@@ -935,41 +961,50 @@ export default function Results() {
     }))
   }, [visibleGroups])
 
-  const openCode = async (path, lines = []) => {
+  const openCode = async (path, lines = [], opts = {}) => {
     if (!path || !scanId) return
 
-    setCodeState({
+    const base = {
       open: true,
       path,
       lines,
-      content: '',
       language: inferLanguage(path),
-      loading: true,
-      error: '',
-      meta: lines.length ? `Highlighted lines: ${lines.join(', ')}` : 'Scrollable source view',
-    })
+      approximate: !!opts.approximate,
+      source: opts.source || '',
+      evidence: opts.evidence || [],
+      evidenceIndex: opts.index || 0,
+    }
+    setCodeState({ ...base, content: '', loading: true, error: '', meta: 'Loading source…' })
 
     try {
       const response = await apiFetch(`/api/scans/${scanId}/file?path=${encodeURIComponent(path)}`)
       if (!response.ok) throw new Error(response.status === 404 ? 'Source file not available for this scan.' : 'Unable to open source file.')
       const content = await response.text()
+
+      // Task 5 line fallback: when no explicit line, locate the snippet in the
+      // file; failing that, approximate to the first line. Never leave it blank.
+      let resolved = (lines || []).filter(Boolean)
+      let approximate = !!opts.approximate
+      if (!resolved.length && opts.snippet) {
+        const found = locateSnippet(content, opts.snippet)
+        if (found) { resolved = [found]; approximate = true }
+      }
+      if (!resolved.length) { resolved = [1]; approximate = true }
+
+      const lineLabel = resolved.join(', ')
       setCodeState({
-        open: true,
-        path,
-        lines,
+        ...base,
+        lines: resolved,
+        approximate,
         content,
-        language: inferLanguage(path),
         loading: false,
         error: '',
-        meta: lines.length ? `Highlighted lines: ${lines.join(', ')}` : 'Scrollable source view',
+        meta: `${approximate ? '≈ line' : 'Line'} ${lineLabel}${opts.source ? ` · ${opts.source}` : ''}`,
       })
     } catch (openError) {
       setCodeState({
-        open: true,
-        path,
-        lines,
+        ...base,
         content: '',
-        language: inferLanguage(path),
         loading: false,
         error: openError.message,
         meta: 'Source viewer',
@@ -1036,7 +1071,15 @@ export default function Results() {
   return (
     <>
       <Workspace results={results} scanId={scanId} onOpenCode={openCode} actions={workspaceActions} />
-      <WorkspaceCodeModal state={codeState} onClose={() => setCodeState(state => ({ ...state, open: false }))} />
+      <WorkspaceCodeModal
+        state={codeState}
+        onClose={() => setCodeState(state => ({ ...state, open: false }))}
+        onNavigate={i => {
+          const ev = (codeState.evidence || [])[i]
+          if (!ev) return
+          openCode(ev.path, ev.lines, { snippet: ev.snippet, source: ev.source, approximate: ev.approximate, evidence: codeState.evidence, index: i })
+        }}
+      />
       {exportOpen ? <ExportModal results={results} onClose={() => setExportOpen(false)} /> : null}
       {gateOpen   ? <CiGateModal results={results} onClose={() => setGateOpen(false)}   /> : null}
     </>

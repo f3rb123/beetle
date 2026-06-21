@@ -71,8 +71,47 @@ export function findingPath(f) {
 
 export function findingLines(f) {
   if (f.line) return [f.line]
+  if (f.line_number) return [f.line_number]
+  const ex = f.analyst_explanation || {}
+  const loc = (ex.evidence_locations || [])[0]
+  if (loc && (loc.highlight_line || loc.line_start)) return [loc.highlight_line || loc.line_start]
   const fe = f.file_evidence?.[0]
-  return fe?.lines || []
+  if (fe?.lines?.length) return fe.lines
+  if (fe?.line) return [fe.line]
+  return []
+}
+
+// Normalize every evidence location for a finding into one ordered list so the
+// code viewer can navigate prev/next. Each entry:
+//   { path, line, lines, snippet, source, approximate }
+// `approximate` means the line was not declared and must be resolved/estimated.
+export function buildEvidence(finding) {
+  const f = finding || {}
+  const ex = f.analyst_explanation || {}
+  const out = []
+  const seen = new Set()
+  const push = (path, line, snippet, source, approximate) => {
+    if (!path) return
+    const key = `${path}#${line || ''}`
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push({ path, line: line || null, lines: line ? [line] : [], snippet: snippet || '', source, approximate: !!approximate })
+  }
+  // 1. Analyst evidence_locations — most precise.
+  for (const l of (Array.isArray(ex.evidence_locations) ? ex.evidence_locations : [])) {
+    if (l && l.file) push(l.file, l.highlight_line || l.line_start || null, l.snippet || '', 'analyst evidence', !(l.highlight_line || l.line_start))
+  }
+  // 2. Structured code references.
+  for (const e of (Array.isArray(f.file_evidence) ? f.file_evidence : [])) {
+    if (e && e.path) {
+      const ln = (e.lines && e.lines.length ? e.lines[0] : e.line) || null
+      push(e.path, ln, e.snippet || '', 'code reference', !ln)
+    }
+  }
+  // 3. Top-level finding location.
+  const p = f.file_path || f.full_path
+  if (p) push(p, f.line || f.line_number || null, f.snippet || f.code_context || '', 'finding location', !(f.line || f.line_number))
+  return out
 }
 
 // Esc-to-close hook

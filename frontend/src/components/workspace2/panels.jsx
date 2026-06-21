@@ -10,7 +10,7 @@ import {
 import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer } from 'recharts'
 import {
   SEV_ORDER, SEV_RANK, SEV_COLOR, normSev, SeverityTag, SoftTag, EmptyState, Metric,
-  severityCounts, ownershipLabel, confidenceLabel, findingPath, findingLines, useEscape,
+  severityCounts, ownershipLabel, confidenceLabel, findingPath, findingLines, buildEvidence, useEscape,
 } from './ui.jsx'
 
 // ───────────────────────────── Overview ──────────────────────────────────
@@ -248,8 +248,6 @@ export function FindingDrawer({ finding, onClose, onOpenCode }) {
   if (!finding) return null
   const f = finding
   const ex = f.analyst_explanation || {}
-  const path = findingPath(f)
-  const lines = findingLines(f)
   const snippet = f.snippet || f.code_context || (f.file_evidence?.[0]?.snippet) || ''
   const rem = ex.remediation || {}
 
@@ -281,7 +279,7 @@ export function FindingDrawer({ finding, onClose, onOpenCode }) {
             <ChainEvidenceBlock finding={f} onOpenCode={onOpenCode} />
           ) : null}
 
-          <EvidenceLocations ex={ex} finding={f} primaryPath={path} primaryLines={lines} primarySnippet={snippet} onOpenCode={onOpenCode} />
+          <EvidenceLocations ex={ex} finding={f} primarySnippet={snippet} onOpenCode={onOpenCode} />
 
           {ex.attack_scenario ? <Block label="Attack Scenario"><p>{ex.attack_scenario}</p></Block> : null}
           {(ex.prerequisites || []).length ? <Block label="Prerequisites"><ul>{ex.prerequisites.map((p, i) => <li key={i}>{p}</li>)}</ul></Block> : null}
@@ -310,28 +308,31 @@ function Block({ label, children }) {
   return <div className="ws-block"><div className="ws-block__label">{label}</div>{children}</div>
 }
 
-// Evidence locations (Tasks 5/6): prefers the backend `evidence_locations[]`
-// ({file, line_start, line_end, highlight_line, snippet}); each opens the viewer
-// scrolled to + highlighting the exact line. Falls back to file_evidence.
-function EvidenceLocations({ ex, finding, primaryPath, primaryLines, primarySnippet, onOpenCode }) {
-  const locs = Array.isArray(ex.evidence_locations) ? ex.evidence_locations.filter(l => l && l.file) : []
-  if (!locs.length) {
-    return <EvidenceBlock finding={finding} primaryPath={primaryPath} primaryLines={primaryLines} primarySnippet={primarySnippet} onOpenCode={onOpenCode} />
+// Evidence locations (Tasks 5/6/7): unified, ordered evidence list. Each entry
+// opens the viewer scrolled to + highlighting the exact line; when the line is
+// not declared it is resolved from the snippet (≈ approximate). The whole list
+// is handed to the viewer so it can offer Prev/Next evidence navigation.
+function EvidenceLocations({ ex, finding, primarySnippet, onOpenCode }) {
+  const evidence = buildEvidence(finding)
+  if (!evidence.length) {
+    return primarySnippet
+      ? <div className="ws-block"><div className="ws-block__label">Evidence</div><pre className="ws-code">{primarySnippet}</pre></div>
+      : null
   }
   return (
     <div className="ws-block">
-      <div className="ws-block__label">Evidence{locs.length > 1 ? ` · ${locs.length} locations` : ''}</div>
-      {locs.map((loc, i) => {
-        const lines = loc.highlight_line ? [loc.highlight_line]
-          : (loc.line_start ? [loc.line_start] : [])
+      <div className="ws-block__label">Evidence{evidence.length > 1 ? ` · ${evidence.length} locations` : ''}</div>
+      {evidence.map((loc, i) => {
+        const lineLabel = loc.line ? `${loc.line}` : (loc.snippet ? '≈ resolved' : '≈ approx')
         return (
-          <div key={i} style={{ marginBottom: i < locs.length - 1 ? 14 : 0 }}>
+          <div key={i} style={{ marginBottom: i < evidence.length - 1 ? 14 : 0 }}>
             <div className="ws-mono ws-muted" style={{ marginBottom: 6 }}>
-              Evidence #{i + 1} · {loc.file}{loc.highlight_line ? `:${loc.highlight_line}` : ''}
+              Evidence #{i + 1} · {loc.path}{loc.line ? `:${loc.line}` : ''} · {loc.source}
             </div>
             {loc.snippet ? <pre className="ws-code">{loc.snippet}</pre> : null}
-            <button type="button" className="ws-btn" style={{ marginTop: 8 }} onClick={() => onOpenCode(loc.file, lines)}>
-              <FileCode2 size={14} /> View at line {loc.highlight_line || loc.line_start || '—'}
+            <button type="button" className="ws-btn" style={{ marginTop: 8 }}
+              onClick={() => onOpenCode(loc.path, loc.lines, { snippet: loc.snippet, source: loc.source, approximate: loc.approximate || !loc.line, evidence, index: i })}>
+              <FileCode2 size={14} /> View at line {lineLabel}
             </button>
           </div>
         )
@@ -369,31 +370,6 @@ function ChainEvidenceBlock({ finding, onOpenCode }) {
           ))}
         </div>
       ) : null}
-    </div>
-  )
-}
-
-// Evidence with MULTIPLE locations (Task 9): each evidence entry opens the code
-// viewer at its exact line(s), which auto-scrolls + highlights.
-function EvidenceBlock({ finding, primaryPath, primaryLines, primarySnippet, onOpenCode }) {
-  const fe = Array.isArray(finding.file_evidence) ? finding.file_evidence.filter(e => e && e.path) : []
-  const locations = fe.length
-    ? fe.map(e => ({ path: e.path, lines: e.lines && e.lines.length ? e.lines : (e.line ? [e.line] : []), snippet: e.snippet || '' }))
-    : (primaryPath ? [{ path: primaryPath, lines: primaryLines, snippet: primarySnippet }] : [])
-  if (!locations.length && !primarySnippet) return null
-
-  return (
-    <div className="ws-block">
-      <div className="ws-block__label">Evidence{locations.length > 1 ? ` · ${locations.length} locations` : ''}</div>
-      {locations.length ? locations.map((loc, i) => (
-        <div key={i} style={{ marginBottom: i < locations.length - 1 ? 14 : 0 }}>
-          <div className="ws-mono ws-muted" style={{ marginBottom: 6 }}>{loc.path}{loc.lines.length ? `:${loc.lines.join(',')}` : ''}</div>
-          {loc.snippet ? <pre className="ws-code">{loc.snippet}</pre> : null}
-          <button type="button" className="ws-btn" style={{ marginTop: 8 }} onClick={() => onOpenCode(loc.path, loc.lines)}>
-            <FileCode2 size={14} /> View at line{loc.lines.length > 1 ? 's' : ''} {loc.lines.join(', ') || '—'}
-          </button>
-        </div>
-      )) : (primarySnippet ? <pre className="ws-code">{primarySnippet}</pre> : null)}
     </div>
   )
 }

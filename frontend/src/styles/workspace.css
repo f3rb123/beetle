@@ -40,11 +40,15 @@
 .ws *, .ws *::before, .ws *::after { box-sizing: border-box; }
 
 /* ── Shell ─────────────────────────────────────────────────────────────── */
-.ws-shell { display: grid; grid-template-columns: var(--ws-sidebar-w) 1fr; min-height: 100vh; }
+/* `clip` (not `hidden`) avoids creating a scroll container, so the sticky
+   sidebar + topbar keep working while horizontal overflow is still contained. */
+.ws { overflow-x: clip; }
+.ws-shell { display: grid; grid-template-columns: var(--ws-sidebar-w) 1fr; min-height: 100vh; max-width: 100%; }
 
 .ws-sidebar {
   position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column;
   border-right: 1px solid var(--ws-line); background: var(--ws-bg-soft); padding: 18px 12px;
+  overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain;
 }
 .ws-sidebar__brand { display: flex; align-items: center; gap: 9px; padding: 4px 8px 16px; }
 .ws-sidebar__brand img { width: 24px; height: 24px; border-radius: 6px; }
@@ -69,7 +73,7 @@
 .ws-sidebar__foot { margin-top: auto; padding: 10px 8px 2px; font-size: 11px; color: var(--ws-ink-3); }
 
 /* ── Main + topbar ─────────────────────────────────────────────────────── */
-.ws-main { min-width: 0; display: flex; flex-direction: column; }
+.ws-main { min-width: 0; display: flex; flex-direction: column; overflow-x: clip; }
 .ws-topbar {
   position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 14px;
   padding: 12px 28px; border-bottom: 1px solid var(--ws-line);
@@ -96,8 +100,8 @@
 .ws-btn--primary { background: var(--ws-ink); color: #fff; border-color: var(--ws-ink); }
 .ws-btn--primary:hover { background: #000; }
 
-.ws-content { padding: 28px; max-width: 1180px; width: 100%; margin: 0 auto; }
-.ws-content--wide { max-width: 1320px; }
+.ws-content { padding: 28px; max-width: 1440px; width: 100%; margin: 0 auto; min-width: 0; }
+.ws-content--wide { max-width: 1440px; }
 
 /* ── Typography ────────────────────────────────────────────────────────── */
 .ws h1 { font-size: 24px; font-weight: 680; letter-spacing: -0.02em; margin: 0; }
@@ -138,7 +142,9 @@
 .ws-sevlegend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; }
 .ws-sevlegend__item { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ws-ink-2); }
 
-.ws-two { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; }
+.ws-two { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; align-items: start; }
+.ws-two > * { min-width: 0; }
+.ws-grid > * { min-width: 0; }
 .ws-list { display: flex; flex-direction: column; }
 .ws-list__row { display: flex; align-items: center; gap: 10px; padding: 11px 0; border-top: 1px solid var(--ws-line); font-size: 13.5px; }
 .ws-list__row:first-child { border-top: none; }
@@ -257,6 +263,11 @@
 .ws-palette__item .ws-mono { color: var(--ws-ink-3); margin-left: auto; font-size: 11.5px; }
 .ws-palette__empty { padding: 28px; text-align: center; color: var(--ws-ink-3); font-size: 13.5px; }
 
+/* Medium screens: stack the main + right rail vertically, keep the sidebar. */
+@media (max-width: 1120px) {
+  .ws-two { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 920px) {
   .ws-shell { grid-template-columns: 1fr; }
   .ws-sidebar { display: none; }
@@ -316,3 +327,13 @@
 .ws-check { font-size: 13px; padding: 4px 0; color: var(--ws-ink-2); }
 .ws-check--yes { color: #067647; font-weight: 800; margin-right: 6px; }
 .ws-check--no { color: var(--sev-high); font-weight: 800; margin-right: 6px; }
+
+/* ── Phase 11.85 — manifest flag badges ────────────────────────────────────── */
+.ws-flag { font-size: 11px; font-weight: 800; letter-spacing: 0.04em; padding: 2px 9px; border-radius: 6px; margin-left: 2px; }
+.ws-flag--true { background: #ecfdf3; color: #067647; }
+.ws-flag--false { background: #f1f1f3; color: #52525b; }
+.ws-flag--bad { background: #fef3f2; color: #b42318; }
+.ws-flag--unknown { background: #f1f1f3; color: #8a8a93; }
+.ws-flag-note { font-size: 11px; color: var(--ws-ink-3); font-style: italic; }
+.ws-flag-hint { font-size: 12px; margin-top: 12px; }
+.ws-assess__row { flex-wrap: wrap; }
