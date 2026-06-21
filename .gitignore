@@ -13,3 +13,6 @@ coverage/
 *.log
 .vscode/
 .idea/
+
+# Phase 9.1.5 secret-safety validation scratch (jadx binary + decompiled APKs)
+.tools/

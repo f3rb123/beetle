@@ -180,6 +180,37 @@ def _scrub_text(text, raw_value: str, masked: str) -> str:
     return t
 
 
+# Text fields on a secret that can carry a raw value (snippet/context windows in
+# particular can include a *neighbouring* secret's value — e.g. several pattern
+# hits on adjacent lines of an ASN.1/cert hex dump). The cross-scrub pass below
+# masks every detected raw value out of every one of these fields.
+_SCRUBBABLE_FIELDS = ("snippet", "code_context", "description", "recommendation")
+
+
+def _cross_scrub(secret: dict, pairs: list[tuple[str, str]]) -> None:
+    """Replace EVERY detected raw value (not just this secret's own) with its
+    masked form across all text fields. `pairs` must be sorted longest-raw-first
+    so a longer secret that contains a shorter one is masked before it."""
+    if not pairs:
+        return
+    for field in _SCRUBBABLE_FIELDS:
+        val = secret.get(field)
+        if not val:
+            continue
+        t = str(val)
+        for raw, masked in pairs:
+            if raw and raw in t:
+                t = t.replace(raw, masked)
+        secret[field] = t
+    ev = secret.get("evidence")
+    if isinstance(ev, dict) and ev.get("snippet"):
+        t = str(ev["snippet"])
+        for raw, masked in pairs:
+            if raw and raw in t:
+                t = t.replace(raw, masked)
+        ev["snippet"] = t
+
+
 # ─── Ownership collapse (Task 5) ─────────────────────────────────────────────
 def _collapse_ownership(label: str) -> str:
     """Collapse the fine-grained finding_model label into the Phase 9 vocabulary.
@@ -352,12 +383,18 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
     suppressed_sdk = 0
     low_conf = 0
     providers: set[str] = set()
+    scrub_pairs: list[tuple[str, str]] = []  # (raw_value, masked_value) for cross-scrub
 
     for secret in raw:
+        # Capture the raw value BEFORE _build_canonical overwrites it, so the
+        # cross-scrub pass can purge it from EVERY secret's snippet/context.
+        raw_value = str(secret.get("value") or "")
         canonical = _build_canonical(secret, app_package)
         if canonical is None:
             dropped_no_evidence += 1
             continue
+        if raw_value and len(raw_value) >= 6:
+            scrub_pairs.append((raw_value, canonical["masked_value"]))
         providers.add(canonical["provider"])
 
         if canonical["ownership"] in (THIRD_PARTY_LIBRARY, FRAMEWORK):
@@ -370,6 +407,13 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
             suppressed.append(canonical)
         else:
             visible.append(canonical)
+
+    # Cross-scrub: purge every detected raw value from every secret's text fields
+    # (a neighbouring secret's value can land in this one's context window).
+    # Longest raw first so a longer secret containing a shorter one is masked first.
+    scrub_pairs.sort(key=lambda p: len(p[0]), reverse=True)
+    for secret in visible + suppressed:
+        _cross_scrub(secret, scrub_pairs)
 
     validated = sum(1 for s in visible if s["validation_result"] == "valid")
     invalid = sum(1 for s in visible if s["validation_result"] == "invalid")
