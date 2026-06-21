@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import logging
 
+from . import secret_validators as _secret_validators
 from .finding_model import classify_ownership, classify_ownership_label
 
 log = logging.getLogger("cortex.secret_intel")
@@ -383,12 +384,12 @@ def _member_summary(s: dict) -> dict:
     ev = s.get("evidence") or {}
     return {
         "id": s.get("id"), "type": s.get("type"), "provider": s.get("provider"),
-        "masked_value": s.get("masked_value"),
+        "masked_value": s.get("masked_value"), "value_sha256": s.get("value_sha256", ""),
         "file_path": ev.get("file_path", ""), "line": ev.get("line", 0),
     }
 
 
-def _make_pair(rule, a: dict, b: dict, rel_conf: str) -> dict:
+def _make_pair(rule, a: dict, b: dict, rel_conf: str, keep_raw: bool = False) -> dict:
     relationship_type, _pt, _st, pair_type, title, provider = rule
     severity = _higher_severity(a, b)
     ownership, own_label, owner_pkg = _stronger_ownership(a, b)
@@ -408,7 +409,7 @@ def _make_pair(rule, a: dict, b: dict, rel_conf: str) -> dict:
         })
 
     masked_value = "; ".join(f"{m.get('type')}={m.get('masked_value')}" for m in (a, b))
-    return {
+    pair = {
         "id": pid,
         "is_pair": True,
         "provider": provider,
@@ -425,11 +426,14 @@ def _make_pair(rule, a: dict, b: dict, rel_conf: str) -> dict:
         "confidence": rel_conf,            # the pair's confidence is its linkage strength
         "masked_value": masked_value,
         "value": masked_value,
+        "value_sha256": "",
         "members": [a.get("id"), b.get("id")],
         "components": [_member_summary(a), _member_summary(b)],
         "paired_with": [a.get("id"), b.get("id")],
         "evidence": dict(a.get("evidence") or {}),
         "file_evidence": file_evidence,
+        "exposure_score": _exposure(ownership),
+        "exploitability_score": min(100, _SEV_EXPLOIT.get(severity, 25) + 15),
         "validation_result": ST_SKIPPED,
         "validated": False,
         "privileges": [],
@@ -444,9 +448,16 @@ def _make_pair(rule, a: dict, b: dict, rel_conf: str) -> dict:
             f"A complete {provider} credential pair is directly usable by an attacker."
         ),
     }
+    if keep_raw:
+        # Transient material for the optional validator — stripped before return.
+        pair["_raw_members"] = {
+            a.get("type"): a.get("_raw"),
+            b.get("type"): b.get("_raw"),
+        }
+    return pair
 
 
-def _build_pairs(candidates: list[dict]) -> tuple[list[dict], set]:
+def _build_pairs(candidates: list[dict], keep_raw: bool = False) -> tuple[list[dict], set]:
     """Build composite pair findings from co-occurring secrets. Returns
     (pairs, used_member_ids). Deterministic: rules + members are sorted."""
     pairs: list[dict] = []
@@ -467,7 +478,7 @@ def _build_pairs(candidates: list[dict]) -> tuple[list[dict], set]:
                 continue
             used.add(p["id"])
             used.add(match["id"])
-            pairs.append(_make_pair(rule, p, match, rel_conf))
+            pairs.append(_make_pair(rule, p, match, rel_conf, keep_raw=keep_raw))
     pairs.sort(key=lambda x: (_SEV_RANK.get(x.get("severity"), 4), x.get("type", "")))
     return pairs, used
 
@@ -491,7 +502,12 @@ def _compute_risk(secret: dict) -> tuple[int, str]:
 
 
 def _apply_gating(secret: dict) -> None:
-    """Attach can_validate / validation_result / risk to a secret in place."""
+    """Attach can_validate / validation_result / risk to a secret in place.
+
+    Idempotent: pairing's exploitability bump is applied at pair-construction
+    time (and in _build_canonical for members), never here — so calling this
+    repeatedly (e.g. after live validation flips a state) does not drift scores.
+    """
     eligible = can_validate(secret)
     secret["can_validate"] = eligible
     secret["validation_result"] = validation_state(secret, eligible)
@@ -499,9 +515,6 @@ def _apply_gating(secret: dict) -> None:
     risk_score, risk_level = _compute_risk(secret)
     secret["risk_score"] = risk_score
     secret["risk_level"] = risk_level
-    # Pairing bumps exploitability (full credential = larger blast radius).
-    if secret.get("is_pair") or secret.get("paired_into"):
-        secret["exploitability_score"] = min(100, int(secret.get("exploitability_score", 0)) + 15)
 
 
 # ─── Evidence gate (Task 4) ──────────────────────────────────────────────────
@@ -522,9 +535,13 @@ def _stable_id(provider: str, stype: str, value_sha: str, path: str, line: int) 
     return "BEETLE-SECRET-" + hashlib.sha1(basis).hexdigest()[:10]
 
 
-def _build_canonical(secret: dict, app_package: str) -> dict | None:
+def _build_canonical(secret: dict, app_package: str, keep_raw: bool = False) -> dict | None:
     """Normalize + mask one secret in place. Returns the same dict, or None when
-    it fails the evidence gate (no file/line/snippet)."""
+    it fails the evidence gate (no file/line/snippet).
+
+    When keep_raw is True (live validation opted-in) the raw value is stashed in a
+    transient `_raw` field for the validator; process_secrets strips it before
+    returning, so it never serializes."""
     if not isinstance(secret, dict):
         return None
     # Idempotency: never re-mask an already-processed secret.
@@ -602,7 +619,10 @@ def _build_canonical(secret: dict, app_package: str) -> dict | None:
             "snippet":   masked_snippet,
         },
     })
-    secret.pop("_raw", None)
+    if keep_raw:
+        secret["_raw"] = raw_value      # transient — stripped before serialization
+    else:
+        secret.pop("_raw", None)
     return secret
 
 
@@ -623,11 +643,15 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
     providers: set[str] = set()
     scrub_pairs: list[tuple[str, str]] = []  # (raw_value, masked_value) for cross-scrub
 
+    # Live validation is opt-in only. When on, raw values are kept transiently for
+    # the validator and stripped before this function returns.
+    do_val = _secret_validators.validation_enabled()
+
     for secret in raw:
         # Capture the raw value BEFORE _build_canonical overwrites it, so the
         # cross-scrub pass can purge it from EVERY secret's snippet/context.
         raw_value = str(secret.get("value") or "")
-        canonical = _build_canonical(secret, app_package)
+        canonical = _build_canonical(secret, app_package, keep_raw=do_val)
         if canonical is None:
             dropped_no_evidence += 1
             continue
@@ -654,7 +678,7 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
 
     # ── Pairing (Task 1/2): build composites from co-occurring application secrets.
     pair_candidates = [c for c in canon if c["_bucket"] == "visible"]
-    pairs, used_member_ids = _build_pairs(pair_candidates)
+    pairs, used_member_ids = _build_pairs(pair_candidates, keep_raw=do_val)
     for c in canon:
         if c["id"] in used_member_ids:
             c["_bucket"] = "paired"
@@ -679,6 +703,23 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
     suppressed = [c for c in canon if c["_bucket"] in ("sdk", "low", "paired")]
     for c in canon + pairs:
         c.pop("_bucket", None)
+
+    # ── Optional live validation (Phase 9.3) — opt-in only, never in benchmark. ──
+    # Probes eligible visible items, flips validation_result to valid/invalid/error.
+    if do_val:
+        try:
+            _secret_validators.run_validation(visible)
+            for s in visible:
+                if s.get("validation_result") == ST_VALID:
+                    s["confidence"] = HIGH           # validated → highest confidence
+                    s["risk_score"], s["risk_level"] = _compute_risk(s)
+        except Exception:
+            log.exception("[secret_intel] live validation failed; leaving states as-is")
+
+    # ── Strip transient raw material — nothing raw may serialize. ────────────
+    for s in canon + pairs:
+        s.pop("_raw", None)
+        s.pop("_raw_members", None)
 
     suppressed_sdk = sum(1 for c in suppressed if c.get("suppressed_reason") == "third_party_sdk")
     low_conf = sum(1 for c in suppressed if c.get("suppressed_reason") == "low_confidence")

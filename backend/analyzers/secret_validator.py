@@ -26,13 +26,17 @@ PROBE_TIMEOUT = 6
 
 
 def _live_checks_disabled() -> bool:
-    """Live validation is OFF whenever live checks are disabled or a benchmark is
-    running. This keeps offline/benchmark scans network-free and deterministic
-    (Phase 9 safety model). No probe is issued; every secret is marked skipped."""
-    for var in ("CORTEX_DISABLE_LIVE_CHECKS", "CORTEX_BENCHMARK"):
-        if os.environ.get(var, "").strip().lower() in ("1", "true", "yes"):
-            return True
-    return False
+    """Legacy live validation is OFF unless secret validation is explicitly opted
+    in (Phase 9.3). It defers to the same gate as the new validator framework, so
+    benchmark/offline/default scans stay network-free and deterministic. The
+    authoritative Phase 9 validation path is analyzers.secret_validators; this
+    legacy probe only runs when that framework is enabled."""
+    try:
+        from . import secret_validators
+        return not secret_validators.validation_enabled()
+    except Exception:
+        # Fail safe: if the framework can't be imported, never probe.
+        return True
 
 
 def _get(url: str, headers: dict = None, timeout: int = PROBE_TIMEOUT) -> tuple[int, str]:
