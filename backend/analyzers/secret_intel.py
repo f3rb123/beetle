@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import logging
 
+from . import cloud_intel as _cloud_intel
 from . import secret_validators as _secret_validators
 from .finding_model import classify_ownership, classify_ownership_label
 
@@ -643,15 +644,17 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
     providers: set[str] = set()
     scrub_pairs: list[tuple[str, str]] = []  # (raw_value, masked_value) for cross-scrub
 
-    # Live validation is opt-in only. When on, raw values are kept transiently for
-    # the validator and stripped before this function returns.
+    # Live validation (9.3) and cloud exposure (9.4) are opt-in only. When either
+    # is on, raw values are kept transiently and stripped before this returns.
     do_val = _secret_validators.validation_enabled()
+    do_cloud = _cloud_intel.cloud_intel_enabled()
+    keep_raw = do_val or do_cloud
 
     for secret in raw:
         # Capture the raw value BEFORE _build_canonical overwrites it, so the
         # cross-scrub pass can purge it from EVERY secret's snippet/context.
         raw_value = str(secret.get("value") or "")
-        canonical = _build_canonical(secret, app_package, keep_raw=do_val)
+        canonical = _build_canonical(secret, app_package, keep_raw=keep_raw)
         if canonical is None:
             dropped_no_evidence += 1
             continue
@@ -678,7 +681,7 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
 
     # ── Pairing (Task 1/2): build composites from co-occurring application secrets.
     pair_candidates = [c for c in canon if c["_bucket"] == "visible"]
-    pairs, used_member_ids = _build_pairs(pair_candidates, keep_raw=do_val)
+    pairs, used_member_ids = _build_pairs(pair_candidates, keep_raw=keep_raw)
     for c in canon:
         if c["id"] in used_member_ids:
             c["_bucket"] = "paired"
@@ -716,6 +719,17 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
         except Exception:
             log.exception("[secret_intel] live validation failed; leaving states as-is")
 
+    # ── Optional cloud exposure intelligence (Phase 9.4) — opt-in, read-only. ──
+    cloud_summary = {"cloud_exposures": 0, "public_cloud_exposures": 0,
+                     "critical_exposures": 0, "exposure_confidence": "", "exposure_types": []}
+    results.setdefault("cloud_exposures", [])
+    if do_cloud:
+        try:
+            exposures = _cloud_intel.detect_exposures(results, visible)
+            cloud_summary = _cloud_intel.summarize(exposures)
+        except Exception:
+            log.exception("[secret_intel] cloud intelligence failed; no exposures emitted")
+
     # ── Strip transient raw material — nothing raw may serialize. ────────────
     for s in canon + pairs:
         s.pop("_raw", None)
@@ -746,6 +760,12 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
         "total_application_secrets": len(visible),
         "providers":                 sorted(providers),
         "relationship_types":        sorted({p["relationship_type"] for p in pairs}),
+        # Phase 9.4 — cloud exposure rollup (zeros when disabled).
+        "cloud_exposures":           cloud_summary["cloud_exposures"],
+        "public_cloud_exposures":    cloud_summary["public_cloud_exposures"],
+        "critical_exposures":        cloud_summary["critical_exposures"],
+        "exposure_confidence":       cloud_summary["exposure_confidence"],
+        "exposure_types":            cloud_summary["exposure_types"],
     }
     results["secrets_summary"] = summary
     log.info(
