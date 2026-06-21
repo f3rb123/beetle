@@ -3,24 +3,47 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   LayoutDashboard, ShieldAlert, GitBranch, KeyRound, ShieldCheck, FileCode2,
-  Download, Search, ChevronLeft, Command,
+  Download, Search, ChevronLeft, Command, ScrollText, Network, Fingerprint,
+  Boxes, Cpu, Bug, GitCompare, Sparkles, FolderTree,
 } from 'lucide-react'
 import beetleIcon from '../../assets/beetle-icon.png'
 import {
   OverviewPanel, FindingsPanel, FindingDrawer, ChainsPanel, SecretsPanel,
   MasvsPanel, FilesPanel, ExportsPanel,
 } from './panels.jsx'
+import {
+  CertificatePanel, NetworkPanel, ManifestPanel, ComponentsPanel, AndroidApiPanel,
+  MalwarePanel, ComparePanel, AiAssistantPanel, CodeBrowserPanel,
+} from './panels2.jsx'
 import { severityCounts, findingPath, useEscape } from './ui.jsx'
 
-const SECTIONS = [
-  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'findings', label: 'Findings', icon: ShieldAlert },
-  { id: 'chains', label: 'Attack Chains', icon: GitBranch },
-  { id: 'secrets', label: 'Secrets', icon: KeyRound },
-  { id: 'masvs', label: 'MASVS Coverage', icon: ShieldCheck },
-  { id: 'files', label: 'Files', icon: FileCode2 },
-  { id: 'exports', label: 'Exports', icon: Download },
+const NAV_GROUPS = [
+  {
+    label: 'Workspace', items: [
+      { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+      { id: 'findings', label: 'Findings', icon: ShieldAlert },
+      { id: 'chains', label: 'Attack Chains', icon: GitBranch },
+      { id: 'secrets', label: 'Secrets', icon: KeyRound },
+      { id: 'masvs', label: 'MASVS Coverage', icon: ShieldCheck },
+      { id: 'files', label: 'Files', icon: FileCode2 },
+      { id: 'exports', label: 'Exports', icon: Download },
+    ],
+  },
+  {
+    label: 'Deep Analysis', items: [
+      { id: 'manifest', label: 'Manifest', icon: ScrollText },
+      { id: 'network', label: 'Network', icon: Network },
+      { id: 'certificate', label: 'Certificate', icon: Fingerprint },
+      { id: 'components', label: 'Components', icon: Boxes },
+      { id: 'androidapis', label: 'Android APIs', icon: Cpu },
+      { id: 'malware', label: 'Malware Analysis', icon: Bug },
+      { id: 'codebrowser', label: 'Code Browser', icon: FolderTree },
+      { id: 'compare', label: 'Compare', icon: GitCompare },
+      { id: 'ai', label: 'AI Assistant', icon: Sparkles },
+    ],
+  },
 ]
+const SECTIONS = NAV_GROUPS.flatMap(g => g.items)
 
 // ── Global search palette ──────────────────────────────────────────────────
 function SearchPalette({ index, onClose, onPick }) {
@@ -62,7 +85,7 @@ function SearchPalette({ index, onClose, onPick }) {
   )
 }
 
-export default function Workspace({ results, onOpenCode, actions }) {
+export default function Workspace({ results, scanId, onOpenCode, actions }) {
   const [section, setSection] = useState('overview')
   const [drawer, setDrawer] = useState(null)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -125,18 +148,23 @@ export default function Workspace({ results, onOpenCode, actions }) {
             <div><b>Beetle</b><span>{results.app_name || 'Security Analysis'}</span></div>
           </div>
           <nav className="ws-nav">
-            {SECTIONS.map(s => {
-              const Icon = s.icon
-              const n = counts[s.id]
-              return (
-                <button key={s.id} type="button" className={`ws-nav__item${s.id === section ? ' is-active' : ''}`}
-                  onClick={() => { setSection(s.id); scrollRef.current?.scrollTo({ top: 0 }) }}>
-                  <Icon size={16} />
-                  <span className="ws-nav__label">{s.label}</span>
-                  {n ? <span className="ws-nav__count">{n}</span> : null}
-                </button>
-              )
-            })}
+            {NAV_GROUPS.map(group => (
+              <div key={group.label} className="ws-nav__group">
+                <div className="ws-nav__grouplabel">{group.label}</div>
+                {group.items.map(s => {
+                  const Icon = s.icon
+                  const n = counts[s.id]
+                  return (
+                    <button key={s.id} type="button" className={`ws-nav__item${s.id === section ? ' is-active' : ''}`}
+                      onClick={() => { setSection(s.id); scrollRef.current?.scrollTo({ top: 0 }) }}>
+                      <Icon size={16} />
+                      <span className="ws-nav__label">{s.label}</span>
+                      {n ? <span className="ws-nav__count">{n}</span> : null}
+                    </button>
+                  )
+                })}
+              </div>
+            ))}
           </nav>
           <div className="ws-sidebar__foot">Beetle · Explainable Security Workspace</div>
         </aside>
@@ -162,6 +190,15 @@ export default function Workspace({ results, onOpenCode, actions }) {
             {section === 'masvs' && <MasvsPanel results={results} />}
             {section === 'files' && <FilesPanel results={results} onOpenCode={onOpenCode} />}
             {section === 'exports' && <ExportsPanel actions={actions} results={results} />}
+            {section === 'manifest' && <ManifestPanel results={results} />}
+            {section === 'network' && <NetworkPanel results={results} />}
+            {section === 'certificate' && <CertificatePanel results={results} />}
+            {section === 'components' && <ComponentsPanel results={results} />}
+            {section === 'androidapis' && <AndroidApiPanel results={results} onOpenCode={onOpenCode} />}
+            {section === 'malware' && <MalwarePanel results={results} />}
+            {section === 'codebrowser' && <CodeBrowserPanel results={results} scanId={scanId} onOpenCode={onOpenCode} />}
+            {section === 'compare' && <ComparePanel results={results} />}
+            {section === 'ai' && <AiAssistantPanel results={results} />}
           </div>
         </div>
       </div>

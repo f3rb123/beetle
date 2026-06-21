@@ -5,6 +5,7 @@ import { useMemo, useState } from 'react'
 import {
   ArrowUpRight, FileCode2, KeyRound, ShieldAlert, Boxes, ExternalLink,
   ChevronRight, Layers, Download, FileJson, GitBranch, ShieldCheck,
+  ScrollText, Network, Fingerprint, Cpu, Bug, Sparkles, GitCompare,
 } from 'lucide-react'
 import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer } from 'recharts'
 import {
@@ -50,6 +51,25 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding }) {
         <Metric label="View Code" value={`${res.view_code_coverage_pct ?? '—'}%`} sub="renderable evidence" />
         <Metric label="Attack Chains" value={chains.length} sub="cloud exposure paths" />
         <Metric label="Secrets" value={secretsSum.total_application_secrets ?? (results.secrets || []).length} sub={`${secretsSum.suppressed_sdk_secrets ?? 0} SDK suppressed`} />
+      </div>
+
+      {/* Workspace launcher (Task 11) */}
+      <div className="ws-section">
+        <h2>Deep Analysis</h2>
+        <div className="ws-launcher">
+          {[
+            ['manifest', 'Manifest', ScrollText], ['network', 'Network', Network],
+            ['certificate', 'Certificate', Fingerprint], ['components', 'Components', Boxes],
+            ['androidapis', 'Android APIs', Cpu], ['malware', 'Malware', Bug],
+            ['ai', 'AI Assistant', Sparkles], ['compare', 'Compare', GitCompare],
+          ].map(([id, label, Icon]) => (
+            <button key={id} type="button" className="ws-launch" onClick={() => onOpenSection(id)}>
+              <Icon size={18} className="ws-muted" />
+              <span>{label}</span>
+              <ChevronRight size={14} className="ws-muted" style={{ marginLeft: 'auto' }} />
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Risk summary */}
@@ -251,13 +271,7 @@ export function FindingDrawer({ finding, onClose, onOpenCode }) {
         <div className="ws-drawer__body">
           <Block label="Summary"><p>{ex.why_it_matters || f.description || 'No description available.'}</p></Block>
 
-          {(path || snippet) ? (
-            <Block label="Evidence">
-              {path ? <div className="ws-mono ws-muted" style={{ marginBottom: 8 }}>{path}{f.line ? `:${f.line}` : ''}</div> : null}
-              {snippet ? <pre className="ws-code">{snippet}</pre> : null}
-              {path ? <button type="button" className="ws-btn" style={{ marginTop: 10 }} onClick={() => onOpenCode(path, lines)}><FileCode2 size={14} /> View code</button> : null}
-            </Block>
-          ) : null}
+          <EvidenceBlock finding={f} primaryPath={path} primaryLines={lines} primarySnippet={snippet} onOpenCode={onOpenCode} />
 
           {ex.attack_scenario ? <Block label="Attack Scenario"><p>{ex.attack_scenario}</p></Block> : null}
           {(ex.prerequisites || []).length ? <Block label="Prerequisites"><ul>{ex.prerequisites.map((p, i) => <li key={i}>{p}</li>)}</ul></Block> : null}
@@ -283,6 +297,31 @@ export function FindingDrawer({ finding, onClose, onOpenCode }) {
 
 function Block({ label, children }) {
   return <div className="ws-block"><div className="ws-block__label">{label}</div>{children}</div>
+}
+
+// Evidence with MULTIPLE locations (Task 9): each evidence entry opens the code
+// viewer at its exact line(s), which auto-scrolls + highlights.
+function EvidenceBlock({ finding, primaryPath, primaryLines, primarySnippet, onOpenCode }) {
+  const fe = Array.isArray(finding.file_evidence) ? finding.file_evidence.filter(e => e && e.path) : []
+  const locations = fe.length
+    ? fe.map(e => ({ path: e.path, lines: e.lines && e.lines.length ? e.lines : (e.line ? [e.line] : []), snippet: e.snippet || '' }))
+    : (primaryPath ? [{ path: primaryPath, lines: primaryLines, snippet: primarySnippet }] : [])
+  if (!locations.length && !primarySnippet) return null
+
+  return (
+    <div className="ws-block">
+      <div className="ws-block__label">Evidence{locations.length > 1 ? ` · ${locations.length} locations` : ''}</div>
+      {locations.length ? locations.map((loc, i) => (
+        <div key={i} style={{ marginBottom: i < locations.length - 1 ? 14 : 0 }}>
+          <div className="ws-mono ws-muted" style={{ marginBottom: 6 }}>{loc.path}{loc.lines.length ? `:${loc.lines.join(',')}` : ''}</div>
+          {loc.snippet ? <pre className="ws-code">{loc.snippet}</pre> : null}
+          <button type="button" className="ws-btn" style={{ marginTop: 8 }} onClick={() => onOpenCode(loc.path, loc.lines)}>
+            <FileCode2 size={14} /> View at line{loc.lines.length > 1 ? 's' : ''} {loc.lines.join(', ') || '—'}
+          </button>
+        </div>
+      )) : (primarySnippet ? <pre className="ws-code">{primarySnippet}</pre> : null)}
+    </div>
+  )
 }
 
 // ───────────────────────────── Attack Chains ─────────────────────────────

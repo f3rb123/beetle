@@ -262,3 +262,38 @@
   .ws-sidebar { display: none; }
   .ws-two { grid-template-columns: 1fr; }
 }
+
+/* ── Phase 11.75 deep-analysis additions ──────────────────────────────────── */
+.ws-nav__group { margin-bottom: 6px; }
+.ws-nav__grouplabel { font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ws-ink-3); padding: 12px 10px 5px; }
+
+.ws-verdict { font-size: 12px; font-weight: 700; padding: 3px 11px; border-radius: 999px; letter-spacing: 0.02em; }
+.ws-verdict--good { background: #ecfdf3; color: #067647; }
+.ws-verdict--warn { background: #fffaeb; color: #b54708; }
+.ws-verdict--risk { background: #fef3f2; color: #b42318; }
+
+.ws-kv { display: flex; flex-direction: column; }
+.ws-kv__row { display: flex; gap: 14px; padding: 7px 0; border-top: 1px solid var(--ws-line); font-size: 13px; }
+.ws-kv__row:first-child { border-top: none; }
+.ws-kv__k { color: var(--ws-ink-3); min-width: 110px; flex-shrink: 0; }
+.ws-kv__v { color: var(--ws-ink); word-break: break-all; }
+
+.ws-scheme { font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 8px; border: 1px solid var(--ws-line-strong); color: var(--ws-ink-3); background: var(--ws-bg-soft); }
+.ws-scheme.is-on { background: #ecfdf3; color: #067647; border-color: #abefc6; }
+
+.ws-assess { display: flex; flex-direction: column; gap: 9px; }
+.ws-assess__row { display: flex; align-items: center; gap: 9px; font-size: 13.5px; }
+
+.ws-scroll { max-height: 360px; overflow-y: auto; }
+
+.ws-cmp { display: grid; grid-template-columns: 1.4fr 1fr 1fr 0.6fr; gap: 10px; padding: 10px 16px; border-top: 1px solid var(--ws-line); font-size: 13.5px; align-items: center; }
+.ws-cmp:first-child { border-top: none; }
+.ws-cmp--head { font-weight: 650; background: var(--ws-bg-soft); font-size: 12.5px; }
+
+.ws-aiform { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.ws-aiform label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 560; color: var(--ws-ink-3); }
+.ws-aiform .ws-input { min-width: 0; width: 100%; }
+
+.ws-launcher { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+.ws-launch { display: flex; align-items: center; gap: 10px; padding: 13px 15px; border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); cursor: pointer; font-size: 13.5px; font-weight: 550; color: var(--ws-ink); transition: border-color 120ms, box-shadow 120ms; }
+.ws-launch:hover { border-color: var(--ws-line-strong); box-shadow: var(--ws-shadow); }

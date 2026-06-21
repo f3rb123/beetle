@@ -113,3 +113,51 @@ opens its drawer.
 ## Backend untouched
 
 No files under `backend/` were modified in this phase.
+
+---
+
+## Phase 11.75 — Workspace Expansion & Deep Analysis
+
+Exposes existing backend intelligence that the workspace was not yet surfacing.
+Frontend + navigation + evidence only — no backend logic, detections, trust
+scoring, or chain generation changed.
+
+### New pages (`components/workspace2/panels2.jsx`)
+
+| Page | Reads (existing backend data) |
+|------|-------------------------------|
+| **Manifest** | `app_info`, `manifest_security` (debuggable/allowBackup/cleartext), `attack_surface` exported counts, `permissions.classified` grouped Normal/Dangerous/Signature |
+| **Network** | `network_config` (cleartext, NSC, pinning, trust anchors), `endpoints`/WebSockets, `ips`; findings grouped SSL-bypass / WebView-SSL / cleartext / missing-pinning |
+| **Certificate** | `certificate` (schemes v1–v4, subject, issuer, serial, SHA-1/256/512, key size, validity, debug-cert, Janus, weak algo) + GOOD/WARNING/HIGH-RISK verdict |
+| **Components** | `attack_surface` activities/services/receivers/providers + `exported_component_inventory` risk; exported/browsable/permission/authorities/intent-filters; deep links; search/filter |
+| **Android APIs** | `android_api` category→files; each file links to the viewer and to its finding |
+| **Malware Analysis** | `apkid`, `behavior_analysis`, native libs + obfuscation/reflection/dynamic-loading/root/emulator/integrity/anti-analysis indicators |
+| **Code Browser** | `/api/scans/:id/files` tree (fallback: evidence paths); search → viewer |
+| **Compare** | local history + `getStoredScan`; side-by-side Score/Trust/MASVS/Findings/Secrets/Components/Permissions/Chains with deltas |
+| **AI Assistant** | provider-agnostic (`lib/ai-providers.js`: Claude/OpenAI/Gemini/DeepSeek/Ollama); actions Explain Finding/Chain/Risk, Remediation, Executive Summary, Secure Example. Uses the backend's deterministic analyst intelligence offline; ready to dispatch to a live LLM gateway. **Claude is not hardcoded.** |
+
+### Navigation (Task 11)
+
+Sidebar split into **Workspace** (7) and **Deep Analysis** (9) groups. The
+Overview gains a **Deep Analysis launcher** with quick links to Manifest, Network,
+Certificate, Components, Android APIs, Malware, AI Assistant, and Compare.
+
+### Evidence navigation (Tasks 9–10)
+
+The code viewer already auto-scrolls to and highlights `highlightedLines` and has
+in-file search with prev/next + copy. Phase 11.75 makes the finding drawer open
+the **exact** evidence location(s): the `EvidenceBlock` renders every
+`file_evidence` entry with its own snippet and a "View at line N" button that
+opens the viewer scrolled to that line. Multiple evidence locations are each
+individually navigable.
+
+### Validation
+
+- **`npm run build` clean** (2319 modules).
+- **Populated from real `analyze` output** (offline harness, DVBA/InsecureShop/WaPo):
+  Findings, Secrets, MASVS, Attack Chains, AI Assistant, Compare, Code Browser.
+- **Verified by field name** against the legacy `SectionViews` + backend for the
+  container-only data (Certificate, Network, Manifest, Components, Android APIs,
+  Malware). These require apktool/androguard (container) to populate; on this host
+  they render graceful empty states (no crash). All panels guard missing data.
+- Existing reports/exports unchanged (PDF/SBOM/SARIF/CI buttons unchanged).
