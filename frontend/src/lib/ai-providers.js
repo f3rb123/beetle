@@ -16,9 +16,10 @@ export const AI_PROVIDERS = [
 export const AI_ACTIONS = [
   { id: 'explain_finding', label: 'Explain Finding', needs: 'finding' },
   { id: 'explain_chain', label: 'Explain Attack Chain', needs: 'chain' },
+  { id: 'generate_remediation', label: 'Generate Fix', needs: 'finding' },
+  { id: 'executive_summary', label: 'Executive Summary', needs: 'results' },
+  { id: 'developer_summary', label: 'Developer Summary', needs: 'results' },
   { id: 'explain_risk', label: 'Explain Risk', needs: 'finding' },
-  { id: 'generate_remediation', label: 'Generate Remediation', needs: 'finding' },
-  { id: 'executive_summary', label: 'Generate Executive Summary', needs: 'results' },
   { id: 'secure_example', label: 'Generate Secure Example', needs: 'finding' },
 ]
 
@@ -60,6 +61,14 @@ function localAssist(action, ctx) {
         (a.most_exploitable_chains || []).length ? `Most exploitable: ${a.most_exploitable_chains[0].title}.` : '',
       ]
       return lines.filter(Boolean).join('\n')
+    }
+    case 'developer_summary': {
+      const apps = (r.findings || []).filter(x => (x.ownership_label || x.ownership) === 'APPLICATION' || !x.ownership_label)
+      const top = apps.slice(0, 6).map(x => {
+        const fix = (x.analyst_explanation || {}).developer_fix || x.recommendation || 'review'
+        return `• [${x.severity}] ${x.title}\n    fix: ${fix}`
+      })
+      return [`Developer action list for ${r.app_name || 'this app'} (application-owned issues):`, ...top].filter(Boolean).join('\n')
     }
     case 'secure_example': {
       const rem = ex.remediation || {}

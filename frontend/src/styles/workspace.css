@@ -297,3 +297,22 @@
 .ws-launcher { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
 .ws-launch { display: flex; align-items: center; gap: 10px; padding: 13px 15px; border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); cursor: pointer; font-size: 13.5px; font-weight: 550; color: var(--ws-ink); transition: border-color 120ms, box-shadow 120ms; }
 .ws-launch:hover { border-color: var(--ws-line-strong); box-shadow: var(--ws-shadow); }
+
+/* ── Phase 11.8 additions ──────────────────────────────────────────────────── */
+.ws-perm { font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 6px; text-transform: capitalize; }
+.ws-perm--dangerous { background: #fef3f2; color: #b42318; }
+.ws-perm--signature { background: #eff6ff; color: #1d4ed8; }
+.ws-perm--normal { background: #f1f1f3; color: #52525b; }
+.ws-perm--unknown { background: #fffaeb; color: #b54708; }
+
+.ws-posture--risk { border-color: #fecaca; }
+.ws-posture--warn { border-color: #fde68a; }
+.ws-posture--good { border-color: var(--ws-line); }
+
+.ws-chainev { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--ws-line); }
+.ws-chainev:first-of-type { border-top: none; }
+.ws-chainev__check { color: #067647; font-weight: 800; font-size: 14px; }
+
+.ws-check { font-size: 13px; padding: 4px 0; color: var(--ws-ink-2); }
+.ws-check--yes { color: #067647; font-weight: 800; margin-right: 6px; }
+.ws-check--no { color: var(--sev-high); font-weight: 800; margin-right: 6px; }

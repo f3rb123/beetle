@@ -269,16 +269,26 @@ export function FindingDrawer({ finding, onClose, onOpenCode }) {
           <button type="button" className="ws-drawer__close" onClick={onClose}>×</button>
         </div>
         <div className="ws-drawer__body">
-          <Block label="Summary"><p>{ex.why_it_matters || f.description || 'No description available.'}</p></Block>
+          {ex.what_found || snippet ? (
+            <Block label="What Found"><pre className="ws-code">{ex.what_found || snippet}</pre></Block>
+          ) : null}
+          <Block label={ex.why_dangerous ? 'Why Dangerous' : 'Summary'}>
+            <p>{ex.why_dangerous || ex.why_it_matters || f.description || 'No description available.'}</p>
+          </Block>
 
-          <EvidenceBlock finding={f} primaryPath={path} primaryLines={lines} primarySnippet={snippet} onOpenCode={onOpenCode} />
+          {/* Chain evidence (Task 7) — for attack-chain findings */}
+          {f.is_attack_chain && (f.chain_evidence || f.confidence_explanation) ? (
+            <ChainEvidenceBlock finding={f} onOpenCode={onOpenCode} />
+          ) : null}
+
+          <EvidenceLocations ex={ex} finding={f} primaryPath={path} primaryLines={lines} primarySnippet={snippet} onOpenCode={onOpenCode} />
 
           {ex.attack_scenario ? <Block label="Attack Scenario"><p>{ex.attack_scenario}</p></Block> : null}
           {(ex.prerequisites || []).length ? <Block label="Prerequisites"><ul>{ex.prerequisites.map((p, i) => <li key={i}>{p}</li>)}</ul></Block> : null}
           {ex.impact ? <Block label="Impact"><p>{ex.impact}</p></Block> : null}
 
-          <Block label="Remediation">
-            <p>{rem.summary || f.recommendation || 'Review the evidence and apply secure-coding guidance for this weakness class.'}</p>
+          <Block label="Remediation / Developer Fix">
+            <p>{ex.developer_fix || rem.developer_fix || rem.summary || f.recommendation || 'Review the evidence and apply secure-coding guidance for this weakness class.'}</p>
             <div className="ws-refs" style={{ marginTop: 8 }}>
               {(rem.masvs || f.masvs) ? <SoftTag>{rem.masvs || f.masvs}</SoftTag> : null}
               {(rem.owasp || f.owasp) ? <SoftTag>OWASP {rem.owasp || f.owasp}</SoftTag> : null}
@@ -286,8 +296,9 @@ export function FindingDrawer({ finding, onClose, onOpenCode }) {
             </div>
           </Block>
 
+          {ex.code_example ? <Block label="Code Example"><pre className="ws-code">{ex.code_example}</pre></Block> : null}
           {ex.false_positive_notes ? <Block label="False-Positive Notes"><div className="ws-callout ws-callout--fp">{ex.false_positive_notes}</div></Block> : null}
-          {ex.confidence_reason ? <Block label="Why this confidence"><div className="ws-callout">{ex.confidence_reason}</div></Block> : null}
+          {ex.confidence_reason ? <Block label="Confidence Reason"><div className="ws-callout">{ex.confidence_reason}</div></Block> : null}
           {(ex.references || []).length ? <Block label="References"><div className="ws-refs">{ex.references.map((r, i) => <SoftTag key={i}>{r}</SoftTag>)}</div></Block> : null}
         </div>
       </aside>
@@ -297,6 +308,69 @@ export function FindingDrawer({ finding, onClose, onOpenCode }) {
 
 function Block({ label, children }) {
   return <div className="ws-block"><div className="ws-block__label">{label}</div>{children}</div>
+}
+
+// Evidence locations (Tasks 5/6): prefers the backend `evidence_locations[]`
+// ({file, line_start, line_end, highlight_line, snippet}); each opens the viewer
+// scrolled to + highlighting the exact line. Falls back to file_evidence.
+function EvidenceLocations({ ex, finding, primaryPath, primaryLines, primarySnippet, onOpenCode }) {
+  const locs = Array.isArray(ex.evidence_locations) ? ex.evidence_locations.filter(l => l && l.file) : []
+  if (!locs.length) {
+    return <EvidenceBlock finding={finding} primaryPath={primaryPath} primaryLines={primaryLines} primarySnippet={primarySnippet} onOpenCode={onOpenCode} />
+  }
+  return (
+    <div className="ws-block">
+      <div className="ws-block__label">Evidence{locs.length > 1 ? ` · ${locs.length} locations` : ''}</div>
+      {locs.map((loc, i) => {
+        const lines = loc.highlight_line ? [loc.highlight_line]
+          : (loc.line_start ? [loc.line_start] : [])
+        return (
+          <div key={i} style={{ marginBottom: i < locs.length - 1 ? 14 : 0 }}>
+            <div className="ws-mono ws-muted" style={{ marginBottom: 6 }}>
+              Evidence #{i + 1} · {loc.file}{loc.highlight_line ? `:${loc.highlight_line}` : ''}
+            </div>
+            {loc.snippet ? <pre className="ws-code">{loc.snippet}</pre> : null}
+            <button type="button" className="ws-btn" style={{ marginTop: 8 }} onClick={() => onOpenCode(loc.file, lines)}>
+              <FileCode2 size={14} /> View at line {loc.highlight_line || loc.line_start || '—'}
+            </button>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// Chain evidence (Task 7): per-member contribution + self-explaining confidence.
+function ChainEvidenceBlock({ finding, onOpenCode }) {
+  const ev = finding.chain_evidence || []
+  const cx = finding.confidence_explanation || {}
+  return (
+    <div className="ws-block">
+      <div className="ws-block__label">Chain Evidence</div>
+      {ev.map((e, i) => (
+        <div key={i} className="ws-chainev">
+          <span className="ws-chainev__check">✓</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 560, fontSize: 13.5 }}>{e.title}</div>
+            <div className="ws-muted" style={{ fontSize: 12.5 }}>{e.why_it_contributes}</div>
+            {e.file ? <div className="ws-mono ws-muted" style={{ fontSize: 11.5, marginTop: 2 }}>{e.file}{e.line ? `:${e.line}` : ''}</div> : null}
+          </div>
+          {e.confidence ? <SoftTag>{e.confidence}</SoftTag> : null}
+          {e.file ? <button type="button" className="ws-btn" onClick={() => onOpenCode(e.file, e.line ? [e.line] : [])}><FileCode2 size={13} /></button> : null}
+        </div>
+      ))}
+      {(cx.checks || []).length ? (
+        <div className="ws-card ws-card--pad" style={{ marginTop: 12 }}>
+          <div className="ws-block__label">Why confidence is {cx.confidence}</div>
+          {cx.checks.map((c, i) => (
+            <div key={i} className="ws-check">
+              <span className={c.met ? 'ws-check--yes' : 'ws-check--no'}>{c.met ? '✓' : '✗'}</span> {c.label}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 // Evidence with MULTIPLE locations (Task 9): each evidence entry opens the code
@@ -363,6 +437,33 @@ export function ChainsPanel({ results }) {
               ))}
             </div>
             {ex.impact ? <div className="ws-callout" style={{ marginTop: 14 }}><b>Impact:</b> {ex.impact}</div> : null}
+
+            {/* Chain evidence + self-explaining confidence (Task 7) */}
+            {(c.chain_evidence || []).length ? (
+              <div style={{ marginTop: 16 }}>
+                <div className="ws-block__label">Chain Evidence</div>
+                {c.chain_evidence.map((e, k) => (
+                  <div key={k} className="ws-chainev">
+                    <span className="ws-chainev__check">✓</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 560, fontSize: 13.5 }}>{e.title}</div>
+                      <div className="ws-muted" style={{ fontSize: 12.5 }}>{e.why_it_contributes}{e.file ? ` · ${e.file}${e.line ? `:${e.line}` : ''}` : ''}</div>
+                    </div>
+                    {e.confidence ? <SoftTag>{e.confidence}</SoftTag> : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {(c.confidence_explanation?.checks || []).length ? (
+              <div className="ws-card ws-card--pad" style={{ marginTop: 12 }}>
+                <div className="ws-block__label">Why confidence is {c.confidence_explanation.confidence}</div>
+                {c.confidence_explanation.checks.map((ck, k) => (
+                  <div key={k} className="ws-check">
+                    <span className={ck.met ? 'ws-check--yes' : 'ws-check--no'}>{ck.met ? '✓' : '✗'}</span> {ck.label}
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
         )
       })}

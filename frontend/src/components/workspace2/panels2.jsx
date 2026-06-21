@@ -28,25 +28,178 @@ function Rows({ items }) {
   )
 }
 
+// ───────────────────────────── Permissions ───────────────────────────────
+export function PermissionsPanel({ results, onOpenCode }) {
+  const ws = results.permissions_workspace
+    || ((results.permissions || {}).classified || []).map(p => ({
+      permission: p.permission, short_name: p.short_name || (p.permission || '').split('.').pop(),
+      type: p.status || 'normal', description: p.description || '', used_in_files: [], findings: [],
+    }))
+  const [q, setQ] = useState('')
+  const [sort, setSort] = useState('risk')
+  const TIER = { dangerous: 0, signature: 1, unknown: 2, normal: 3 }
+  if (!ws.length) return <EmptyState title="No permissions" body="This package declared no permissions." />
+
+  let rows = ws.filter(p => !q || `${p.permission} ${p.description}`.toLowerCase().includes(q.toLowerCase()))
+  rows = [...rows].sort((a, b) => sort === 'name'
+    ? (a.short_name || '').localeCompare(b.short_name || '')
+    : (TIER[a.type] ?? 2) - (TIER[b.type] ?? 2))
+  const counts = ws.reduce((m, p) => { m[p.type] = (m[p.type] || 0) + 1; return m }, {})
+
+  return (
+    <div>
+      <div className="ws-section__head"><h1>Permissions</h1><span className="ws-muted">{ws.length}</span></div>
+      <div className="ws-metrics ws-section">
+        <Metric label="Total" value={ws.length} />
+        <Metric label="Dangerous" value={counts.dangerous || 0} />
+        <Metric label="Signature" value={counts.signature || 0} />
+        <Metric label="Normal" value={counts.normal || 0} />
+      </div>
+      <div className="ws-toolbar">
+        <input className="ws-input" placeholder="Search permissions…" value={q} onChange={e => setQ(e.target.value)} style={{ minWidth: 280 }} />
+        {['risk', 'name'].map(s => <button key={s} type="button" className={`ws-chip${sort === s ? ' is-active' : ''}`} onClick={() => setSort(s)}>Sort: {s}</button>)}
+      </div>
+      {rows.map((p, i) => (
+        <div key={i} className="ws-card ws-card--pad" style={{ marginBottom: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className={`ws-perm ws-perm--${p.type}`}>{p.type}</span>
+            <b style={{ fontSize: 14 }}>{p.short_name}</b>
+            <span className="ws-mono ws-muted" style={{ fontSize: 11.5 }}>{p.permission}</span>
+          </div>
+          {p.description ? <p style={{ fontSize: 13, marginTop: 6 }}>{p.description}</p> : null}
+          {(p.used_in_files || []).length ? (
+            <div style={{ marginTop: 8 }}>
+              <div className="ws-block__label">Used in files</div>
+              {p.used_in_files.slice(0, 8).map((f, j) => (
+                <div key={j} className="ws-file" onClick={() => onOpenCode(f, [])}><FileCode2 size={12} className="ws-muted" /><span className="ws-file__path" title={f}>{f}</span></div>
+              ))}
+            </div>
+          ) : null}
+          {(p.findings || []).length ? (
+            <div style={{ marginTop: 8 }}>
+              <div className="ws-block__label">Related findings</div>
+              {p.findings.map((t, j) => <div key={j} className="ws-mcontrol"><ShieldAlert size={12} style={{ color: SEV_COLOR.medium }} /> {t}</div>)}
+            </div>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ───────────────────────── Android Security posture ──────────────────────
+const POSTURE_LABELS = {
+  debuggable: 'Debuggable', allowBackup: 'Allow Backup', minSdk: 'Min SDK', targetSdk: 'Target SDK',
+  cleartextTraffic: 'Cleartext Traffic', networkSecurityConfig: 'Network Security Config',
+  signatureScheme: 'Signature Scheme', janusRisk: 'Janus Risk', backupRisk: 'Backup Risk',
+  legacyAndroidSupport: 'Legacy Android Support', installationOnOldVersions: 'Installs on Old Versions',
+  rootDetection: 'Root Detection', fridaDetection: 'Frida Detection',
+  screenshotProtection: 'Screenshot Protection', certificatePinning: 'Certificate Pinning',
+}
+function postureText(v) {
+  if (Array.isArray(v)) return v.length ? v.join(', ') : '—'
+  if (v === true) return 'Yes'; if (v === false) return 'No'
+  return v === null || v === undefined ? '—' : String(v)
+}
+export function AndroidPosturePanel({ results }) {
+  const ap = results.android_posture
+  if (!ap || !Object.keys(ap).length) return <EmptyState title="Android posture unavailable" body="This scan predates the Android posture workspace or is not an Android app." />
+  const order = Object.keys(POSTURE_LABELS).filter(k => k in ap)
+  return (
+    <div>
+      <div className="ws-section__head"><h1>Android Security</h1></div>
+      <div className="ws-masvs-grid">
+        {order.map(k => {
+          const item = ap[k] || {}
+          const risk = item.risk || 'good'
+          return (
+            <div key={k} className={`ws-mcard ws-posture ws-posture--${risk}`}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span className="ws-mcard__cat">{POSTURE_LABELS[k]}</span>
+                {risk === 'risk' ? <ShieldAlert size={15} style={{ color: SEV_COLOR.high }} />
+                  : risk === 'warn' ? <ShieldAlert size={15} style={{ color: SEV_COLOR.medium }} />
+                    : <ShieldCheck size={15} style={{ color: '#067647' }} />}
+              </div>
+              <div style={{ fontSize: 18, fontWeight: 700, marginTop: 6 }}>{postureText(item.value)}</div>
+              <div className={`ws-maturity ws-maturity--${risk === 'risk' ? 'weak' : risk === 'warn' ? 'moderate' : 'strong'}`} style={{ marginTop: 4 }}>
+                {risk === 'risk' ? 'HIGH RISK' : risk === 'warn' ? 'REVIEW' : 'OK'}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ───────────────────────────── Taint Flows ───────────────────────────────
+export function TaintFlowPanel({ results, onOpenCode }) {
+  const flows = results.taint_graph || []
+  if (!flows.length) return <EmptyState title="No taint flows" body="No source→sink data-flow paths were resolved for this scan." />
+  return (
+    <div>
+      <div className="ws-section__head"><h1>Taint Flows</h1><span className="ws-muted">{flows.length} flow{flows.length !== 1 ? 's' : ''}</span></div>
+      {flows.map((t, i) => (
+        <div key={i} className="ws-chain">
+          <div className="ws-chain__head">
+            <SeverityTag severity={t.risk} />
+            <span className="ws-chain__title">{t.source_cat || 'source'} → {t.sink_cat || 'sink'}</span>
+            {t.file ? <button type="button" className="ws-btn" style={{ marginLeft: 'auto' }} onClick={() => onOpenCode(t.file, t.line ? [t.line] : [])}><FileCode2 size={13} /> {t.file.split('/').pop()}{t.line ? `:${t.line}` : ''}</button> : null}
+          </div>
+          <div className="ws-timeline" style={{ marginTop: 12 }}>
+            <Step kind="Source" label={t.source} />
+            {(t.call_chain || []).slice(1, -1).map((c, j) => <Step key={j} kind="Call" label={c} />)}
+            <Step kind="Sink" label={t.sink} last exposure />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+function Step({ kind, label, last, exposure }) {
+  return (
+    <div className="ws-step">
+      <div className="ws-step__rail">
+        <span className={`ws-step__node${exposure ? ' ws-step__node--exposure' : ''}`} />
+        {!last ? <span className="ws-step__line" /> : null}
+      </div>
+      <div className="ws-step__body">
+        <div className="ws-step__kind">{kind}</div>
+        <div className="ws-step__label ws-mono">{label}</div>
+      </div>
+    </div>
+  )
+}
+
 // ───────────────────────────── Certificate ───────────────────────────────
 export function CertificatePanel({ results }) {
   const c = results.certificate || {}
-  if (!c.available && !(c.scheme || []).length) {
+  const cw = results.certificate_workspace || {}      // Phase 11.75 structure (preferred)
+  const hasWs = Object.keys(cw).length > 0
+  if (!c.available && !(c.scheme || []).length && !hasWs) {
     return <EmptyState title="No certificate data" body={c.unavailable_reason || 'Signing certificate could not be extracted for this package.'} />
   }
-  const schemes = c.scheme || c.schemes || []
+  const schemes = cw.signature_schemes || c.scheme || c.schemes || []
   const has = v => schemes.some(s => String(s).toLowerCase().includes(v))
-  const weakAlgo = /sha1|md5/i.test(c.signature_algo || '')
-  const smallKey = c.key_size && Number(c.key_size) < 2048
-  const janusRisk = c.janus_risk !== undefined ? c.janus_risk : (has('v1') && !has('v2') && !has('v3'))
+  const algo = cw.algorithm || c.signature_algo
+  const keySize = cw.key_size || c.key_size
+  const debugCert = hasWs ? cw.debug_cert : c.debug_cert
+  const expired = hasWs ? cw.expired : c.expired
+  const selfSigned = hasWs ? cw.self_signed : (c.subject && c.issuer && JSON.stringify(c.subject) === JSON.stringify(c.issuer))
+  const weakAlgo = /sha1|md5/i.test(algo || '')
+  const smallKey = keySize && Number(keySize) < 2048
+  const janusRisk = (hasWs && cw.janus_possible !== undefined) ? cw.janus_possible
+    : (c.janus_risk !== undefined ? c.janus_risk : (has('v1') && !has('v2') && !has('v3')))
   const overallVuln = (c.security_overview?.overall || '').toLowerCase() === 'vulnerable'
 
   let level = 'good'
-  if (c.debug_cert || overallVuln || janusRisk) level = 'risk'
-  else if (c.expired || weakAlgo || smallKey) level = 'warn'
+  if (debugCert || overallVuln || janusRisk) level = 'risk'
+  else if (expired || weakAlgo || smallKey || selfSigned) level = 'warn'
 
-  const subj = Object.entries(c.subject || {}).map(([k, v]) => `${k}=${v}`).join(', ')
-  const iss = Object.entries(c.issuer || {}).map(([k, v]) => `${k}=${v}`).join(', ')
+  // Workspace subject/issuer are pre-joined strings; raw cert is an object.
+  const subj = hasWs ? cw.subject : Object.entries(c.subject || {}).map(([k, v]) => `${k}=${v}`).join(', ')
+  const iss = hasWs ? cw.issuer : Object.entries(c.issuer || {}).map(([k, v]) => `${k}=${v}`).join(', ')
+  const certFindings = cw.findings || []
 
   return (
     <div>
@@ -65,29 +218,38 @@ export function CertificatePanel({ results }) {
         <div className="ws-card ws-card--pad">
           <h2>Identity</h2>
           <Rows items={[
-            ['Subject', subj], ['Issuer', iss], ['Serial', c.serial],
-            ['Algorithm', c.signature_algo], ['Key', c.key_type ? `${c.key_type} ${c.key_size}-bit` : c.key_size],
-            ['Valid from', c.valid_from], ['Valid to', c.valid_to],
+            ['Subject', subj], ['Issuer', iss], ['Serial', cw.serial || c.serial],
+            ['Algorithm', algo], ['Key', (cw.key_type || c.key_type) ? `${cw.key_type || c.key_type} ${keySize}-bit` : keySize],
+            ['Self-signed', selfSigned === undefined ? '' : (selfSigned ? 'Yes' : 'No')],
+            ['Valid from', cw.valid_from || c.valid_from], ['Valid to', cw.valid_to || c.valid_to],
           ]} />
         </div>
         <div className="ws-card ws-card--pad">
           <h2>Fingerprints</h2>
           <Rows items={[
-            ['SHA-1', c.sha1_fingerprint || c.sha1], ['SHA-256', c.sha256_fingerprint || c.sha256], ['SHA-512', c.sha512_fingerprint || c.sha512],
+            ['SHA-1', cw.sha1 || c.sha1_fingerprint || c.sha1], ['SHA-256', cw.sha256 || c.sha256_fingerprint || c.sha256], ['SHA-512', cw.sha512 || c.sha512_fingerprint || c.sha512],
           ]} />
         </div>
       </div>
 
-      <div className="ws-card ws-card--pad">
+      <div className="ws-card ws-card--pad ws-section">
         <h2>Production Readiness</h2>
         <div className="ws-assess">
-          <AssessRow ok={!c.debug_cert} good="Production certificate" bad="Debug certificate detected" />
-          <AssessRow ok={!c.expired} good="Within validity period" bad="Certificate expired" />
+          <AssessRow ok={!debugCert} good="Production certificate" bad="Debug certificate detected" />
+          <AssessRow ok={!expired} good="Within validity period" bad="Certificate expired" />
           <AssessRow ok={!janusRisk} good="Janus-resistant (v2+/v3 signed)" bad="Janus risk — v1-only signing" />
-          <AssessRow ok={!weakAlgo} good="Strong signature algorithm" bad={`Weak signature algorithm (${c.signature_algo})`} />
-          <AssessRow ok={!smallKey} good="Adequate key size" bad={`Small key size (${c.key_size}-bit)`} />
+          <AssessRow ok={!weakAlgo} good="Strong signature algorithm" bad={`Weak signature algorithm (${algo})`} />
+          <AssessRow ok={!smallKey} good="Adequate key size" bad={`Small key size (${keySize}-bit)`} />
+          <AssessRow ok={!selfSigned} good="CA-issued certificate" bad="Self-signed certificate" />
         </div>
       </div>
+
+      {certFindings.length ? (
+        <div className="ws-card ws-card--pad">
+          <h2>Certificate Findings</h2>
+          {certFindings.map((t, i) => <div key={i} className="ws-mcontrol"><ShieldAlert size={13} style={{ color: SEV_COLOR.medium }} /> {t}</div>)}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -110,25 +272,48 @@ const NET_GROUPS = [
 ]
 
 export function NetworkPanel({ results }) {
+  const nw = results.network_workspace || {}            // Phase 11.75 structure (preferred)
   const nc = results.network_config || {}
   const sum = nc.summary || {}
-  const endpoints = results.endpoints || []
-  const ips = results.ips || []
+  const endpoints = nw.endpoints || results.endpoints || []
+  const ips = nw.ips || results.ips || []
   const findings = results.findings || []
-  const ws = endpoints.filter(u => /^wss?:\/\//i.test(u))
-  const urls = endpoints.filter(u => !/^wss?:\/\//i.test(u))
+  const ws = nw.websockets || endpoints.filter(u => /^wss?:\/\//i.test(u))
+  const urls = nw.urls || endpoints.filter(u => !/^wss?:\/\//i.test(u))
+  const domains = nw.domains || []
+  const ta = nw.trust_anchors || {}
+  const nscPresent = nw.network_security_config ?? nc.present
+  const cleartext = nw.cleartext_enabled ?? sum.cleartext_global
+  const pinning = nw.pinning_detected ?? sum.has_pinning
 
   return (
     <div>
       <div className="ws-section__head"><h1>Network</h1></div>
       <div className="ws-metrics ws-section">
-        <Metric label="Network Security Config" value={nc.present ? 'Present' : 'Default'} />
-        <Metric label="Cleartext" value={sum.cleartext_global ? 'Permitted' : 'Restricted'} />
-        <Metric label="Cert Pinning" value={sum.has_pinning ? `${sum.pinned_domain_count || 0} domain(s)` : 'None'} />
-        <Metric label="User CAs" value={sum.user_ca_trusted ? 'Trusted' : 'Not trusted'} />
+        <Metric label="Network Security Config" value={nscPresent ? 'Present' : 'Default'} />
+        <Metric label="Cleartext" value={cleartext ? 'Permitted' : 'Restricted'} />
+        <Metric label="Cert Pinning" value={pinning ? 'Detected' : 'None'} />
+        <Metric label="Domains" value={domains.length} />
         <Metric label="Endpoints" value={urls.length} />
         <Metric label="WebSockets" value={ws.length} />
       </div>
+
+      {(ta.system !== undefined || (ta.custom || []).length || domains.length) ? (
+        <div className="ws-two ws-section">
+          <div className="ws-card ws-card--pad">
+            <h2>Trust Anchors</h2>
+            <div className="ws-assess">
+              <AssessRow ok={ta.system !== false} good="System CAs trusted (standard)" bad="System CAs not trusted" />
+              <AssessRow ok={!ta.user} good="User CAs not trusted" bad="User CAs trusted (MITM risk)" />
+              {(ta.custom || []).length ? <div className="ws-mcontrol">Custom anchors: {ta.custom.join(', ')}</div> : null}
+            </div>
+          </div>
+          <div className="ws-card ws-card--pad">
+            <h2>Domains</h2>
+            <div className="ws-scroll">{domains.slice(0, 60).map((d, i) => <div key={i} className="ws-mono" style={{ fontSize: 12.5, padding: '3px 0' }}>{d}</div>)}{!domains.length ? <p className="ws-muted">None extracted.</p> : null}</div>
+          </div>
+        </div>
+      ) : null}
 
       <div className="ws-section">
         <h2>Network Findings</h2>

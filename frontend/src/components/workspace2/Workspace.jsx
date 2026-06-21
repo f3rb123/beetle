@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   LayoutDashboard, ShieldAlert, GitBranch, KeyRound, ShieldCheck, FileCode2,
   Download, Search, ChevronLeft, Command, ScrollText, Network, Fingerprint,
-  Boxes, Cpu, Bug, GitCompare, Sparkles, FolderTree,
+  Boxes, Cpu, Bug, GitCompare, Sparkles, FolderTree, Lock, ShieldHalf, Workflow,
 } from 'lucide-react'
 import beetleIcon from '../../assets/beetle-icon.png'
 import {
@@ -14,6 +14,7 @@ import {
 import {
   CertificatePanel, NetworkPanel, ManifestPanel, ComponentsPanel, AndroidApiPanel,
   MalwarePanel, ComparePanel, AiAssistantPanel, CodeBrowserPanel,
+  PermissionsPanel, AndroidPosturePanel, TaintFlowPanel,
 } from './panels2.jsx'
 import { severityCounts, findingPath, useEscape } from './ui.jsx'
 
@@ -32,10 +33,13 @@ const NAV_GROUPS = [
   {
     label: 'Deep Analysis', items: [
       { id: 'manifest', label: 'Manifest', icon: ScrollText },
+      { id: 'permissions', label: 'Permissions', icon: Lock },
       { id: 'network', label: 'Network', icon: Network },
       { id: 'certificate', label: 'Certificate', icon: Fingerprint },
+      { id: 'androidsec', label: 'Android Security', icon: ShieldHalf },
       { id: 'components', label: 'Components', icon: Boxes },
       { id: 'androidapis', label: 'Android APIs', icon: Cpu },
+      { id: 'taint', label: 'Taint Flows', icon: Workflow },
       { id: 'malware', label: 'Malware Analysis', icon: Bug },
       { id: 'codebrowser', label: 'Code Browser', icon: FolderTree },
       { id: 'compare', label: 'Compare', icon: GitCompare },
@@ -191,10 +195,13 @@ export default function Workspace({ results, scanId, onOpenCode, actions }) {
             {section === 'files' && <FilesPanel results={results} onOpenCode={onOpenCode} />}
             {section === 'exports' && <ExportsPanel actions={actions} results={results} />}
             {section === 'manifest' && <ManifestPanel results={results} />}
+            {section === 'permissions' && <PermissionsPanel results={results} onOpenCode={onOpenCode} />}
             {section === 'network' && <NetworkPanel results={results} />}
             {section === 'certificate' && <CertificatePanel results={results} />}
+            {section === 'androidsec' && <AndroidPosturePanel results={results} />}
             {section === 'components' && <ComponentsPanel results={results} />}
             {section === 'androidapis' && <AndroidApiPanel results={results} onOpenCode={onOpenCode} />}
+            {section === 'taint' && <TaintFlowPanel results={results} onOpenCode={onOpenCode} />}
             {section === 'malware' && <MalwarePanel results={results} />}
             {section === 'codebrowser' && <CodeBrowserPanel results={results} scanId={scanId} onOpenCode={onOpenCode} />}
             {section === 'compare' && <ComparePanel results={results} />}
