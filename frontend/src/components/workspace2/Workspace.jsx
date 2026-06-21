@@ -5,6 +5,7 @@ import {
   LayoutDashboard, ShieldAlert, GitBranch, KeyRound, ShieldCheck, FileCode2,
   Download, Search, ChevronLeft, Command, ScrollText, Network, Fingerprint,
   Boxes, Cpu, Bug, GitCompare, Sparkles, FolderTree, Lock, ShieldHalf, Workflow,
+  Briefcase, Wrench,
 } from 'lucide-react'
 import beetleIcon from '../../assets/beetle-icon.png'
 import {
@@ -15,6 +16,7 @@ import {
   CertificatePanel, NetworkPanel, ManifestPanel, ComponentsPanel, AndroidApiPanel,
   MalwarePanel, ComparePanel, AiAssistantPanel, CodeBrowserPanel,
   PermissionsPanel, AndroidPosturePanel, TaintFlowPanel,
+  CisoSummaryPanel, DeveloperGuidePanel,
 } from './panels2.jsx'
 import { severityCounts, findingPath, useEscape } from './ui.jsx'
 
@@ -28,6 +30,12 @@ const NAV_GROUPS = [
       { id: 'masvs', label: 'MASVS Coverage', icon: ShieldCheck },
       { id: 'files', label: 'Files', icon: FileCode2 },
       { id: 'exports', label: 'Exports', icon: Download },
+    ],
+  },
+  {
+    label: 'Audience Reports', items: [
+      { id: 'ciso', label: 'CISO Summary', icon: Briefcase },
+      { id: 'developer', label: 'Developer Guide', icon: Wrench },
     ],
   },
   {
@@ -115,6 +123,7 @@ export default function Workspace({ results, scanId, onOpenCode, actions }) {
       secrets: (results.secrets || []).length,
       masvs: (results.masvs_coverage || []).length,
       files: new Set(findings.map(findingPath).filter(Boolean)).size,
+      developer: (results.developer_summary?.groups || []).length,
     }
   }, [results])
 
@@ -192,6 +201,8 @@ export default function Workspace({ results, scanId, onOpenCode, actions }) {
             {section === 'chains' && <ChainsPanel results={results} />}
             {section === 'secrets' && <SecretsPanel results={results} />}
             {section === 'masvs' && <MasvsPanel results={results} />}
+            {section === 'ciso' && <CisoSummaryPanel results={results} onOpenSection={setSection} />}
+            {section === 'developer' && <DeveloperGuidePanel results={results} onOpenCode={onOpenCode} />}
             {section === 'files' && <FilesPanel results={results} onOpenCode={onOpenCode} />}
             {section === 'exports' && <ExportsPanel actions={actions} results={results} />}
             {section === 'manifest' && <ManifestPanel results={results} />}

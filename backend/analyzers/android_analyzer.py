@@ -898,6 +898,16 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     score_started = time.perf_counter()
     results["score"] = calculate_score(results)
     _record_module_metric(results, "security_scoring", score_started, score=results.get("score", {}).get("score"))
+
+    # ── Phase 11.95: audience-targeted report summaries (CISO + developer) ──
+    # Reuse-only rollups; must run AFTER scoring + masvs_intel so they read the
+    # final score, severity summary, masvs maturity and attack chains.
+    try:
+        from report import report_summaries
+        report_summaries.annotate(results)
+    except Exception:
+        log.exception("[report_summaries] failed; executive summaries not emitted")
+
     results["scan_metrics"]["summary"]["total_duration_ms"] = int((time.perf_counter() - overall_started) * 1000)
     results["scan_metrics"]["summary"]["module_count"] = len(results.get("scan_metrics", {}).get("modules", {}))
 

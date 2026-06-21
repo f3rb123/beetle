@@ -6,6 +6,7 @@ import {
   ArrowUpRight, FileCode2, KeyRound, ShieldAlert, Boxes, ExternalLink,
   ChevronRight, Layers, Download, FileJson, GitBranch, ShieldCheck,
   ScrollText, Network, Fingerprint, Cpu, Bug, Sparkles, GitCompare,
+  Briefcase, Wrench,
 } from 'lucide-react'
 import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer } from 'recharts'
 import {
@@ -47,6 +48,7 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCod
 
       {/* Metric strip */}
       <div className="ws-metrics ws-section">
+        {results.ciso_summary?.risk_rating ? <Metric label="Risk Rating" value={results.ciso_summary.risk_rating} sub="business risk" /> : null}
         <Metric label="Trust Score" value={`${trust.score ?? '—'}`} rating={trust.rating} />
         <Metric label="Security Score" value={<>{score.score ?? '—'}<small>/100</small></>} sub={score.grade ? `Grade ${score.grade}` : ''} />
         <Metric label="Source Resolution" value={`${res.source_resolution_pct ?? '—'}%`} sub="findings located" />
@@ -177,6 +179,7 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCod
         <h2>Deep Analysis</h2>
         <div className="ws-launcher">
           {[
+            ['ciso', 'CISO Summary', Briefcase], ['developer', 'Developer Guide', Wrench],
             ['manifest', 'Manifest', ScrollText], ['network', 'Network', Network],
             ['certificate', 'Certificate', Fingerprint], ['components', 'Components', Boxes],
             ['androidapis', 'Android APIs', Cpu], ['malware', 'Malware', Bug],

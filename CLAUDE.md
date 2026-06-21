@@ -140,7 +140,9 @@ The JWT is currently stored in `localStorage` on the frontend (`frontend/src/lib
 
 ### Frontend section model
 
-The workspace (`/scans/:scanId/:sectionId`) is driven by `frontend/src/lib/scan-data.js`, which defines all ~30 section IDs grouped into: Overview, Evidence, Attack Surface, Hardening, Intelligence, Data Flow, and iOS Deep Analysis. `SectionViews.jsx` renders the appropriate component for each `sectionId`. Adding a new backend result field requires: a new section entry in `SECTION_GROUPS`, a new case in `SectionViews.jsx`, and a new API field in the `results_json` dict.
+The active workspace is `frontend/src/components/workspace2/Workspace.jsx` (the "Phase 13 Explainable Security Workspace"). It defines its own `NAV_GROUPS` and dispatches each section to a panel in `panels.jsx` (Overview, Findings, Chains, Secrets, MASVS, Files, Exports + the CISO/Developer audience reports) or `panels2.jsx` (deep-analysis pages). Shared atoms/helpers live in `workspace2/ui.jsx` and styles in `frontend/src/styles/workspace.css` (the `ws-*` namespace). To add a section: add an item to `NAV_GROUPS`, render its panel in the `Workspace.jsx` section dispatch, and (optionally) wire a sidebar count in the `counts` memo.
+
+> NOTE: `frontend/src/components/workspace/SectionViews.jsx` and the `SECTION_GROUPS` in `frontend/src/lib/scan-data.js` are the **legacy** workspace. `Results.jsx` still imports `SectionViews` but does not render it (dead import) — it renders `<Workspace>` instead. Do not edit `SectionViews.jsx` expecting UI changes; it is tree-shaken out of the build.
 
 ### Adding a new analyzer
 

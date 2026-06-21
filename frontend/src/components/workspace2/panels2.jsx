@@ -1204,3 +1204,173 @@ export function CodeBrowserPanel({ results, scanId, onOpenCode }) {
     </div>
   )
 }
+
+// ───────────────────────────── CISO Summary ──────────────────────────────
+// Phase 11.95 Task 3 — business-level posture from results.ciso_summary
+// (deterministic backend rollup; no fabricated content).
+const RISK_RATING_COLOR = { Critical: '#7f1d1d', High: '#dc2626', Medium: '#ea8600', Low: '#3b82f6' }
+const PRIORITY_COLOR = { P0: '#7f1d1d', P1: '#dc2626', P2: '#ea8600', P3: '#3b82f6' }
+
+export function CisoSummaryPanel({ results, onOpenSection }) {
+  const ciso = results.ciso_summary || {}
+  const score = results.score || {}
+  if (!ciso.overall_posture) {
+    return <EmptyState title="CISO summary unavailable" body="This scan predates executive summary generation. Re-run the scan to populate it." />
+  }
+  const mat = ciso.security_maturity || {}
+  const matLevel = mat.label === 'strong' ? 'strong' : mat.label === 'moderate' ? 'moderate' : 'weak'
+  const rrColor = RISK_RATING_COLOR[ciso.risk_rating] || '#6b7280'
+
+  return (
+    <div>
+      <div className="ws-section__head"><h1>CISO Summary</h1>
+        <span className="ws-rating" style={{ background: rrColor, color: '#fff' }}>{ciso.risk_rating} risk</span></div>
+
+      <div className="ws-metrics ws-section">
+        <Metric label="Risk Rating" value={ciso.risk_rating || '—'} />
+        <Metric label="Security Grade" value={<>{ciso.security_grade ?? score.grade ?? '—'}</>} sub={score.score != null ? `${score.score}/100` : ''} />
+        <Metric label="Security Maturity" value={mat.label || '—'} sub={mat.score != null ? `${mat.score}/100 MASVS` : ''} />
+        {ciso.trust_score != null ? <Metric label="Report Trust" value={`${ciso.trust_score}/100`} sub="evidence quality" /> : null}
+      </div>
+
+      <div className="ws-card ws-card--pad ws-section">
+        <h2>Overall Posture</h2>
+        <p style={{ fontSize: 14, lineHeight: 1.6 }}>{ciso.overall_posture}</p>
+        {ciso.most_critical_issue ? (
+          <div className="ws-callout" style={{ marginTop: 12, borderLeft: `3px solid ${rrColor}` }}>
+            <b>Most Critical Issue:</b> {ciso.most_critical_issue}
+          </div>
+        ) : null}
+      </div>
+
+      <div className="ws-two ws-section">
+        <div className="ws-card ws-card--pad">
+          <h2>Business Risks</h2>
+          {(ciso.business_risks || []).length ? (
+            <div className="ws-list">
+              {ciso.business_risks.map((b, i) => (
+                <div key={i} className="ws-list__row" style={{ alignItems: 'flex-start', flexDirection: 'column', gap: 3, borderTop: i ? '1px solid var(--ws-line)' : 'none' }}>
+                  <b style={{ fontSize: 13.5 }}>{b.risk}</b>
+                  <span className="ws-muted" style={{ fontSize: 12.5 }}>{b.detail}</span>
+                </div>
+              ))}
+            </div>
+          ) : <p className="ws-muted">No material business risks derived from the findings.</p>}
+        </div>
+        <div className="ws-card ws-card--pad">
+          <h2>Attack Surface Concerns</h2>
+          {(ciso.attack_surface_concerns || []).length ? (
+            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.6 }}>
+              {ciso.attack_surface_concerns.map((c, i) => <li key={i}>{c}</li>)}
+            </ul>
+          ) : <p className="ws-muted">No notable externally reachable exposure detected.</p>}
+          {(mat.strongest_controls || []).length ? (
+            <div style={{ marginTop: 14 }}>
+              <div className="ws-block__label">Strongest Controls</div>
+              {mat.strongest_controls.map(c => <div key={c} className="ws-mcontrol"><ShieldCheck size={13} style={{ color: '#067647' }} /> {c}</div>)}
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="ws-section">
+        <div className="ws-section__head"><h2>Prioritized Remediation</h2>
+          <button type="button" className="ws-btn ws-btn--sm" onClick={() => onOpenSection('findings')}>All findings <ChevronRight size={14} /></button></div>
+        <div className="ws-card ws-card--pad">
+          {(ciso.prioritized_remediation || []).length ? (
+            <div className="ws-list">
+              {ciso.prioritized_remediation.map((r, i) => (
+                <div key={i} className="ws-list__row" style={{ alignItems: 'flex-start', borderTop: i ? '1px solid var(--ws-line)' : 'none' }}>
+                  <span className="ws-rating" style={{ background: PRIORITY_COLOR[r.priority] || '#6b7280', color: '#fff', flex: 'none' }}>{r.priority}</span>
+                  <span className="ws-list__grow">
+                    <span className="ws-list__title">{r.item}</span>
+                    <span className="ws-list__why">{r.action}</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : <p className="ws-muted">No critical or high-severity remediation items identified.</p>}
+        </div>
+      </div>
+
+      <button type="button" className="ws-btn ws-btn--sm" onClick={() => onOpenSection('masvs')}>View MASVS posture <ChevronRight size={14} /></button>
+    </div>
+  )
+}
+
+// ───────────────────────────── Developer Guide ───────────────────────────
+// Phase 11.95 Task 4 — findings grouped by engineering area from
+// results.developer_summary, each with what/why/fix/code example.
+export function DeveloperGuidePanel({ results, onOpenCode }) {
+  const dev = results.developer_summary || {}
+  const groups = dev.groups || []
+  const [open, setOpen] = useState(() => (groups[0] ? { [groups[0].area]: true } : {}))
+  if (!groups.length) {
+    return <EmptyState title="No developer-actionable groups" body="No findings mapped to engineering areas in this scan." />
+  }
+
+  return (
+    <div>
+      <div className="ws-section__head"><h1>Developer Guide</h1>
+        <span className="ws-muted">{dev.covered_findings || 0} findings · {groups.length} areas</span></div>
+      <p className="ws-muted" style={{ fontSize: 13, marginBottom: 14 }}>
+        Findings grouped by engineering area. Each group explains what was found, why it is dangerous, and how to fix it — ordered by priority.
+      </p>
+
+      <div className="ws-toolbar" style={{ flexWrap: 'wrap' }}>
+        {groups.map(g => (
+          <button key={g.area} type="button" className="ws-chip" onClick={() => { setOpen(o => ({ ...o, [g.area]: true })); document.getElementById(`devg-${g.area}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }}>
+            {g.area} <span className="ws-muted">{g.count}</span>
+          </button>
+        ))}
+      </div>
+
+      {groups.map(g => {
+        const isOpen = !!open[g.area]
+        const sev = normSev(g.max_severity)
+        return (
+          <div key={g.area} id={`devg-${g.area}`} className="ws-card ws-section" style={{ overflow: 'hidden' }}>
+            <button type="button" className="ws-fcard" style={{ width: '100%', background: 'none', border: 'none', textAlign: 'left', cursor: 'pointer', borderRadius: 0 }}
+              onClick={() => setOpen(o => ({ ...o, [g.area]: !o[g.area] }))}>
+              <span className="ws-fcard__sev" style={{ background: SEV_COLOR[sev] }} />
+              <div className="ws-fcard__body">
+                <div className="ws-fcard__meta">
+                  <SeverityTag severity={sev} />
+                  <span className="ws-rating" style={{ background: PRIORITY_COLOR[g.priority] || '#6b7280', color: '#fff' }}>{g.priority}</span>
+                  <SoftTag>{g.count} issue{g.count !== 1 ? 's' : ''}</SoftTag>
+                  {g.masvs ? <SoftTag>{g.masvs}</SoftTag> : null}
+                </div>
+                <div className="ws-fcard__title">{g.area} — {g.blurb}</div>
+              </div>
+              <ChevronRight size={16} className="ws-muted" style={{ transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform .15s', alignSelf: 'center', marginRight: 12 }} />
+            </button>
+
+            {isOpen ? (
+              <div style={{ padding: '4px 16px 16px' }}>
+                <div className="ws-block">
+                  <div className="ws-block__label">What Was Found</div>
+                  <div className="ws-list">
+                    {(g.what_found || []).map((w, i) => (
+                      <div key={i} className="ws-list__row" style={{ borderTop: i ? '1px solid var(--ws-line)' : 'none' }}>
+                        <SeverityTag severity={w.severity} compact />
+                        <span className="ws-list__grow"><span className="ws-list__title">{w.title}</span></span>
+                        {w.file ? (
+                          <button type="button" className="ws-btn ws-btn--sm" onClick={() => onOpenCode && onOpenCode(w.file, w.line ? [w.line] : [])} title={w.file}>
+                            <FileCode2 size={12} /> {String(w.file).split('/').pop()}{w.line ? `:${w.line}` : ''}
+                          </button>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                {g.why_dangerous ? <div className="ws-block"><div className="ws-block__label">Why It's Dangerous</div><p>{g.why_dangerous}</p></div> : null}
+                {g.fix ? <div className="ws-block"><div className="ws-block__label">Recommended Fix</div><p>{g.fix}</p></div> : null}
+                {g.code_example ? <div className="ws-block"><div className="ws-block__label">Secure Code Example</div><pre className="ws-code">{g.code_example}</pre></div> : null}
+              </div>
+            ) : null}
+          </div>
+        )
+      })}
+    </div>
+  )
+}

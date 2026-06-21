@@ -419,6 +419,13 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     # ── Security Score ────────────────────────────────────────────────────────
     results["score"] = calculate_score(results)
 
+    # ── Phase 11.95: audience-targeted report summaries (CISO + developer) ──
+    try:
+        from report import report_summaries
+        report_summaries.annotate(results)
+    except Exception:
+        log.exception("[report_summaries] failed; executive summaries not emitted")
+
     return results
 
 

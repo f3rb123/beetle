@@ -102,10 +102,14 @@ def generate_pdf(results: dict, output_path: str, theme: str = "light", prepared
     _cover_page(story, results, T, styles, report_author)
     story.append(PageBreak())
     _executive_summary(story, results, T, styles)
+    _ciso_summary_section(story, results, T, styles)
+    _attack_chains_section(story, results, T, styles)
     story.append(PageBreak())
     _app_info_section(story, results, T, styles)
     _permissions_section_pdf(story, results, T, styles)
     _findings_section(story, results, T, styles)
+    _developer_summary_section(story, results, T, styles)
+    _masvs_posture_section(story, results, T, styles)
     _secrets_section(story, results, T, styles)
     _endpoints_section(story, results, T, styles)
     _behavior_section(story, results, T, styles)
@@ -341,6 +345,231 @@ def _sev_desc(sev):
         "low":      "Minor issue. Address as part of normal maintenance.",
         "info":     "Informational finding. No direct security impact.",
     }.get(sev, "")
+
+
+_PRIORITY_COLORS = {
+    "P0": HexColor("#DC2626"), "P1": HexColor("#EA580C"),
+    "P2": HexColor("#D97706"), "P3": HexColor("#16A34A"),
+}
+
+
+def _maturity_color(maturity: str):
+    return {
+        "strong": HexColor("#16A34A"), "moderate": HexColor("#D97706"),
+        "weak": HexColor("#DC2626"),
+    }.get(str(maturity).lower(), HexColor("#64748B"))
+
+
+# ─── CISO Summary (Phase 11.95 Task 3) ───────────────────────────────────────
+def _ciso_summary_section(story, results, T, styles):
+    ciso = results.get("ciso_summary") or {}
+    if not ciso.get("overall_posture"):
+        return
+    story.append(PageBreak())
+    story.append(Paragraph("CISO Summary", styles["section_title"]))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
+    story.append(Spacer(1, 5 * mm))
+
+    rr = str(ciso.get("risk_rating", ""))
+    rr_color = {"Critical": SEVERITY_COLORS["critical"], "High": SEVERITY_COLORS["high"],
+                "Medium": SEVERITY_COLORS["medium"], "Low": SEVERITY_COLORS["low"]}.get(rr, T["text_sub"])
+    mat = ciso.get("security_maturity") or {}
+    story.append(Paragraph(
+        f'Overall Risk: <font color="{rr_color.hexval()}"><b>{escape(rr or "—")}</b></font>'
+        f'    Security Grade: <b>{escape(str(ciso.get("security_grade", "—")))}</b>'
+        f'    MASVS Maturity: <b>{escape(str(mat.get("label", "—")))}</b>'
+        f' ({escape(str(mat.get("score", "—")))}/100)',
+        styles["body"]))
+    story.append(Spacer(1, 3 * mm))
+    story.append(Paragraph(_safe(ciso.get("overall_posture", "")), styles["body"]))
+
+    if ciso.get("most_critical_issue"):
+        story.append(Spacer(1, 4 * mm))
+        story.append(Paragraph(
+            f'<b>Most Critical Issue:</b> {_safe(ciso["most_critical_issue"])}', styles["body"]))
+
+    # Business risks
+    risks = ciso.get("business_risks") or []
+    if risks:
+        story.append(Spacer(1, 5 * mm))
+        story.append(Paragraph("Business Risks", styles["subsection_title"]))
+        rows = [["Risk", "Why it matters"]]
+        for b in risks:
+            rows.append([
+                Paragraph(f'<b>{_safe(b.get("risk", ""))}</b>', styles["table_cell"]),
+                Paragraph(_safe(b.get("detail", "")), styles["table_cell"]),
+            ])
+        t = Table(rows, colWidths=[45 * mm, 110 * mm])
+        t.setStyle(_table_style(T))
+        story.append(t)
+
+    # Attack-surface concerns
+    concerns = ciso.get("attack_surface_concerns") or []
+    if concerns:
+        story.append(Spacer(1, 5 * mm))
+        story.append(Paragraph("Attack Surface Concerns", styles["subsection_title"]))
+        for c in concerns:
+            story.append(Paragraph(f"&bull;&nbsp; {_safe(c)}", styles["body"]))
+
+    # Prioritized remediation
+    rem = ciso.get("prioritized_remediation") or []
+    if rem:
+        story.append(Spacer(1, 5 * mm))
+        story.append(Paragraph("Prioritized Remediation", styles["subsection_title"]))
+        rows = [["#", "Item", "Action"]]
+        for r in rem:
+            pcolor = _PRIORITY_COLORS.get(r.get("priority"), T["text_sub"])
+            rows.append([
+                Paragraph(f'<font color="{pcolor.hexval()}"><b>{escape(str(r.get("priority", "")))}</b></font>', styles["table_cell"]),
+                Paragraph(f'<b>{_safe(r.get("item", ""))}</b>', styles["table_cell"]),
+                Paragraph(_safe(r.get("action", "")), styles["table_cell"]),
+            ])
+        t = Table(rows, colWidths=[14 * mm, 60 * mm, 81 * mm])
+        t.setStyle(_table_style(T))
+        story.append(t)
+    story.append(Spacer(1, 6 * mm))
+
+
+# ─── Attack Chains (Phase 11.95 Task 2) ──────────────────────────────────────
+def _attack_chains_section(story, results, T, styles):
+    chains = [c for c in ((results.get("quick_summary") or {}).get("attack_chain") or [])
+              if isinstance(c, dict)]
+    if not chains:
+        return
+    story.append(PageBreak())
+    story.append(Paragraph("Attack Chains", styles["section_title"]))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph(
+        f"{len(chains)} correlated exploit path(s) were synthesized from co-occurring findings. "
+        "Each chain links an entry point, an exploitable weakness and a concrete impact.",
+        styles["body"]))
+    story.append(Spacer(1, 4 * mm))
+
+    for idx, chain in enumerate(chains, 1):
+        sev = str(chain.get("severity", "high"))
+        scolor = SEVERITY_COLORS.get(sev, SEVERITY_COLORS["high"])
+        block = [
+            Paragraph(
+                f'{idx}. <font color="{scolor.hexval()}"><b>{_safe(chain.get("title", "Attack Chain"))}</b></font>'
+                + (f'  ({int(chain["exploitability"])}% exploitable)' if chain.get("exploitability") is not None else "")
+                + (f'  &middot; {escape(str(chain.get("chain_confidence")))} confidence' if chain.get("chain_confidence") else ""),
+                styles["finding_title"]),
+        ]
+        if chain.get("narrative"):
+            block.append(Spacer(1, 2 * mm))
+            block.append(Paragraph(_safe(chain["narrative"]), styles["table_cell"]))
+        if chain.get("impact"):
+            block.append(Spacer(1, 1.5 * mm))
+            block.append(Paragraph(f'<b>Impact:</b> {_safe(chain["impact"])}', styles["table_cell"]))
+        prereq = chain.get("prerequisites") or []
+        if prereq:
+            block.append(Paragraph(f'<b>Prerequisites:</b> {_safe("; ".join(str(p) for p in prereq))}', styles["table_cell"]))
+        std = [f"OWASP {o}" for o in (chain.get("owasp") or [])] + list(chain.get("masvs") or [])
+        if std:
+            block.append(Paragraph(f'<b>Standards:</b> {escape(", ".join(std))}', styles["table_cell"]))
+        steps = chain.get("steps") or []
+        if steps:
+            rows = [["Step", "Severity", "Type"]]
+            for s in steps:
+                ssev = str(s.get("severity", "info"))
+                rows.append([
+                    Paragraph(_safe(s.get("title", "")), styles["table_cell"]),
+                    Paragraph(f'<font color="{SEVERITY_COLORS.get(ssev, SEVERITY_COLORS["info"]).hexval()}"><b>{ssev.upper()}</b></font>', styles["table_cell"]),
+                    Paragraph(escape(str(s.get("type", "")).replace("_", " ")), styles["table_cell"]),
+                ])
+            t = Table(rows, colWidths=[95 * mm, 28 * mm, 32 * mm])
+            t.setStyle(_table_style(T))
+            block.append(Spacer(1, 2 * mm))
+            block.append(t)
+        story.append(KeepTogether(block))
+        story.append(Spacer(1, 5 * mm))
+
+
+# ─── MASVS Posture (Phase 11.95 Task 5) ──────────────────────────────────────
+def _masvs_posture_section(story, results, T, styles):
+    coverage = results.get("masvs_coverage") or []
+    summary = results.get("masvs_summary") or {}
+    if not coverage:
+        return
+    story.append(PageBreak())
+    story.append(Paragraph("MASVS Posture", styles["section_title"]))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
+    story.append(Spacer(1, 4 * mm))
+
+    overall = summary.get("overall_score", 0)
+    ocolor = _maturity_color(summary.get("overall_maturity"))
+    story.append(Paragraph(
+        f'Overall MASVS coverage: <font color="{ocolor.hexval()}"><b>{overall}/100</b></font> '
+        f'({escape(str(summary.get("overall_maturity", "")))}). '
+        f'Weakest area: <b>{escape(str(summary.get("weakest_category", "n/a")))}</b>. '
+        f'{len(summary.get("strong_controls") or [])} positive control(s) detected.',
+        styles["body"]))
+    story.append(Spacer(1, 4 * mm))
+
+    rows = [["Category", "Coverage", "Maturity", "Missing Controls"]]
+    for c in coverage:
+        mcolor = _maturity_color(c.get("maturity"))
+        missing = ", ".join(c.get("controls_missing") or []) or "—"
+        rows.append([
+            Paragraph(f'<b>{escape(str(c.get("category", "")))}</b>', styles["table_cell"]),
+            Paragraph(f'{c.get("score", 0)}/100', styles["table_cell"]),
+            Paragraph(f'<font color="{mcolor.hexval()}"><b>{escape(str(c.get("maturity", "")).title())}</b></font>', styles["table_cell"]),
+            Paragraph(_safe(missing), styles["table_cell"]),
+        ])
+    t = Table(rows, colWidths=[38 * mm, 22 * mm, 25 * mm, 70 * mm])
+    t.setStyle(_table_style(T))
+    story.append(t)
+
+    strong = summary.get("strong_controls") or []
+    if strong:
+        story.append(Spacer(1, 4 * mm))
+        story.append(Paragraph(f'<b>Strong controls:</b> {_safe(", ".join(strong))}', styles["body"]))
+    story.append(Spacer(1, 6 * mm))
+
+
+# ─── Developer Remediation Guide (Phase 11.95 Task 4) ────────────────────────
+def _developer_summary_section(story, results, T, styles):
+    dev = results.get("developer_summary") or {}
+    groups = dev.get("groups") or []
+    if not groups:
+        return
+    story.append(PageBreak())
+    story.append(Paragraph("Developer Remediation Guide", styles["section_title"]))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph(
+        "Findings grouped by engineering area. Each group lists what was found, why it is "
+        "dangerous, and how to fix it.", styles["body"]))
+    story.append(Spacer(1, 4 * mm))
+
+    for g in groups:
+        pcolor = _PRIORITY_COLORS.get(g.get("priority"), T["text_sub"])
+        scolor = SEVERITY_COLORS.get(str(g.get("max_severity")), T["text_sub"])
+        block = [
+            Paragraph(
+                f'<font color="{scolor.hexval()}"><b>{escape(str(g.get("area", "")))}</b></font>'
+                f'  <font color="{pcolor.hexval()}"><b>[{escape(str(g.get("priority", "")))}]</b></font>'
+                f'  &middot; {g.get("count", 0)} issue(s)'
+                + (f'  &middot; {escape(str(g.get("masvs")))}' if g.get("masvs") else ""),
+                styles["finding_title"]),
+            Spacer(1, 1.5 * mm),
+        ]
+        found = g.get("what_found") or []
+        if found:
+            items = "; ".join(
+                f'{f.get("title", "")}' + (f' ({str(f.get("file","")).split("/")[-1]}:{f.get("line")})' if f.get("file") and f.get("line") else "")
+                for f in found[:5])
+            block.append(Paragraph(f'<b>Found:</b> {_safe(items)}', styles["table_cell"]))
+        if g.get("why_dangerous"):
+            block.append(Paragraph(f'<b>Why dangerous:</b> {_safe(g["why_dangerous"])}', styles["table_cell"]))
+        if g.get("fix"):
+            block.append(Paragraph(f'<b>Fix:</b> {_safe(g["fix"])}', styles["table_cell"]))
+        if g.get("code_example"):
+            block.append(Spacer(1, 1.5 * mm))
+            block.append(Paragraph(f'<font face="Courier" size="7">{_safe(g["code_example"])}</font>', styles["mono"]))
+        story.append(KeepTogether(block))
+        story.append(Spacer(1, 5 * mm))
 
 
 # ─── App Info ─────────────────────────────────────────────────────────────────
