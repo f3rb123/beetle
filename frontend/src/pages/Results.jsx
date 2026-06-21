@@ -68,21 +68,64 @@ function AppAvatar({ iconData, label, platform, filename }) {
   )
 }
 
-// Locate a finding snippet within fetched file content. Returns a 1-based line
-// number or null. Matches the most distinctive snippet line to avoid false hits.
+// Locate a snippet within fetched file content. Returns { lines:[...], focus }
+// covering every consecutive snippet line that matches, or null. Matching the
+// whole snippet block (not just one line) gives a real multi-line range.
 export function locateSnippet(content, snippet) {
   if (!content || !snippet) return null
-  const lines = content.split('\n')
-  const candidates = String(snippet)
-    .split('\n')
-    .map(s => s.trim())
-    .filter(s => s.length > 6)
-    .sort((a, b) => b.length - a.length)
-  for (const c of candidates) {
-    const idx = lines.findIndex(l => l.includes(c))
+  const fileLines = content.split('\n')
+  const snipLines = String(snippet).split('\n').map(s => s.trim()).filter(s => s.length > 4)
+  if (!snipLines.length) return null
+  // Anchor on the most distinctive snippet line, then extend to neighbours.
+  const anchor = [...snipLines].sort((a, b) => b.length - a.length)[0]
+  const idx = fileLines.findIndex(l => l.includes(anchor))
+  if (idx < 0) return null
+  const matched = new Set([idx + 1])
+  for (const sl of snipLines) {
+    const j = fileLines.findIndex(l => l.includes(sl))
+    if (j >= 0 && Math.abs(j - idx) <= snipLines.length + 2) matched.add(j + 1)
+  }
+  const lines = [...matched].sort((a, b) => a - b)
+  return { lines, focus: idx + 1 }
+}
+
+// Find the 1-based line of the first occurrence of any needle (case-sensitive).
+function locateToken(content, needles) {
+  if (!content) return null
+  const fileLines = content.split('\n')
+  for (const n of (Array.isArray(needles) ? needles : [needles])) {
+    if (!n || String(n).length < 3) continue
+    const idx = fileLines.findIndex(l => l.includes(n))
     if (idx >= 0) return idx + 1
   }
   return null
+}
+
+// Deterministic line-resolution chain (Phase 11.86 Task 2). Given fetched file
+// content and an evidence entry, return { lines, focus, approximate, strategy }.
+// Never fabricates an exact line: anything past declared lines is flagged
+// approximate. Order: declared → snippet → class-name → method/title → line 1.
+export function resolveEvidenceLines(content, ev = {}) {
+  const declared = (ev.lines || []).filter(Boolean)
+  if (declared.length) return { lines: declared, focus: ev.highlightLine || declared[0], approximate: false, strategy: ev.source || 'declared' }
+
+  if (ev.snippet) {
+    const hit = locateSnippet(content, ev.snippet)
+    if (hit) return { ...hit, approximate: true, strategy: 'snippet match' }
+  }
+  if (ev.className) {
+    const ln = locateToken(content, [`class ${ev.className}`, `interface ${ev.className}`, `object ${ev.className}`, ev.className])
+    if (ln) return { lines: [ln], focus: ln, approximate: true, strategy: 'class-name match' }
+  }
+  if (ev.methodName) {
+    const ln = locateToken(content, [`${ev.methodName}(`, ev.methodName])
+    if (ln) return { lines: [ln], focus: ln, approximate: true, strategy: 'method-name match' }
+  }
+  if ((ev.titleKeywords || []).length) {
+    const ln = locateToken(content, ev.titleKeywords)
+    if (ln) return { lines: [ln], focus: ln, approximate: true, strategy: 'title-keyword match' }
+  }
+  return { lines: [1], focus: 1, approximate: true, strategy: 'file start (no anchor)' }
 }
 
 function WorkspaceCodeModal({ state, onClose, onNavigate }) {
@@ -97,6 +140,7 @@ function WorkspaceCodeModal({ state, onClose, onNavigate }) {
           content={state.content}
           language={state.language}
           highlightedLines={state.lines}
+          focusLine={state.focus}
           approximate={state.approximate}
           evidenceSource={state.source}
           evidence={state.evidence}
@@ -796,6 +840,7 @@ export default function Results() {
     content: '',
     language: 'txt',
     lines: [],
+    focus: null,
     loading: false,
     error: '',
     meta: '',
@@ -961,6 +1006,8 @@ export default function Results() {
     }))
   }, [visibleGroups])
 
+  // opts: { lines, snippet, className, methodName, titleKeywords, highlightLine,
+  //         source, approximate, evidence, index }
   const openCode = async (path, lines = [], opts = {}) => {
     if (!path || !scanId) return
 
@@ -968,6 +1015,7 @@ export default function Results() {
       open: true,
       path,
       lines,
+      focus: opts.highlightLine || (lines || [])[0] || null,
       language: inferLanguage(path),
       approximate: !!opts.approximate,
       source: opts.source || '',
@@ -981,25 +1029,28 @@ export default function Results() {
       if (!response.ok) throw new Error(response.status === 404 ? 'Source file not available for this scan.' : 'Unable to open source file.')
       const content = await response.text()
 
-      // Task 5 line fallback: when no explicit line, locate the snippet in the
-      // file; failing that, approximate to the first line. Never leave it blank.
-      let resolved = (lines || []).filter(Boolean)
-      let approximate = !!opts.approximate
-      if (!resolved.length && opts.snippet) {
-        const found = locateSnippet(content, opts.snippet)
-        if (found) { resolved = [found]; approximate = true }
-      }
-      if (!resolved.length) { resolved = [1]; approximate = true }
+      // Deterministic resolution chain (declared → snippet → class → method →
+      // title → line 1). Never fabricates an exact line; non-declared is ≈approx.
+      const r = resolveEvidenceLines(content, {
+        lines: (lines || []).filter(Boolean),
+        highlightLine: opts.highlightLine,
+        snippet: opts.snippet,
+        className: opts.className,
+        methodName: opts.methodName,
+        titleKeywords: opts.titleKeywords,
+        source: opts.source,
+      })
 
-      const lineLabel = resolved.join(', ')
+      const span = r.lines.length > 1 ? `${r.lines[0]}–${r.lines[r.lines.length - 1]}` : `${r.lines[0]}`
       setCodeState({
         ...base,
-        lines: resolved,
-        approximate,
+        lines: r.lines,
+        focus: r.focus,
+        approximate: r.approximate,
         content,
         loading: false,
         error: '',
-        meta: `${approximate ? '≈ line' : 'Line'} ${lineLabel}${opts.source ? ` · ${opts.source}` : ''}`,
+        meta: `${r.approximate ? '≈ lines' : 'Lines'} ${span}${opts.source ? ` · ${opts.source}` : ''}${r.approximate ? ` · ${r.strategy}` : ''}`,
       })
     } catch (openError) {
       setCodeState({
@@ -1077,7 +1128,11 @@ export default function Results() {
         onNavigate={i => {
           const ev = (codeState.evidence || [])[i]
           if (!ev) return
-          openCode(ev.path, ev.lines, { snippet: ev.snippet, source: ev.source, approximate: ev.approximate, evidence: codeState.evidence, index: i })
+          openCode(ev.path, ev.lines, {
+            snippet: ev.snippet, source: ev.source, approximate: ev.approximate,
+            highlightLine: ev.highlightLine, className: ev.className, methodName: ev.methodName,
+            titleKeywords: ev.titleKeywords, evidence: codeState.evidence, index: i,
+          })
         }}
       />
       {exportOpen ? <ExportModal results={results} onClose={() => setExportOpen(false)} /> : null}

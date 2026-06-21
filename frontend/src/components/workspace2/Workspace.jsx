@@ -187,8 +187,8 @@ export default function Workspace({ results, scanId, onOpenCode, actions }) {
           </header>
 
           <div className="ws-content" ref={scrollRef}>
-            {section === 'overview' && <OverviewPanel results={results} onOpenSection={setSection} onOpenFinding={openFinding} />}
-            {section === 'findings' && <FindingsPanel results={results} onOpenFinding={openFinding} />}
+            {section === 'overview' && <OverviewPanel results={results} onOpenSection={setSection} onOpenFinding={openFinding} onOpenCode={onOpenCode} />}
+            {section === 'findings' && <FindingsPanel results={results} onOpenFinding={openFinding} onOpenCode={onOpenCode} />}
             {section === 'chains' && <ChainsPanel results={results} />}
             {section === 'secrets' && <SecretsPanel results={results} />}
             {section === 'masvs' && <MasvsPanel results={results} />}

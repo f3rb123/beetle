@@ -10,11 +10,12 @@ import {
 import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer } from 'recharts'
 import {
   SEV_ORDER, SEV_RANK, SEV_COLOR, normSev, SeverityTag, SoftTag, EmptyState, Metric,
-  severityCounts, ownershipLabel, confidenceLabel, findingPath, findingLines, buildEvidence, useEscape,
+  severityCounts, ownershipLabel, confidenceLabel, findingPath, findingLines, buildEvidence,
+  evidenceUnavailableReason, useEscape,
 } from './ui.jsx'
 
 // ───────────────────────────── Overview ──────────────────────────────────
-export function OverviewPanel({ results, onOpenSection, onOpenFinding }) {
+export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCode }) {
   const info = results.app_info || {}
   const score = results.score || {}
   const trust = results.trust_score || {}
@@ -29,7 +30,8 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding }) {
   const version = info.version_name || info.version || info.bundle_version || '—'
 
   const topRisks = analyst.top_risks || []
-  const topChain = (analyst.most_exploitable_chains || [])[0] || chains[0]
+  const allChains = [...chains, ...findings.filter(f => f.is_attack_chain)]
+  const topChain = (analyst.most_exploitable_chains || [])[0] || allChains[0]
 
   return (
     <div>
@@ -53,25 +55,6 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding }) {
         <Metric label="Secrets" value={secretsSum.total_application_secrets ?? (results.secrets || []).length} sub={`${secretsSum.suppressed_sdk_secrets ?? 0} SDK suppressed`} />
       </div>
 
-      {/* Workspace launcher (Task 11) */}
-      <div className="ws-section">
-        <h2>Deep Analysis</h2>
-        <div className="ws-launcher">
-          {[
-            ['manifest', 'Manifest', ScrollText], ['network', 'Network', Network],
-            ['certificate', 'Certificate', Fingerprint], ['components', 'Components', Boxes],
-            ['androidapis', 'Android APIs', Cpu], ['malware', 'Malware', Bug],
-            ['ai', 'AI Assistant', Sparkles], ['compare', 'Compare', GitCompare],
-          ].map(([id, label, Icon]) => (
-            <button key={id} type="button" className="ws-launch" onClick={() => onOpenSection(id)}>
-              <Icon size={18} className="ws-muted" />
-              <span>{label}</span>
-              <ChevronRight size={14} className="ws-muted" style={{ marginLeft: 'auto' }} />
-            </button>
-          ))}
-        </div>
-      </div>
-
       {/* Risk summary */}
       <div className="ws-card ws-card--pad ws-section">
         <h2>Risk Summary</h2>
@@ -90,39 +73,69 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding }) {
         </div>
       </div>
 
+      {/* Two-column: scrolling main list + sticky right rail (Tasks 6/7) */}
       <div className="ws-two ws-section">
-        {/* Top risks */}
-        <div className="ws-card ws-card--pad">
-          <h2>Top Risks</h2>
-          {topRisks.length ? (
-            <div className="ws-list">
-              {topRisks.map((r, i) => (
-                <button key={i} type="button" className="ws-list__row" style={{ background: 'none', border: 'none', borderTop: i ? '1px solid var(--ws-line)' : 'none', cursor: 'pointer', textAlign: 'left', width: '100%' }}
-                  onClick={() => { const f = findings.find(x => x.title === r.title); if (f) onOpenFinding(f) }}>
-                  <SeverityTag severity={r.severity} compact />
-                  <span className="ws-list__grow">
-                    <span className="ws-list__title">{r.title}</span>
-                    {r.why ? <span className="ws-list__why">{r.why}</span> : null}
-                  </span>
-                  <ChevronRight size={15} className="ws-muted" />
-                </button>
-              ))}
+        <div className="ws-col">
+          {/* Top risks */}
+          <div className="ws-card ws-card--pad">
+            <h2>Top Risks</h2>
+            {(topRisks.length ? topRisks : null) ? (
+              <div className="ws-list">
+                {topRisks.map((r, i) => (
+                  <button key={i} type="button" className="ws-list__row" style={{ background: 'none', border: 'none', borderTop: i ? '1px solid var(--ws-line)' : 'none', cursor: 'pointer', textAlign: 'left', width: '100%' }}
+                    onClick={() => { const f = findings.find(x => x.title === r.title); if (f) onOpenFinding(f) }}>
+                    <SeverityTag severity={r.severity} compact />
+                    <span className="ws-list__grow">
+                      <span className="ws-list__title">{r.title}</span>
+                      {r.why ? <span className="ws-list__why">{r.why}</span> : null}
+                    </span>
+                    <ChevronRight size={15} className="ws-muted" />
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="ws-list">
+                {[...findings].sort((a, b) => SEV_RANK[normSev(a.severity)] - SEV_RANK[normSev(b.severity)]).slice(0, 5).map((f, i) => (
+                  <button key={i} type="button" className="ws-list__row" style={{ background: 'none', border: 'none', borderTop: i ? '1px solid var(--ws-line)' : 'none', cursor: 'pointer', textAlign: 'left', width: '100%' }} onClick={() => onOpenFinding(f)}>
+                    <SeverityTag severity={f.severity} compact />
+                    <span className="ws-list__grow"><span className="ws-list__title">{f.title}</span></span>
+                    <ChevronRight size={15} className="ws-muted" />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Recent findings (stacked cards, Task 8) */}
+          <div>
+            <div className="ws-section__head"><h2>Recent Findings</h2>
+              <button type="button" className="ws-btn ws-btn--sm" onClick={() => onOpenSection('findings')}>All findings <ChevronRight size={14} /></button></div>
+            {findings.slice(0, 6).map((f, i) => <FindingRow key={i} f={f} onOpen={() => onOpenFinding(f)} onOpenCode={onOpenCode} />)}
+          </div>
+
+          {/* Attack chains summary */}
+          {allChains.length ? (
+            <div>
+              <div className="ws-section__head"><h2>Attack Chains</h2>
+                <button type="button" className="ws-btn ws-btn--sm" onClick={() => onOpenSection('chains')}>All chains <ChevronRight size={14} /></button></div>
+              <div className="ws-card ws-card--pad">
+                {allChains.slice(0, 4).map((c, i) => (
+                  <button key={i} type="button" className="ws-list__row" style={{ background: 'none', border: 'none', borderTop: i ? '1px solid var(--ws-line)' : 'none', cursor: 'pointer', textAlign: 'left', width: '100%' }} onClick={() => onOpenSection('chains')}>
+                    <SeverityTag severity={c.severity || 'high'} compact />
+                    <span className="ws-list__grow">
+                      <span className="ws-list__title">{c.title || 'Attack Chain'}</span>
+                      {c.summary ? <span className="ws-list__why">{c.summary}</span> : null}
+                    </span>
+                    <ChevronRight size={15} className="ws-muted" />
+                  </button>
+                ))}
+              </div>
             </div>
-          ) : (
-            <div className="ws-list">
-              {[...findings].sort((a, b) => SEV_RANK[normSev(a.severity)] - SEV_RANK[normSev(b.severity)]).slice(0, 5).map((f, i) => (
-                <button key={i} type="button" className="ws-list__row" style={{ background: 'none', border: 'none', borderTop: i ? '1px solid var(--ws-line)' : 'none', cursor: 'pointer', textAlign: 'left', width: '100%' }} onClick={() => onOpenFinding(f)}>
-                  <SeverityTag severity={f.severity} compact />
-                  <span className="ws-list__grow"><span className="ws-list__title">{f.title}</span></span>
-                  <ChevronRight size={15} className="ws-muted" />
-                </button>
-              ))}
-            </div>
-          )}
+          ) : null}
         </div>
 
-        {/* Right column: chain + MASVS */}
-        <div className="ws-grid" style={{ gridTemplateColumns: '1fr' }}>
+        {/* Sticky right rail: Most Exploitable Chain + MASVS Posture + Strong Controls */}
+        <aside className="ws-rail">
           <div className="ws-card ws-card--pad">
             <h2>Most Exploitable Chain</h2>
             {topChain ? (
@@ -152,51 +165,78 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding }) {
                     {masvs.strong_controls.slice(0, 4).map(c => <div key={c} className="ws-mcontrol"><ShieldCheck size={13} style={{ color: '#067647' }} /> {c}</div>)}
                   </div>
                 ) : <p className="ws-muted" style={{ marginTop: 8, fontSize: 12.5 }}>No positive controls detected.</p>}
-                <button type="button" className="ws-btn" style={{ marginTop: 12 }} onClick={() => onOpenSection('masvs')}>View MASVS coverage</button>
+                <button type="button" className="ws-btn ws-btn--sm" style={{ marginTop: 12 }} onClick={() => onOpenSection('masvs')}>View MASVS coverage</button>
               </>
             ) : <p className="ws-muted">MASVS coverage not available for this scan.</p>}
           </div>
-        </div>
+        </aside>
       </div>
 
-      {/* Recent findings */}
+      {/* Workspace launcher */}
       <div className="ws-section">
-        <div className="ws-section__head"><h2>Recent Findings</h2>
-          <button type="button" className="ws-btn" onClick={() => onOpenSection('findings')}>All findings <ChevronRight size={14} /></button></div>
-        {findings.slice(0, 6).map((f, i) => <FindingRow key={i} f={f} onClick={() => onOpenFinding(f)} />)}
+        <h2>Deep Analysis</h2>
+        <div className="ws-launcher">
+          {[
+            ['manifest', 'Manifest', ScrollText], ['network', 'Network', Network],
+            ['certificate', 'Certificate', Fingerprint], ['components', 'Components', Boxes],
+            ['androidapis', 'Android APIs', Cpu], ['malware', 'Malware', Bug],
+            ['ai', 'AI Assistant', Sparkles], ['compare', 'Compare', GitCompare],
+          ].map(([id, label, Icon]) => (
+            <button key={id} type="button" className="ws-launch" onClick={() => onOpenSection(id)}>
+              <Icon size={18} className="ws-muted" />
+              <span>{label}</span>
+              <ChevronRight size={14} className="ws-muted" style={{ marginLeft: 'auto' }} />
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   )
 }
 
 // ───────────────────────────── Findings ──────────────────────────────────
-function FindingRow({ f, onClick }) {
+// Stacked finding card (Phase 11.86 Task 8): severity + confidence header,
+// title, file:line, and explicit View Code / Open Finding actions.
+function FindingRow({ f, onOpen, onOpenCode }) {
   const s = normSev(f.severity)
   const conf = confidenceLabel(f)
   const own = ownershipLabel(f)
-  const path = findingPath(f)
+  const evidence = buildEvidence(f)
+  const primary = evidence[0]
+  const lineTxt = primary
+    ? (primary.lineStart && primary.lineEnd && primary.lineEnd > primary.lineStart
+        ? `:${primary.lineStart}–${primary.lineEnd}`
+        : (primary.line ? `:${primary.line}` : (primary.approximate ? ' ≈' : '')))
+    : ''
   return (
-    <div className="ws-finding" onClick={onClick} role="button" tabIndex={0}
-      onKeyDown={e => { if (e.key === 'Enter') onClick() }}>
-      <div className="ws-finding__row">
-        <span className="ws-finding__sev" style={{ background: SEV_COLOR[s] }} />
-        <div className="ws-finding__main">
-          <div className="ws-finding__title">{f.title || f.name || 'Finding'}</div>
-          <div className="ws-finding__meta">
-            <SeverityTag severity={s} />
-            {conf ? <SoftTag title="Evidence quality / confidence">{conf} conf</SoftTag> : null}
-            {own ? <SoftTag title="Ownership">{own}</SoftTag> : null}
-            {f.category ? <SoftTag>{f.category}</SoftTag> : null}
-            {path ? <span className="ws-finding__path ws-mono">{path.split('/').slice(-2).join('/')}{f.line ? `:${f.line}` : ''}</span> : null}
-          </div>
+    <div className="ws-fcard" role="button" tabIndex={0} onClick={onOpen}
+      onKeyDown={e => { if (e.key === 'Enter') onOpen() }}>
+      <span className="ws-fcard__sev" style={{ background: SEV_COLOR[s] }} />
+      <div className="ws-fcard__body">
+        <div className="ws-fcard__meta">
+          <SeverityTag severity={s} />
+          {conf ? <SoftTag title="Evidence quality / confidence">{conf} confidence</SoftTag> : null}
+          {own ? <SoftTag title="Ownership">{own}</SoftTag> : null}
+          {f.category ? <SoftTag>{f.category}</SoftTag> : null}
         </div>
-        <ChevronRight size={16} className="ws-muted" />
+        <div className="ws-fcard__title">{f.title || f.name || 'Finding'}</div>
+        {primary
+          ? <div className="ws-fcard__loc ws-mono" title={primary.path}>{primary.path.split('/').pop()}{lineTxt}</div>
+          : <div className="ws-fcard__loc ws-fcard__loc--none">No source mapping</div>}
+        <div className="ws-fcard__actions" onClick={e => e.stopPropagation()}>
+          {primary && onOpenCode ? (
+            <button type="button" className="ws-btn ws-btn--sm" onClick={() => openEvidence(primary, evidence, 0, onOpenCode)}>
+              <FileCode2 size={13} /> View Code
+            </button>
+          ) : null}
+          <button type="button" className="ws-btn ws-btn--sm" onClick={onOpen}>Open Finding</button>
+        </div>
       </div>
     </div>
   )
 }
 
-export function FindingsPanel({ results, onOpenFinding }) {
+export function FindingsPanel({ results, onOpenFinding, onOpenCode }) {
   const all = results.findings || []
   const [q, setQ] = useState('')
   const [sev, setSev] = useState('all')
@@ -230,7 +270,7 @@ export function FindingsPanel({ results, onOpenFinding }) {
       </div>
       {filtered.length ? (
         <>
-          {filtered.slice(0, limit).map((f, i) => <FindingRow key={i} f={f} onClick={() => onOpenFinding(f)} />)}
+          {filtered.slice(0, limit).map((f, i) => <FindingRow key={i} f={f} onOpen={() => onOpenFinding(f)} onOpenCode={onOpenCode} />)}
           {filtered.length > limit ? (
             <button type="button" className="ws-btn" style={{ marginTop: 12 }} onClick={() => setLimit(l => l + 80)}>
               Show {Math.min(80, filtered.length - limit)} more
@@ -279,7 +319,7 @@ export function FindingDrawer({ finding, onClose, onOpenCode }) {
             <ChainEvidenceBlock finding={f} onOpenCode={onOpenCode} />
           ) : null}
 
-          <EvidenceLocations ex={ex} finding={f} primarySnippet={snippet} onOpenCode={onOpenCode} />
+          <EvidenceLocations finding={f} onOpenCode={onOpenCode} />
 
           {ex.attack_scenario ? <Block label="Attack Scenario"><p>{ex.attack_scenario}</p></Block> : null}
           {(ex.prerequisites || []).length ? <Block label="Prerequisites"><ul>{ex.prerequisites.map((p, i) => <li key={i}>{p}</li>)}</ul></Block> : null}
@@ -308,32 +348,70 @@ function Block({ label, children }) {
   return <div className="ws-block"><div className="ws-block__label">{label}</div>{children}</div>
 }
 
-// Evidence locations (Tasks 5/6/7): unified, ordered evidence list. Each entry
-// opens the viewer scrolled to + highlighting the exact line; when the line is
-// not declared it is resolved from the snippet (≈ approximate). The whole list
-// is handed to the viewer so it can offer Prev/Next evidence navigation.
-function EvidenceLocations({ ex, finding, primarySnippet, onOpenCode }) {
+// Open the code viewer for one evidence entry, passing the full deterministic
+// resolution context (snippet/class/title hints) + the sibling list for Prev/Next.
+function openEvidence(loc, evidence, i, onOpenCode) {
+  onOpenCode(loc.path, loc.lines, {
+    snippet: loc.snippet, source: loc.source, approximate: loc.approximate,
+    highlightLine: loc.highlightLine, className: loc.className, titleKeywords: loc.titleKeywords,
+    evidence, index: i,
+  })
+}
+
+const SOURCE_LABEL = {
+  'analyst evidence': 'Analyst Evidence',
+  'code reference': 'Code Reference',
+  'finding location': 'Finding Location',
+}
+
+// Pretty line label for an evidence card: exact "84" / "82–87", or ≈approx hint.
+function evLineLabel(loc) {
+  if (loc.lineStart && loc.lineEnd && loc.lineEnd > loc.lineStart) return `${loc.lineStart}–${loc.lineEnd}`
+  if (loc.line) return `${loc.line}`
+  return loc.snippet ? '≈ resolved from snippet' : '≈ approximate'
+}
+
+// Evidence section (Phase 11.86 Tasks 1/5): structured cards with explicit
+// source, file:line, snippet, and View Code. When no source mapping exists the
+// section shows an honest "Evidence unavailable" state with the backend reason —
+// never hidden, never invented.
+function EvidenceLocations({ finding, onOpenCode }) {
   const evidence = buildEvidence(finding)
+
   if (!evidence.length) {
-    return primarySnippet
-      ? <div className="ws-block"><div className="ws-block__label">Evidence</div><pre className="ws-code">{primarySnippet}</pre></div>
-      : null
+    return (
+      <div className="ws-block">
+        <div className="ws-block__label">Evidence</div>
+        <div className="ws-evid ws-evid--none">
+          <div className="ws-evid__title">Evidence unavailable</div>
+          <div className="ws-evid__reason"><b>Reason:</b> {evidenceUnavailableReason(finding)}</div>
+        </div>
+      </div>
+    )
   }
+
   return (
     <div className="ws-block">
       <div className="ws-block__label">Evidence{evidence.length > 1 ? ` · ${evidence.length} locations` : ''}</div>
       {evidence.map((loc, i) => {
-        const lineLabel = loc.line ? `${loc.line}` : (loc.snippet ? '≈ resolved' : '≈ approx')
+        const fileName = loc.path.split('/').pop()
+        const exact = !loc.approximate
         return (
-          <div key={i} style={{ marginBottom: i < evidence.length - 1 ? 14 : 0 }}>
-            <div className="ws-mono ws-muted" style={{ marginBottom: 6 }}>
-              Evidence #{i + 1} · {loc.path}{loc.line ? `:${loc.line}` : ''} · {loc.source}
+          <div key={i} className="ws-evid">
+            <div className="ws-evid__head">
+              <span className="ws-evid__num">Evidence #{i + 1}</span>
+              <span className="ws-evid__src">{SOURCE_LABEL[loc.source] || loc.source}</span>
+            </div>
+            <div className="ws-evid__loc ws-mono" title={loc.path}>
+              {fileName}<span className="ws-evid__line">:{evLineLabel(loc)}</span>
             </div>
             {loc.snippet ? <pre className="ws-code">{loc.snippet}</pre> : null}
-            <button type="button" className="ws-btn" style={{ marginTop: 8 }}
-              onClick={() => onOpenCode(loc.path, loc.lines, { snippet: loc.snippet, source: loc.source, approximate: loc.approximate || !loc.line, evidence, index: i })}>
-              <FileCode2 size={14} /> View at line {lineLabel}
-            </button>
+            <div className="ws-evid__actions">
+              <button type="button" className="ws-btn" onClick={() => openEvidence(loc, evidence, i, onOpenCode)}>
+                <FileCode2 size={14} /> View Code
+              </button>
+              {!exact ? <span className="ws-evid__approx">Approximate line — resolved by search</span> : null}
+            </div>
           </div>
         )
       })}

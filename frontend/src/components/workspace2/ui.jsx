@@ -81,37 +81,98 @@ export function findingLines(f) {
   return []
 }
 
+// Expand an inclusive [start..end] line span into an array (capped so a bad
+// range can't explode the highlight). Returns [] when no usable span.
+function lineRange(start, end, cap = 60) {
+  const s = Number(start), e = Number(end)
+  if (!Number.isFinite(s)) return []
+  if (!Number.isFinite(e) || e < s) return [s]
+  return Array.from({ length: Math.min(e - s + 1, cap) }, (_, i) => s + i)
+}
+
+// Distinctive keyword tokens from a finding title, for last-resort file search.
+export function titleKeywords(title) {
+  const STOP = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'into', 'from', 'over',
+    'chain', 'attack', 'finding', 'issue', 'risk', 'used', 'via', 'app', 'android', 'detected',
+    'missing', 'insecure', 'exposed', 'enabled', 'disabled', 'usage', 'use', 'potential'])
+  return String(title || '')
+    .replace(/[^A-Za-z0-9_.\s-]/g, ' ')
+    .split(/\s+/)
+    .map(t => t.trim())
+    .filter(t => t.length >= 4 && !STOP.has(t.toLowerCase()))
+    .slice(0, 6)
+}
+
+// Class identifier implied by a source file path (e.g. .../PrivateActivity.java
+// → "PrivateActivity"). Used for class-name search when no line is declared.
+export function classFromPath(path) {
+  if (!path) return ''
+  const base = String(path).split('/').pop().split('\\').pop()
+  const stem = base.replace(/\.(java|kt|kts|smali|swift|m|mm|js|ts)$/i, '')
+  return /^[A-Za-z_]\w*$/.test(stem) ? stem : ''
+}
+
 // Normalize every evidence location for a finding into one ordered list so the
 // code viewer can navigate prev/next. Each entry:
-//   { path, line, lines, snippet, source, approximate }
+//   { path, line, lines, lineStart, lineEnd, highlightLine, snippet, source,
+//     approximate, className, titleKeywords }
 // `approximate` means the line was not declared and must be resolved/estimated.
 export function buildEvidence(finding) {
   const f = finding || {}
   const ex = f.analyst_explanation || {}
+  const kws = titleKeywords(f.title || f.name)
   const out = []
   const seen = new Set()
-  const push = (path, line, snippet, source, approximate) => {
+  const push = ({ path, lineStart, lineEnd, highlightLine, snippet, source }) => {
     if (!path) return
-    const key = `${path}#${line || ''}`
+    const declared = highlightLine || lineStart || null
+    const key = `${path}#${declared || ''}#${source}`
     if (seen.has(key)) return
     seen.add(key)
-    out.push({ path, line: line || null, lines: line ? [line] : [], snippet: snippet || '', source, approximate: !!approximate })
+    const lines = highlightLine && lineStart
+      ? lineRange(lineStart, lineEnd).concat(lineRange(highlightLine, highlightLine)).filter((v, i, a) => a.indexOf(v) === i).sort((a, b) => a - b)
+      : (lineStart ? lineRange(lineStart, lineEnd) : (highlightLine ? [highlightLine] : []))
+    out.push({
+      path,
+      line: declared,
+      lines,
+      lineStart: lineStart || null,
+      lineEnd: lineEnd || null,
+      highlightLine: highlightLine || null,
+      snippet: snippet || '',
+      source,
+      approximate: !declared,
+      className: classFromPath(path),
+      titleKeywords: kws,
+    })
   }
-  // 1. Analyst evidence_locations — most precise.
+  // 1. Analyst evidence_locations — most precise (carry true ranges).
   for (const l of (Array.isArray(ex.evidence_locations) ? ex.evidence_locations : [])) {
-    if (l && l.file) push(l.file, l.highlight_line || l.line_start || null, l.snippet || '', 'analyst evidence', !(l.highlight_line || l.line_start))
+    if (l && l.file) push({ path: l.file, lineStart: l.line_start, lineEnd: l.line_end, highlightLine: l.highlight_line, snippet: l.snippet, source: 'analyst evidence' })
   }
   // 2. Structured code references.
   for (const e of (Array.isArray(f.file_evidence) ? f.file_evidence : [])) {
     if (e && e.path) {
-      const ln = (e.lines && e.lines.length ? e.lines[0] : e.line) || null
-      push(e.path, ln, e.snippet || '', 'code reference', !ln)
+      const ls = (e.lines && e.lines.length) ? e.lines[0] : e.line
+      const le = (e.lines && e.lines.length) ? e.lines[e.lines.length - 1] : e.line
+      push({ path: e.path, lineStart: ls, lineEnd: le, snippet: e.snippet, source: 'code reference' })
     }
   }
   // 3. Top-level finding location.
   const p = f.file_path || f.full_path
-  if (p) push(p, f.line || f.line_number || null, f.snippet || f.code_context || '', 'finding location', !(f.line || f.line_number))
+  if (p) push({ path: p, lineStart: f.line || f.line_number, lineEnd: f.line || f.line_number, snippet: f.snippet || f.code_context, source: 'finding location' })
   return out
+}
+
+// When a finding legitimately has no source mapping, surface the backend's real
+// reason — never invent a code location. Returns a reason string, or '' when the
+// finding does have evidence.
+export function evidenceUnavailableReason(finding) {
+  const f = finding || {}
+  if (buildEvidence(f).length) return ''
+  if (f.source_unavailable_reason) return f.source_unavailable_reason
+  if (f.source_applicable === false) return 'This issue originates from manifest metadata or higher-level analysis, not a single source line.'
+  return 'No source mapping exists for this finding. This issue originates from manifest metadata or higher-level analysis.'
 }
 
 // Esc-to-close hook

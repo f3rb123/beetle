@@ -73,6 +73,7 @@ export default function CodeBlockViewer({
   content = '',
   language = 'txt',
   highlightedLines = [],
+  focusLine = null,
   approximate = false,
   evidenceSource = '',
   evidence = [],
@@ -90,7 +91,10 @@ export default function CodeBlockViewer({
   const highlightSet = useMemo(() => new Set(highlightedLines || []), [highlightedLines])
   const rowRefs = useRef(new Map())
   const codeBodyRef = useRef(null)
-  const primaryFocusLine = highlightedLines?.[0] || null
+  // Center on the explicit focus line, else the middle of the highlighted range.
+  const sortedHl = useMemo(() => [...(highlightedLines || [])].sort((a, b) => a - b), [highlightedLines])
+  const primaryFocusLine = focusLine
+    || (sortedHl.length ? sortedHl[Math.floor(sortedHl.length / 2)] : null)
   const searchMatches = useMemo(() => {
     if (!search.trim()) return []
     const query = search.toLowerCase()
@@ -189,11 +193,11 @@ export default function CodeBlockViewer({
       {(approximate || evidenceSource || evidence.length > 1) ? (
         <div className="code-viewer__evidence">
           <span className={`code-viewer__line-badge${approximate ? ' is-approx' : ''}`}>
-            {primaryFocusLine
-              ? `${approximate ? '≈ line' : 'line'} ${primaryFocusLine}`
+            {sortedHl.length
+              ? `${approximate ? '≈' : ''} ${sortedHl.length > 1 ? `lines ${sortedHl[0]}–${sortedHl[sortedHl.length - 1]}` : `line ${sortedHl[0]}`}`.trim()
               : 'line —'}
           </span>
-          {approximate ? <span className="code-viewer__approx-note">approximate — resolved from evidence snippet</span> : null}
+          {approximate ? <span className="code-viewer__approx-note">approximate — resolved by deterministic search, not a declared line</span> : null}
           {evidenceSource ? <span className="code-viewer__evsrc">source: {evidenceSource}</span> : null}
           {evidence.length > 1 && onNavigateEvidence ? (
             <div className="code-viewer__evnav">
