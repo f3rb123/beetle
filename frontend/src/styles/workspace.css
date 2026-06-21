@@ -371,3 +371,11 @@
 .ws-evid--none { background: #fffaeb; border-color: #fde68a; }
 .ws-evid__title { font-weight: 680; font-size: 13.5px; color: #b54708; margin-bottom: 4px; }
 .ws-evid__reason { font-size: 12.5px; color: var(--ws-ink-2); line-height: 1.5; }
+
+/* ── Phase 11.9 — deep-analysis page primitives ────────────────────────────── */
+.ws-permhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ws-permpkg { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.ws-pill { font-size: 10.5px; font-weight: 700; letter-spacing: 0.03em; padding: 2px 8px; border-radius: 6px; text-transform: lowercase; white-space: nowrap; }
+.ws-pill--ok { background: #ecfdf3; color: #067647; }
+.ws-pill--warn { background: #fffaeb; color: #b54708; }
+.ws-pill--risk { background: #fef3f2; color: #b42318; }

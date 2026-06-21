@@ -28,48 +28,132 @@ function Rows({ items }) {
   )
 }
 
+// ── Shared deep-analysis UI helpers (Phase 11.9) ────────────────────────────
+const RISK_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4, none: 5, normal: 5, dangerous: 1, signature: 3 }
+
+// "Show N more" pager — keeps long lists bounded but fully reachable.
+function Pager({ count, limit, setLimit, step = 50 }) {
+  if (count <= limit) return null
+  return (
+    <button type="button" className="ws-btn ws-btn--sm" style={{ marginTop: 12 }} onClick={() => setLimit(l => l + step)}>
+      Show {Math.min(step, count - limit)} more · {count - limit} remaining
+    </button>
+  )
+}
+
+// Filter chips that double as a counted segmented control.
+function Chips({ value, onChange, options }) {
+  return (
+    <>
+      {options.map(o => {
+        const id = typeof o === 'string' ? o : o.id
+        const label = typeof o === 'string' ? o : o.label
+        const n = typeof o === 'string' ? null : o.count
+        return (
+          <button key={id} type="button" className={`ws-chip${value === id ? ' is-active' : ''}`} onClick={() => onChange(id)}>
+            {label}{n !== null && n !== undefined ? <span className="ws-muted"> {n}</span> : null}
+          </button>
+        )
+      })}
+    </>
+  )
+}
+
+// Reference-grade permission → MASVS category map (deterministic, not a finding).
+const PERM_MASVS = [
+  [/LOCATION/i, 'MASVS-PRIVACY-1'],
+  [/CONTACTS|CALENDAR|SMS|CALL_LOG|READ_PHONE|PHONE_STATE|CALL/i, 'MASVS-PRIVACY-1'],
+  [/CAMERA|RECORD_AUDIO|MICROPHONE/i, 'MASVS-PRIVACY-1'],
+  [/EXTERNAL_STORAGE|MANAGE_EXTERNAL|MEDIA/i, 'MASVS-STORAGE-2'],
+  [/INTERNET|NETWORK_STATE|WIFI/i, 'MASVS-NETWORK-1'],
+  [/ACCESSIBILITY|BIND_DEVICE_ADMIN|SYSTEM_ALERT_WINDOW|REQUEST_INSTALL/i, 'MASVS-PLATFORM-1'],
+  [/BIOMETRIC|USE_FINGERPRINT/i, 'MASVS-AUTH-2'],
+]
+function permMasvs(p) { for (const [rx, m] of PERM_MASVS) if (rx.test(p)) return m; return '' }
+
+// Reference-grade Android API category → risk level (deterministic).
+const API_RISK = [
+  [/runtime|exec|command|process/i, 'high'],
+  [/reflection|dexload|dynamic|jar loading/i, 'high'],
+  [/webview/i, 'high'],
+  [/crypto|keystore|cipher|certificate/i, 'medium'],
+  [/ssl|trust/i, 'medium'],
+  [/content provider|shared preferences|sqlite/i, 'medium'],
+  [/storage|read file|write file/i, 'medium'],
+  [/location|gps|cell|contacts|camera|sms|phone|installed app|accessibility|device admin/i, 'medium'],
+  [/intent|ipc|broadcast/i, 'low'],
+  [/notification|clipboard|base64|http|network|wifi/i, 'low'],
+]
+function apiRisk(cat) { for (const [rx, r] of API_RISK) if (rx.test(cat)) return r; return 'info' }
+
 // ───────────────────────────── Permissions ───────────────────────────────
+const PROT_LABEL = { dangerous: 'Dangerous', signature: 'Signature', normal: 'Normal', unknown: 'Unknown' }
+const PROT_RISK = { dangerous: 'high', signature: 'low', normal: 'info', unknown: 'info' }
+
 export function PermissionsPanel({ results, onOpenCode }) {
-  const ws = results.permissions_workspace
-    || ((results.permissions || {}).classified || []).map(p => ({
+  // Merge the workspace view (type/desc/usage) with classified severities.
+  const classified = (results.permissions || {}).classified || []
+  const sevByPerm = {}
+  classified.forEach(p => { if (p.permission) sevByPerm[p.permission] = p.severity })
+  const base = results.permissions_workspace
+    || classified.map(p => ({
       permission: p.permission, short_name: p.short_name || (p.permission || '').split('.').pop(),
       type: p.status || 'normal', description: p.description || '', used_in_files: [], findings: [],
     }))
-  const [q, setQ] = useState('')
-  const [sort, setSort] = useState('risk')
-  const TIER = { dangerous: 0, signature: 1, unknown: 2, normal: 3 }
-  if (!ws.length) return <EmptyState title="No permissions" body="This package declared no permissions." />
+  const all = base.map(p => ({
+    ...p,
+    risk: sevByPerm[p.permission] || PROT_RISK[p.type] || 'info',
+    masvs: permMasvs(p.permission || ''),
+  }))
 
-  let rows = ws.filter(p => !q || `${p.permission} ${p.description}`.toLowerCase().includes(q.toLowerCase()))
+  const [q, setQ] = useState('')
+  const [group, setGroup] = useState('all')
+  const [sort, setSort] = useState('risk')
+  const [limit, setLimit] = useState(50)
+
+  if (!all.length) return <EmptyState title="No permissions declared" body="This package's manifest requests no permissions, so there is nothing to classify." />
+
+  const counts = all.reduce((m, p) => { m[p.type] = (m[p.type] || 0) + 1; return m }, {})
+  let rows = all.filter(p => group === 'all' || p.type === group)
+  rows = rows.filter(p => !q || `${p.permission} ${p.description} ${p.masvs}`.toLowerCase().includes(q.toLowerCase()))
   rows = [...rows].sort((a, b) => sort === 'name'
     ? (a.short_name || '').localeCompare(b.short_name || '')
-    : (TIER[a.type] ?? 2) - (TIER[b.type] ?? 2))
-  const counts = ws.reduce((m, p) => { m[p.type] = (m[p.type] || 0) + 1; return m }, {})
+    : (RISK_RANK[a.risk] ?? 4) - (RISK_RANK[b.risk] ?? 4))
 
   return (
     <div>
-      <div className="ws-section__head"><h1>Permissions</h1><span className="ws-muted">{ws.length}</span></div>
+      <div className="ws-section__head"><h1>Permissions</h1><span className="ws-muted">{all.length}</span></div>
       <div className="ws-metrics ws-section">
-        <Metric label="Total" value={ws.length} />
+        <Metric label="Total" value={all.length} />
         <Metric label="Dangerous" value={counts.dangerous || 0} />
         <Metric label="Signature" value={counts.signature || 0} />
         <Metric label="Normal" value={counts.normal || 0} />
       </div>
       <div className="ws-toolbar">
-        <input className="ws-input" placeholder="Search permissions…" value={q} onChange={e => setQ(e.target.value)} style={{ minWidth: 280 }} />
-        {['risk', 'name'].map(s => <button key={s} type="button" className={`ws-chip${sort === s ? ' is-active' : ''}`} onClick={() => setSort(s)}>Sort: {s}</button>)}
+        <input className="ws-input" placeholder="Search permissions, MASVS…" value={q} onChange={e => { setQ(e.target.value); setLimit(50) }} style={{ minWidth: 260 }} />
+        <Chips value={group} onChange={v => { setGroup(v); setLimit(50) }} options={[
+          { id: 'all', label: 'All', count: all.length },
+          { id: 'dangerous', label: 'Dangerous', count: counts.dangerous || 0 },
+          { id: 'signature', label: 'Signature', count: counts.signature || 0 },
+          { id: 'normal', label: 'Normal', count: counts.normal || 0 },
+        ]} />
+        <span className="ws-muted" style={{ marginLeft: 'auto', fontSize: 12 }}>Sort</span>
+        <Chips value={sort} onChange={setSort} options={[{ id: 'risk', label: 'Risk' }, { id: 'name', label: 'Name' }]} />
       </div>
-      {rows.map((p, i) => (
+
+      {rows.length ? rows.slice(0, limit).map((p, i) => (
         <div key={i} className="ws-card ws-card--pad" style={{ marginBottom: 8 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span className={`ws-perm ws-perm--${p.type}`}>{p.type}</span>
+          <div className="ws-permhead">
+            <span className={`ws-perm ws-perm--${p.type}`}>{PROT_LABEL[p.type] || p.type}</span>
             <b style={{ fontSize: 14 }}>{p.short_name}</b>
-            <span className="ws-mono ws-muted" style={{ fontSize: 11.5 }}>{p.permission}</span>
+            <SeverityTag severity={p.risk} compact />
+            {p.masvs ? <SoftTag title="MASVS category (reference mapping)">{p.masvs}</SoftTag> : null}
+            <span className="ws-mono ws-muted ws-permpkg" title={p.permission}>{p.permission}</span>
           </div>
           {p.description ? <p style={{ fontSize: 13, marginTop: 6 }}>{p.description}</p> : null}
           {(p.used_in_files || []).length ? (
             <div style={{ marginTop: 8 }}>
-              <div className="ws-block__label">Used in files</div>
+              <div className="ws-block__label">Used in {p.used_in_files.length} file(s)</div>
               {p.used_in_files.slice(0, 8).map((f, j) => (
                 <div key={j} className="ws-file" onClick={() => onOpenCode(f, [])}><FileCode2 size={12} className="ws-muted" /><span className="ws-file__path" title={f}>{f}</span></div>
               ))}
@@ -82,7 +166,8 @@ export function PermissionsPanel({ results, onOpenCode }) {
             </div>
           ) : null}
         </div>
-      ))}
+      )) : <EmptyState title="No matching permissions" body="No permissions match the current search/filter. Clear filters to see all." />}
+      <Pager count={rows.length} limit={limit} setLimit={setLimit} />
     </div>
   )
 }
@@ -134,25 +219,69 @@ export function AndroidPosturePanel({ results }) {
 
 // ───────────────────────────── Taint Flows ───────────────────────────────
 export function TaintFlowPanel({ results, onOpenCode }) {
-  const flows = results.taint_graph || []
-  if (!flows.length) return <EmptyState title="No taint flows" body="No source→sink data-flow paths were resolved for this scan." />
+  // Prefer taint_graph (carries file/line/risk); fall back to taint_flows.
+  const graph = results.taint_graph || []
+  const flat = (results.taint_flows || []).map(t => ({ ...t, risk: t.sink_sev || t.risk }))
+  const flows = graph.length ? graph : flat
+  const [q, setQ] = useState('')
+  const [risk, setRisk] = useState('all')
+  const [limit, setLimit] = useState(25)
+
+  if (!flows.length) return <EmptyState title="No taint flows" body="The DEX call-graph analysis resolved no source→sink data-flow paths for this package (no tainted user input reached a sensitive sink within the traversal budget)." />
+
+  const riskCounts = flows.reduce((m, t) => { const r = normSev(t.risk); m[r] = (m[r] || 0) + 1; return m }, {})
+  const ql = q.trim().toLowerCase()
+  let rows = flows.filter(t => risk === 'all' || normSev(t.risk) === risk)
+  rows = rows.filter(t => !ql || `${t.source} ${t.sink} ${t.source_cat} ${t.sink_cat} ${t.file || ''} ${t.class_name || ''}`.toLowerCase().includes(ql))
+  rows = [...rows].sort((a, b) => (RISK_RANK[normSev(a.risk)] ?? 4) - (RISK_RANK[normSev(b.risk)] ?? 4))
+
   return (
     <div>
       <div className="ws-section__head"><h1>Taint Flows</h1><span className="ws-muted">{flows.length} flow{flows.length !== 1 ? 's' : ''}</span></div>
-      {flows.map((t, i) => (
-        <div key={i} className="ws-chain">
-          <div className="ws-chain__head">
-            <SeverityTag severity={t.risk} />
-            <span className="ws-chain__title">{t.source_cat || 'source'} → {t.sink_cat || 'sink'}</span>
-            {t.file ? <button type="button" className="ws-btn" style={{ marginLeft: 'auto' }} onClick={() => onOpenCode(t.file, t.line ? [t.line] : [])}><FileCode2 size={13} /> {t.file.split('/').pop()}{t.line ? `:${t.line}` : ''}</button> : null}
-          </div>
-          <div className="ws-timeline" style={{ marginTop: 12 }}>
-            <Step kind="Source" label={t.source} />
-            {(t.call_chain || []).slice(1, -1).map((c, j) => <Step key={j} kind="Call" label={c} />)}
-            <Step kind="Sink" label={t.sink} last exposure />
-          </div>
-        </div>
-      ))}
+      <div className="ws-metrics ws-section">
+        <Metric label="Total flows" value={flows.length} />
+        <Metric label="High" value={(riskCounts.high || 0) + (riskCounts.critical || 0)} />
+        <Metric label="Medium" value={riskCounts.medium || 0} />
+        <Metric label="Low / Info" value={(riskCounts.low || 0) + (riskCounts.info || 0)} />
+      </div>
+      <div className="ws-toolbar">
+        <input className="ws-input" placeholder="Search source, sink, file…" value={q} onChange={e => { setQ(e.target.value); setLimit(25) }} style={{ minWidth: 280 }} />
+        <Chips value={risk} onChange={v => { setRisk(v); setLimit(25) }} options={[
+          { id: 'all', label: 'All' },
+          { id: 'high', label: 'High', count: riskCounts.high || 0 },
+          { id: 'medium', label: 'Medium', count: riskCounts.medium || 0 },
+          { id: 'low', label: 'Low', count: riskCounts.low || 0 },
+        ]} />
+      </div>
+
+      {rows.length ? (
+        <>
+          {rows.slice(0, limit).map((t, i) => {
+            const mids = (t.call_chain || []).slice(1, -1)
+            // `file` is sometimes a class descriptor (line 0), not a resolvable path.
+            const isPath = t.file && (/[/\\]/.test(t.file) || /\.(java|kt|kts|smali|xml)$/i.test(t.file))
+            const classLabel = t.class_name || (t.file && !isPath ? t.file : '')
+            return (
+              <div key={i} className="ws-chain">
+                <div className="ws-chain__head">
+                  <SeverityTag severity={t.risk} />
+                  <span className="ws-chain__title">{t.source_cat || 'Source'} → {t.sink_cat || 'Sink'}</span>
+                  {t.confidence ? <SoftTag title="Confidence">{t.confidence}</SoftTag> : null}
+                  {isPath ? <button type="button" className="ws-btn ws-btn--sm" style={{ marginLeft: 'auto' }} onClick={() => onOpenCode(t.file, t.line ? [t.line] : [], { source: 'taint sink', highlightLine: t.line, approximate: !t.line })}><FileCode2 size={13} /> {t.file.split('/').pop()}{t.line ? `:${t.line}` : ''}</button> : null}
+                </div>
+                {classLabel ? <div className="ws-muted ws-mono" style={{ fontSize: 12, marginTop: 4 }}>{String(classLabel).replace(/;$/, '')}{t.method_name ? `.${t.method_name}` : ''}</div> : null}
+                <div className="ws-timeline" style={{ marginTop: 12 }}>
+                  <Step kind="Source" label={t.source} />
+                  {mids.length ? mids.map((c, j) => <Step key={j} kind="Transformation" label={c} />)
+                    : <Step kind="Transformation" label="direct flow (no intermediate calls)" />}
+                  <Step kind="Sink" label={t.sink} last exposure />
+                </div>
+              </div>
+            )
+          })}
+          <Pager count={rows.length} limit={limit} setLimit={setLimit} step={25} />
+        </>
+      ) : <EmptyState title="No matching flows" body="No taint flows match the current search/filter." />}
     </div>
   )
 }
@@ -183,23 +312,41 @@ export function CertificatePanel({ results }) {
   const has = v => schemes.some(s => String(s).toLowerCase().includes(v))
   const algo = cw.algorithm || c.signature_algo
   const keySize = cw.key_size || c.key_size
+  const keyType = cw.key_type || c.key_type || ''
+  const keyAlgo = /rsa/i.test(keyType) ? 'RSA' : /ec|ecdsa|elliptic/i.test(keyType) ? 'ECC' : /dsa/i.test(keyType) ? 'DSA' : (keyType || '')
+  const md5 = cw.md5 || c.md5 || c.md5_fingerprint
   const debugCert = hasWs ? cw.debug_cert : c.debug_cert
   const expired = hasWs ? cw.expired : c.expired
   const selfSigned = hasWs ? cw.self_signed : (c.subject && c.issuer && JSON.stringify(c.subject) === JSON.stringify(c.issuer))
-  const weakAlgo = /sha1|md5/i.test(algo || '')
+  const sha1Used = /sha1/i.test(algo || '')
+  const md5Used = /md5/i.test(algo || '')
+  const weakAlgo = sha1Used || md5Used
   const smallKey = keySize && Number(keySize) < 2048
+  const rsa1024 = keyAlgo === 'RSA' && keySize && Number(keySize) <= 1024
   const janusRisk = (hasWs && cw.janus_possible !== undefined) ? cw.janus_possible
     : (c.janus_risk !== undefined ? c.janus_risk : (has('v1') && !has('v2') && !has('v3')))
   const overallVuln = (c.security_overview?.overall || '').toLowerCase() === 'vulnerable'
 
   let level = 'good'
-  if (debugCert || overallVuln || janusRisk) level = 'risk'
+  if (debugCert || overallVuln || janusRisk || md5Used || rsa1024) level = 'risk'
   else if (expired || weakAlgo || smallKey || selfSigned) level = 'warn'
 
   // Workspace subject/issuer are pre-joined strings; raw cert is an object.
   const subj = hasWs ? cw.subject : Object.entries(c.subject || {}).map(([k, v]) => `${k}=${v}`).join(', ')
   const iss = hasWs ? cw.issuer : Object.entries(c.issuer || {}).map(([k, v]) => `${k}=${v}`).join(', ')
   const certFindings = cw.findings || []
+
+  // Concrete risk summary (severity-ranked).
+  const risks = [
+    debugCert && ['high', 'Signed with a debug certificate — not production-safe and publicly known key'],
+    md5Used && ['high', 'MD5 signature algorithm — cryptographically broken'],
+    rsa1024 && ['high', `RSA-${keySize} signing key — below the 2048-bit minimum`],
+    janusRisk && ['high', 'Janus risk — v1-only signing allows DEX injection on older Android'],
+    sha1Used && !md5Used && ['medium', 'SHA-1 signature algorithm — collision-prone, deprecated'],
+    smallKey && !rsa1024 && ['medium', `Small signing key (${keySize}-bit)`],
+    selfSigned && ['low', 'Self-signed certificate — issuer equals subject (expected for app signing)'],
+    expired && ['medium', 'Certificate outside its validity window'],
+  ].filter(Boolean).sort((a, b) => RISK_RANK[a[0]] - RISK_RANK[b[0]])
 
   return (
     <div>
@@ -219,7 +366,8 @@ export function CertificatePanel({ results }) {
           <h2>Identity</h2>
           <Rows items={[
             ['Subject', subj], ['Issuer', iss], ['Serial', cw.serial || c.serial],
-            ['Algorithm', algo], ['Key', (cw.key_type || c.key_type) ? `${cw.key_type || c.key_type} ${keySize}-bit` : keySize],
+            ['Signature algorithm', algo],
+            ['Key algorithm', keyAlgo], ['Key size', keySize ? `${keySize}-bit` : ''],
             ['Self-signed', selfSigned === undefined ? '' : (selfSigned ? 'Yes' : 'No')],
             ['Valid from', cw.valid_from || c.valid_from], ['Valid to', cw.valid_to || c.valid_to],
           ]} />
@@ -227,21 +375,34 @@ export function CertificatePanel({ results }) {
         <div className="ws-card ws-card--pad">
           <h2>Fingerprints</h2>
           <Rows items={[
-            ['SHA-1', cw.sha1 || c.sha1_fingerprint || c.sha1], ['SHA-256', cw.sha256 || c.sha256_fingerprint || c.sha256], ['SHA-512', cw.sha512 || c.sha512_fingerprint || c.sha512],
+            ['MD5', md5],
+            ['SHA-1', cw.sha1 || c.sha1_fingerprint || c.sha1],
+            ['SHA-256', cw.sha256 || c.sha256_fingerprint || c.sha256],
+            ['SHA-512', cw.sha512 || c.sha512_fingerprint || c.sha512],
           ]} />
+          {!md5 ? <p className="ws-muted" style={{ fontSize: 11.5, marginTop: 8 }}>MD5 not emitted by the extractor for this certificate.</p> : null}
         </div>
       </div>
 
       <div className="ws-card ws-card--pad ws-section">
-        <h2>Production Readiness</h2>
+        <h2>Security Checks</h2>
         <div className="ws-assess">
           <AssessRow ok={!debugCert} good="Production certificate" bad="Debug certificate detected" />
           <AssessRow ok={!expired} good="Within validity period" bad="Certificate expired" />
           <AssessRow ok={!janusRisk} good="Janus-resistant (v2+/v3 signed)" bad="Janus risk — v1-only signing" />
-          <AssessRow ok={!weakAlgo} good="Strong signature algorithm" bad={`Weak signature algorithm (${algo})`} />
+          <AssessRow ok={!sha1Used} good="No SHA-1 in signature" bad="SHA-1 used in signature algorithm" />
+          <AssessRow ok={!md5Used} good="No MD5 in signature" bad="MD5 used in signature algorithm" />
+          <AssessRow ok={!rsa1024} good="RSA key ≥ 2048-bit" bad={`RSA-1024 weak signing key`} />
           <AssessRow ok={!smallKey} good="Adequate key size" bad={`Small key size (${keySize}-bit)`} />
           <AssessRow ok={!selfSigned} good="CA-issued certificate" bad="Self-signed certificate" />
         </div>
+      </div>
+
+      <div className="ws-card ws-card--pad ws-section">
+        <h2>Risk Summary</h2>
+        {risks.length ? risks.map(([sev, text], i) => (
+          <div key={i} className="ws-mcontrol"><SeverityTag severity={sev} compact /> <span style={{ marginLeft: 6 }}>{text}</span></div>
+        )) : <div className="ws-assess"><AssessRow ok good="No certificate risks detected — production-grade signing" /></div>}
       </div>
 
       {certFindings.length ? (
@@ -271,20 +432,46 @@ const NET_GROUPS = [
   { key: 'pinning', label: 'Missing Pinning', rx: /pinning|certificatepinner|pin-set/i },
 ]
 
+function urlScheme(u) {
+  const m = /^([a-z][a-z0-9+.-]*):\/\//i.exec(String(u))
+  return m ? m[1].toLowerCase() : ''
+}
+function urlHost(u) {
+  const m = /^[a-z][a-z0-9+.-]*:\/\/([^/:?#]+)/i.exec(String(u))
+  return m ? m[1] : ''
+}
+
 export function NetworkPanel({ results }) {
   const nw = results.network_workspace || {}            // Phase 11.75 structure (preferred)
   const nc = results.network_config || {}
   const sum = nc.summary || {}
   const endpoints = nw.endpoints || results.endpoints || []
-  const ips = nw.ips || results.ips || []
+  const ipsRaw = nw.ips || results.ips || []
+  const ips = ipsRaw.map(ip => (ip && typeof ip === 'object') ? ip : { ip })
   const findings = results.findings || []
-  const ws = nw.websockets || endpoints.filter(u => /^wss?:\/\//i.test(u))
-  const urls = nw.urls || endpoints.filter(u => !/^wss?:\/\//i.test(u))
+  const allUrls = [...new Set([...(nw.urls || []), ...(nw.websockets || []), ...endpoints])]
   const domains = nw.domains || []
+  const hosts = [...new Set(allUrls.map(urlHost).filter(Boolean))]
   const ta = nw.trust_anchors || {}
+  const pinnedDomains = nw.pinned_domains || sum.pinned_domains || []
   const nscPresent = nw.network_security_config ?? nc.present
   const cleartext = nw.cleartext_enabled ?? sum.cleartext_global
   const pinning = nw.pinning_detected ?? sum.has_pinning
+
+  // Group endpoints by scheme.
+  const SCHEME_GROUPS = [
+    { key: 'http', label: 'HTTP (cleartext)', risky: true, match: s => s === 'http' },
+    { key: 'https', label: 'HTTPS', risky: false, match: s => s === 'https' },
+    { key: 'ws', label: 'WS (cleartext)', risky: true, match: s => s === 'ws' },
+    { key: 'wss', label: 'WSS', risky: false, match: s => s === 'wss' },
+  ]
+  const grouped = SCHEME_GROUPS.map(g => ({ ...g, items: allUrls.filter(u => g.match(urlScheme(u))) }))
+  const other = allUrls.filter(u => !['http', 'https', 'ws', 'wss'].includes(urlScheme(u)))
+
+  const [q, setQ] = useState('')
+  const [tab, setTab] = useState('endpoints')
+  const [limit, setLimit] = useState(60)
+  const ql = q.trim().toLowerCase()
 
   return (
     <div>
@@ -294,30 +481,90 @@ export function NetworkPanel({ results }) {
         <Metric label="Cleartext" value={cleartext ? 'Permitted' : 'Restricted'} />
         <Metric label="Cert Pinning" value={pinning ? 'Detected' : 'None'} />
         <Metric label="Domains" value={domains.length} />
-        <Metric label="Endpoints" value={urls.length} />
-        <Metric label="WebSockets" value={ws.length} />
+        <Metric label="URLs" value={allUrls.length} />
+        <Metric label="Hosts" value={hosts.length} />
+        <Metric label="IPs" value={ips.length} />
       </div>
 
-      {(ta.system !== undefined || (ta.custom || []).length || domains.length) ? (
-        <div className="ws-two ws-section">
-          <div className="ws-card ws-card--pad">
-            <h2>Trust Anchors</h2>
-            <div className="ws-assess">
-              <AssessRow ok={ta.system !== false} good="System CAs trusted (standard)" bad="System CAs not trusted" />
-              <AssessRow ok={!ta.user} good="User CAs not trusted" bad="User CAs trusted (MITM risk)" />
-              {(ta.custom || []).length ? <div className="ws-mcontrol">Custom anchors: {ta.custom.join(', ')}</div> : null}
-            </div>
-          </div>
-          <div className="ws-card ws-card--pad">
-            <h2>Domains</h2>
-            <div className="ws-scroll">{domains.slice(0, 60).map((d, i) => <div key={i} className="ws-mono" style={{ fontSize: 12.5, padding: '3px 0' }}>{d}</div>)}{!domains.length ? <p className="ws-muted">None extracted.</p> : null}</div>
+      <div className="ws-two ws-section">
+        <div className="ws-card ws-card--pad">
+          <h2>Transport Posture</h2>
+          <div className="ws-assess">
+            <AssessRow ok={!cleartext} good="Cleartext traffic restricted" bad="Cleartext (HTTP) traffic permitted" />
+            <AssessRow ok={pinning} good="Certificate pinning detected" bad="No certificate pinning detected" />
+            <AssessRow ok={ta.system !== false} good="System CAs trusted (standard)" bad="System CAs not trusted" />
+            <AssessRow ok={!ta.user} good="User CAs not trusted" bad="User CAs trusted (MITM risk)" />
+            {(ta.custom || []).length ? <div className="ws-mcontrol">Custom anchors: {ta.custom.join(', ')}</div> : null}
           </div>
         </div>
-      ) : null}
+        <div className="ws-card ws-card--pad">
+          <h2>Pinned Domains</h2>
+          {pinnedDomains.length
+            ? pinnedDomains.map((d, i) => <div key={i} className="ws-mono ws-mcontrol"><ShieldCheck size={12} style={{ color: '#067647' }} /> {d}</div>)
+            : <p className="ws-muted">No pinned domains declared — connections rely on default trust validation.</p>}
+        </div>
+      </div>
+
+      {/* Endpoints grouped by scheme */}
+      <div className="ws-section">
+        <div className="ws-section__head"><h2>Endpoints by Scheme</h2></div>
+        <div className="ws-metrics" style={{ marginBottom: 14 }}>
+          {grouped.map(g => <Metric key={g.key} label={g.label} value={g.items.length} />)}
+        </div>
+        <div className="ws-toolbar">
+          <input className="ws-input" placeholder="Search URLs, hosts, IPs, domains…" value={q} onChange={e => { setQ(e.target.value); setLimit(60) }} style={{ minWidth: 280 }} />
+          <Chips value={tab} onChange={v => { setTab(v); setLimit(60) }} options={[
+            { id: 'endpoints', label: 'URLs', count: allUrls.length },
+            { id: 'hosts', label: 'Hosts', count: hosts.length },
+            { id: 'domains', label: 'Domains', count: domains.length },
+            { id: 'ips', label: 'IPs', count: ips.length },
+          ]} />
+        </div>
+
+        {tab === 'endpoints' ? (() => {
+          const rows = allUrls.filter(u => !ql || u.toLowerCase().includes(ql))
+          if (!rows.length) return <EmptyState title="No URLs" body={allUrls.length ? 'No URLs match your search.' : 'No URLs or endpoints were extracted from this package.'} />
+          return (
+            <div className="ws-card" style={{ overflow: 'hidden' }}>
+              {rows.slice(0, limit).map((u, i) => {
+                const sch = urlScheme(u)
+                const cleartextUrl = sch === 'http' || sch === 'ws'
+                return (
+                  <a key={i} href={u} target="_blank" rel="noopener noreferrer" className="ws-file">
+                    <span className={`ws-pill ws-pill--${cleartextUrl ? 'risk' : 'ok'}`}>{sch || '?'}</span>
+                    <span className="ws-file__path" title={u}>{u}</span>
+                    {cleartextUrl ? <SoftTag title="Cleartext transport">cleartext</SoftTag> : null}
+                    <ArrowUpRight size={12} className="ws-muted" />
+                  </a>
+                )
+              })}
+              <Pager count={rows.length} limit={limit} setLimit={setLimit} />
+            </div>
+          )
+        })() : null}
+
+        {tab === 'hosts' ? (() => {
+          const rows = hosts.filter(h => !ql || h.toLowerCase().includes(ql))
+          if (!rows.length) return <EmptyState title="No hosts" body="No hostnames were derived from extracted URLs." />
+          return <div className="ws-card" style={{ overflow: 'hidden' }}>{rows.slice(0, limit).map((h, i) => <div key={i} className="ws-file"><Network size={13} className="ws-muted" /><span className="ws-file__path ws-mono" title={h}>{h}</span></div>)}<Pager count={rows.length} limit={limit} setLimit={setLimit} /></div>
+        })() : null}
+
+        {tab === 'domains' ? (() => {
+          const rows = domains.filter(d => !ql || d.toLowerCase().includes(ql))
+          if (!rows.length) return <EmptyState title="No domains" body="No domains were extracted from strings or the network config." />
+          return <div className="ws-card" style={{ overflow: 'hidden' }}>{rows.slice(0, limit).map((d, i) => <div key={i} className="ws-file"><span className="ws-file__path ws-mono" title={d}>{d}</span></div>)}<Pager count={rows.length} limit={limit} setLimit={setLimit} /></div>
+        })() : null}
+
+        {tab === 'ips' ? (() => {
+          const rows = ips.filter(ip => !ql || String(ip.ip || '').toLowerCase().includes(ql))
+          if (!rows.length) return <EmptyState title="No IP addresses" body="No literal IP addresses were found in the package." />
+          return <div className="ws-card" style={{ overflow: 'hidden' }}>{rows.slice(0, limit).map((ip, i) => <div key={i} className="ws-file"><span className="ws-mono">{ip.ip}</span>{ip.type ? <SoftTag>{ip.type}</SoftTag> : null}{ip.geo || ip.country ? <span className="ws-muted" style={{ fontSize: 12 }}>{ip.geo || ip.country}</span> : null}</div>)}<Pager count={rows.length} limit={limit} setLimit={setLimit} /></div>
+        })() : null}
+      </div>
 
       <div className="ws-section">
         <h2>Network Findings</h2>
-        {NET_GROUPS.map(g => {
+        {NET_GROUPS.some(g => findings.some(f => g.rx.test(`${f.title} ${f.category}`))) ? NET_GROUPS.map(g => {
           const hits = findings.filter(f => g.rx.test(`${f.title} ${f.category} ${f.description || ''}`))
           if (!hits.length) return null
           return (
@@ -330,29 +577,7 @@ export function NetworkPanel({ results }) {
               ))}
             </div>
           )
-        })}
-        {!NET_GROUPS.some(g => findings.some(f => g.rx.test(`${f.title} ${f.category}`))) ? <p className="ws-muted">No network-class findings.</p> : null}
-      </div>
-
-      <div className="ws-two ws-section">
-        <div className="ws-card ws-card--pad">
-          <h2>Endpoints &amp; WebSockets</h2>
-          <div className="ws-scroll">
-            {[...ws, ...urls].slice(0, 120).map((u, i) => (
-              <a key={i} href={u} target="_blank" rel="noopener noreferrer" className="ws-file"><Network size={13} className="ws-muted" /><span className="ws-file__path" title={u}>{u}</span><ArrowUpRight size={12} /></a>
-            ))}
-            {!endpoints.length ? <p className="ws-muted">No endpoints extracted.</p> : null}
-          </div>
-        </div>
-        <div className="ws-card ws-card--pad">
-          <h2>IP Addresses</h2>
-          <div className="ws-scroll">
-            {ips.slice(0, 80).map((ip, i) => (
-              <div key={i} className="ws-file"><span className="ws-mono">{ip.ip || ip}</span>{ip.type ? <SoftTag>{ip.type}</SoftTag> : null}</div>
-            ))}
-            {!ips.length ? <p className="ws-muted">No IP addresses found.</p> : null}
-          </div>
-        </div>
+        }) : <p className="ws-muted">No network-class findings were raised for this package.</p>}
       </div>
     </div>
   )
@@ -456,96 +681,164 @@ function FlagRow({ label, value, defaulted, danger }) {
 }
 
 // ───────────────────────────── Components ────────────────────────────────
+const COMP_TYPES = [
+  { id: 'activities', label: 'Activities' }, { id: 'services', label: 'Services' },
+  { id: 'receivers', label: 'Receivers' }, { id: 'providers', label: 'Providers' },
+]
+function compActions(c) { return c.actions || c.intent_actions || c.intent_filters || [] }
+function compDeeplinks(c) {
+  return (c.deeplinks || []).map(d => typeof d === 'string' ? d : `${d.scheme || ''}://${d.host || ''}${d.path || ''}`)
+}
+function compRisk(c, riskByName) {
+  if (riskByName[c.name]) return riskByName[c.name]
+  const unprotected = c.exported && !c.permission && (c.permission_protection || 'none') === 'none'
+  if (c.exported && (c.deeplinks || []).length) return 'critical'
+  if (c.exported && c.browsable) return 'high'
+  if (unprotected) return 'high'
+  if (c.exported) return 'medium'
+  return 'low'
+}
+
 export function ComponentsPanel({ results }) {
   const surface = results.attack_surface || {}
   const inv = results.exported_component_inventory || {}
   const riskByName = {}
   ;(inv.components || []).forEach(c => { if (c.name) riskByName[c.name] = c.risk })
-  const TYPES = ['activities', 'services', 'receivers', 'providers']
   const [type, setType] = useState('activities')
   const [q, setQ] = useState('')
+  const [sort, setSort] = useState('risk')
+  const [filter, setFilter] = useState('all')   // all | exported | unprotected
+  const [limit, setLimit] = useState(50)
 
-  const items = (surface[type] || []).filter(c => !q || (c.name || '').toLowerCase().includes(q.toLowerCase()))
-  const risk = c => riskByName[c.name] || (c.exported && c.browsable ? 'critical' : c.exported ? 'high' : 'low')
-  const RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
-  items.sort((a, b) => (RANK[risk(a)] ?? 4) - (RANK[risk(b)] ?? 4))
-
-  const deeplinks = (surface.activities || []).filter(a => a.browsable && (a.deeplinks || []).length)
+  const ql = q.trim().toLowerCase()
+  let items = (surface[type] || []).map(c => ({ ...c, _risk: compRisk(c, riskByName) }))
+  if (filter === 'exported') items = items.filter(c => c.exported)
+  if (filter === 'unprotected') items = items.filter(c => c.exported && !c.permission && (c.permission_protection || 'none') === 'none')
+  items = items.filter(c => !ql || `${c.name} ${compActions(c).join(' ')} ${(c.authorities || '')}`.toLowerCase().includes(ql))
+  items = [...items].sort((a, b) => sort === 'name'
+    ? (a.name || '').localeCompare(b.name || '')
+    : (RISK_RANK[a._risk] ?? 4) - (RISK_RANK[b._risk] ?? 4))
 
   return (
     <div>
-      <div className="ws-section__head"><h1>Components</h1></div>
+      <div className="ws-section__head"><h1>Components</h1><span className="ws-muted">{inv.exported_total ?? '—'} exported of {inv.total ?? '—'}</span></div>
       <div className="ws-toolbar">
-        {TYPES.map(t => (
-          <button key={t} type="button" className={`ws-chip${type === t ? ' is-active' : ''}`} onClick={() => setType(t)}>
-            {t[0].toUpperCase() + t.slice(1)} <span className="ws-muted">{(surface[t] || []).length}</span>
-          </button>
-        ))}
-        <input className="ws-input" placeholder="Filter components…" value={q} onChange={e => setQ(e.target.value)} />
+        <Chips value={type} onChange={t => { setType(t); setLimit(50) }} options={COMP_TYPES.map(t => ({ ...t, count: (surface[t.id] || []).length }))} />
+      </div>
+      <div className="ws-toolbar">
+        <input className="ws-input" placeholder="Filter by name, action, authority…" value={q} onChange={e => { setQ(e.target.value); setLimit(50) }} />
+        <Chips value={filter} onChange={v => { setFilter(v); setLimit(50) }} options={[
+          { id: 'all', label: 'All' }, { id: 'exported', label: 'Exported' }, { id: 'unprotected', label: 'Unprotected' },
+        ]} />
+        <span className="ws-muted" style={{ marginLeft: 'auto', fontSize: 12 }}>Sort</span>
+        <Chips value={sort} onChange={setSort} options={[{ id: 'risk', label: 'Risk' }, { id: 'name', label: 'Name' }]} />
       </div>
 
-      {items.length ? items.map((c, i) => (
-        <div key={i} className="ws-card ws-card--pad" style={{ marginBottom: 8 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <SeverityTag severity={risk(c)} compact />
-            <span className="ws-mono" style={{ fontWeight: 560, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</span>
-            {c.exported ? <SoftTag>exported</SoftTag> : null}
-            {c.browsable ? <SoftTag>browsable</SoftTag> : null}
-            {c.permission ? <SoftTag title="Guarding permission">perm</SoftTag> : null}
-          </div>
-          {(c.intent_filters || c.intent_actions || []).length ? (
-            <div className="ws-muted" style={{ fontSize: 12, marginTop: 6 }}>Actions: {(c.intent_actions || c.intent_filters || []).slice(0, 4).join(', ')}</div>
-          ) : null}
-          {(c.authorities || []).length ? <div className="ws-muted" style={{ fontSize: 12, marginTop: 4 }}>Authorities: {c.authorities.join(', ')}</div> : null}
-        </div>
-      )) : <EmptyState title={`No ${type}`} />}
-
-      {deeplinks.length ? (
-        <div className="ws-section">
-          <h2>Deep Links</h2>
-          {deeplinks.map((a, i) => (
-            <div key={i} className="ws-card ws-card--pad" style={{ marginBottom: 8 }}>
-              <div className="ws-mono" style={{ fontWeight: 560 }}>{a.name}</div>
-              {(a.deeplinks || []).map((d, j) => <div key={j} className="ws-mono ws-muted" style={{ fontSize: 12, marginTop: 4 }}>{typeof d === 'string' ? d : `${d.scheme || ''}://${d.host || ''}${d.path || ''}`}</div>)}
-            </div>
-          ))}
-        </div>
-      ) : null}
+      {items.length ? (
+        <>
+          {items.slice(0, limit).map((c, i) => {
+            const actions = compActions(c)
+            const deeplinks = compDeeplinks(c)
+            const unprotected = c.exported && !c.permission && (c.permission_protection || 'none') === 'none'
+            return (
+              <div key={i} className="ws-card ws-card--pad" style={{ marginBottom: 8 }}>
+                <div className="ws-permhead">
+                  <SeverityTag severity={c._risk} compact />
+                  <span className="ws-mono" style={{ fontWeight: 560, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }} title={c.name}>{c.short_name || c.name}</span>
+                  {c.exported ? <span className="ws-pill ws-pill--risk">exported</span> : <span className="ws-pill ws-pill--ok">private</span>}
+                  {c.browsable ? <span className="ws-pill ws-pill--warn">browsable</span> : null}
+                  {deeplinks.length ? <span className="ws-pill ws-pill--warn">deep link</span> : null}
+                  {unprotected ? <span className="ws-pill ws-pill--risk">unprotected</span> : null}
+                  {c.permission ? <SoftTag title={c.permission}>permission-protected</SoftTag> : null}
+                </div>
+                {actions.length ? <div className="ws-muted" style={{ fontSize: 12, marginTop: 7 }}><b>Intent filters:</b> {actions.slice(0, 6).join(', ')}{actions.length > 6 ? ` +${actions.length - 6}` : ''}</div> : null}
+                {deeplinks.length ? <div className="ws-muted ws-mono" style={{ fontSize: 12, marginTop: 4 }}>{deeplinks.slice(0, 4).join('  ·  ')}</div> : null}
+                {c.authorities ? <div className="ws-muted" style={{ fontSize: 12, marginTop: 4 }}><b>Authorities:</b> {Array.isArray(c.authorities) ? c.authorities.join(', ') : c.authorities}</div> : null}
+                {(c.read_permission || c.write_permission) ? <div className="ws-muted" style={{ fontSize: 12, marginTop: 4 }}>R/W perms: {c.read_permission || '—'} / {c.write_permission || '—'}</div> : null}
+              </div>
+            )
+          })}
+          <Pager count={items.length} limit={limit} setLimit={setLimit} />
+        </>
+      ) : <EmptyState title={`No ${type} match`} body={(surface[type] || []).length ? 'No components match the current search/filter.' : `This package declares no ${type}.`} />}
     </div>
   )
 }
 
 // ───────────────────────────── Android APIs ──────────────────────────────
-const API_CAT_ICON = { default: Cpu }
 export function AndroidApiPanel({ results, onOpenCode }) {
   const api = results.android_api || {}
-  const entries = Object.entries(api)
-  const findings = results.findings || []
-  if (!entries.length) return <EmptyState title="No Android API usage classified" body="The analyzer did not categorize platform API usage for this scan." />
+  const evidence = results.android_api_evidence || {}
+  const entries = Object.entries(api).map(([cat, files]) => ({ cat, files: files || [], risk: apiRisk(cat) }))
+  const [q, setQ] = useState('')
+  const [riskFilter, setRiskFilter] = useState('all')
+  const [open, setOpen] = useState({})
 
-  const findingFor = path => findings.find(f => (f.file_path || f.full_path || '') === path)
+  if (!entries.length) return <EmptyState title="No Android API usage classified" body="The analyzer did not categorize any platform API usage for this package (no decompiled sources matched the API signature set)." />
+
+  // Evidence carries exact path+line+snippet per category for precise View Code.
+  const evMap = {}
+  for (const [cat, list] of Object.entries(evidence)) {
+    const m = {}
+    for (const e of (list || [])) if (e && e.path && m[e.path] === undefined) m[e.path] = e
+    evMap[cat] = m
+  }
+
+  const riskCounts = entries.reduce((m, e) => { m[e.risk] = (m[e.risk] || 0) + 1; return m }, {})
+  const ql = q.trim().toLowerCase()
+  let rows = entries.filter(e => riskFilter === 'all' || e.risk === riskFilter)
+  rows = rows.filter(e => !ql || e.cat.toLowerCase().includes(ql) || e.files.some(f => String(f).toLowerCase().includes(ql)))
+  rows = [...rows].sort((a, b) => (RISK_RANK[a.risk] ?? 4) - (RISK_RANK[b.risk] ?? 4) || b.files.length - a.files.length)
 
   return (
     <div>
       <div className="ws-section__head"><h1>Android APIs</h1><span className="ws-muted">{entries.length} categories</span></div>
-      {entries.map(([cat, files]) => (
-        <div key={cat} className="ws-card ws-card--pad" style={{ marginBottom: 12 }}>
-          <div style={{ fontWeight: 620, marginBottom: 8 }}>{cat} <span className="ws-muted">· {files.length} file(s)</span></div>
-          <div className="ws-scroll">
-            {files.map((file, i) => {
-              const f = findingFor(file)
-              return (
-                <div key={i} className="ws-file" onClick={() => onOpenCode(file, f ? [f.line].filter(Boolean) : [])}>
-                  <FileCode2 size={13} className="ws-muted" />
-                  <span className="ws-file__path" title={file}>{file}</span>
-                  {f ? <SoftTag title="Linked finding">{normSev(f.severity)}</SoftTag> : null}
-                  <ChevronRight size={13} className="ws-muted" />
-                </div>
-              )
-            })}
+      <div className="ws-metrics ws-section">
+        <Metric label="Categories" value={entries.length} />
+        <Metric label="High risk" value={riskCounts.high || 0} />
+        <Metric label="Medium risk" value={riskCounts.medium || 0} />
+        <Metric label="Total references" value={entries.reduce((s, e) => s + e.files.length, 0)} />
+      </div>
+      <div className="ws-toolbar">
+        <input className="ws-input" placeholder="Search categories or files…" value={q} onChange={e => setQ(e.target.value)} style={{ minWidth: 260 }} />
+        <Chips value={riskFilter} onChange={setRiskFilter} options={[
+          { id: 'all', label: 'All' },
+          { id: 'high', label: 'High', count: riskCounts.high || 0 },
+          { id: 'medium', label: 'Medium', count: riskCounts.medium || 0 },
+          { id: 'low', label: 'Low', count: riskCounts.low || 0 },
+        ]} />
+      </div>
+
+      {rows.length ? rows.map(({ cat, files, risk }) => {
+        const isOpen = open[cat]
+        const shown = isOpen ? files : files.slice(0, 6)
+        return (
+          <div key={cat} className="ws-card ws-card--pad" style={{ marginBottom: 10 }}>
+            <div className="ws-permhead">
+              <SeverityTag severity={risk} compact />
+              <b style={{ fontSize: 14 }}>{cat}</b>
+              <span className="ws-muted" style={{ fontSize: 12.5 }}>{files.length} reference{files.length !== 1 ? 's' : ''}</span>
+            </div>
+            <div className="ws-scroll" style={{ marginTop: 8 }}>
+              {shown.map((file, i) => {
+                const ev = (evMap[cat] || {})[file]
+                return (
+                  <div key={i} className="ws-file" onClick={() => onOpenCode(file, ev && ev.line ? [ev.line] : [], ev ? { snippet: ev.snippet, source: 'android api', highlightLine: ev.line, approximate: !ev.line } : {})}>
+                    <FileCode2 size={13} className="ws-muted" />
+                    <span className="ws-file__path" title={file}>{file}{ev && ev.line ? `:${ev.line}` : ''}</span>
+                    <ChevronRight size={13} className="ws-muted" />
+                  </div>
+                )
+              })}
+            </div>
+            {files.length > 6 ? (
+              <button type="button" className="ws-btn ws-btn--sm" style={{ marginTop: 8 }} onClick={() => setOpen(o => ({ ...o, [cat]: !o[cat] }))}>
+                {isOpen ? 'Show fewer' : `Show all ${files.length}`}
+              </button>
+            ) : null}
           </div>
-        </div>
-      ))}
+        )
+      }) : <EmptyState title="No matching API categories" body="No categories match the current search/filter." />}
     </div>
   )
 }
@@ -556,8 +849,13 @@ export function MalwarePanel({ results }) {
   const behavior = results.behavior_analysis || []
   const findings = results.findings || []
   const native = results.binaries || results.native_libs || []
+  const trackers = results.trackers || []
+  const vt = results.virustotal || {}
+  const mp = (results.malware_perms || {}).malware_permissions || {}
+  const suspiciousPerms = mp.matched || []
   const hasCtl = rx => findings.some(f => rx.test(`${f.title} ${f.category}`))
   const blob = JSON.stringify(apkid).toLowerCase()
+  const [tq, setTq] = useState('')
 
   const indicators = [
     ['Obfuscation', /obfuscat|proguard|r8|dexguard/.test(blob) || hasCtl(/obfuscat/i)],
@@ -570,22 +868,86 @@ export function MalwarePanel({ results }) {
     ['Integrity / Attestation', hasCtl(/integrity|safetynet|play integrity|signature verif/i)],
     ['Anti-Debug / Anti-Analysis', /anti.?debug|anti.?vm|frida|xposed/.test(blob)],
   ]
+  const obfCount = indicators.filter(([, p]) => p).length
+
+  // Trackers grouped by category.
+  const trackerRows = trackers.filter(t => !tq || `${t.name} ${t.category} ${t.pkg}`.toLowerCase().includes(tq.toLowerCase()))
+  const trackerCats = {}
+  trackers.forEach(t => { const c = t.category || 'Other'; trackerCats[c] = (trackerCats[c] || 0) + 1 })
+
+  const avDetections = vt.available ? (vt.main?.malicious ?? vt.malicious ?? 0) : null
 
   return (
     <div>
       <div className="ws-section__head"><h1>Malware Analysis</h1></div>
-      <div className="ws-masvs-grid ws-section">
-        {indicators.map(([label, present]) => (
-          <div key={label} className="ws-mcard" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            {present ? <Bug size={16} style={{ color: SEV_COLOR.medium }} /> : <ShieldCheck size={16} className="ws-muted" />}
-            <div><div style={{ fontWeight: 600, fontSize: 13 }}>{label}</div><div className="ws-muted" style={{ fontSize: 12 }}>{present ? 'Detected' : 'Not detected'}</div></div>
+
+      {/* Risk summary */}
+      <div className="ws-metrics ws-section">
+        <Metric label="Trackers" value={trackers.length} />
+        <Metric label="Suspicious Perms" value={`${suspiciousPerms.length}${mp.total ? ` / ${mp.total}` : ''}`} />
+        <Metric label="Obfuscation Signals" value={obfCount} />
+        <Metric label="AV Detections" value={avDetections === null ? 'N/A' : avDetections} />
+      </div>
+
+      {/* Trackers */}
+      <div className="ws-section">
+        <div className="ws-section__head"><h2>Third-Party Trackers</h2><span className="ws-muted">{trackers.length}</span></div>
+        {trackers.length ? (
+          <>
+            <div className="ws-toolbar"><input className="ws-input" placeholder="Search trackers…" value={tq} onChange={e => setTq(e.target.value)} style={{ minWidth: 240 }} />
+              {Object.entries(trackerCats).map(([c, n]) => <SoftTag key={c}>{c} · {n}</SoftTag>)}</div>
+            <div className="ws-card" style={{ overflow: 'hidden' }}>
+              {trackerRows.map((t, i) => (
+                <div key={i} className="ws-file">
+                  <Bug size={13} style={{ color: SEV_COLOR.medium }} />
+                  <span style={{ fontWeight: 560, fontSize: 13 }}>{t.name}</span>
+                  {t.category ? <SoftTag>{t.category}</SoftTag> : null}
+                  <span className="ws-file__path ws-mono ws-muted" title={t.pkg}>{t.pkg}</span>
+                </div>
+              ))}
+              {!trackerRows.length ? <p className="ws-muted" style={{ padding: 14 }}>No trackers match your search.</p> : null}
+            </div>
+          </>
+        ) : <EmptyState title="No trackers detected" body="No known third-party tracking/analytics SDK signatures matched this package." />}
+      </div>
+
+      {/* AV detections */}
+      <div className="ws-section">
+        <h2>AV Detections (VirusTotal)</h2>
+        <div className="ws-card ws-card--pad">
+          {vt.available
+            ? <div className="ws-assess"><AssessRow ok={!avDetections} good="No AV engines flagged this hash" bad={`${avDetections} AV engine(s) flagged this hash`} /></div>
+            : <p className="ws-muted">{vt.error || 'VirusTotal lookups are not configured (set VIRUSTOTAL_API_KEY to enable hash reputation).'}</p>}
+        </div>
+      </div>
+
+      {/* Suspicious permissions */}
+      <div className="ws-section">
+        <div className="ws-section__head"><h2>Suspicious Permissions</h2><span className="ws-muted">{suspiciousPerms.length}</span></div>
+        {suspiciousPerms.length ? (
+          <div className="ws-card ws-card--pad">
+            {suspiciousPerms.map((p, i) => <div key={i} className="ws-mcontrol"><ShieldAlert size={12} style={{ color: SEV_COLOR.medium }} /> <span className="ws-mono" style={{ fontSize: 12.5 }}>{p}</span></div>)}
+            <p className="ws-muted" style={{ fontSize: 12, marginTop: 8 }}>Permissions frequently abused by malware ({suspiciousPerms.length} of {mp.total || '?'} known). Presence is not malicious on its own.</p>
           </div>
-        ))}
+        ) : <EmptyState title="No high-risk permissions" body="None of this app's permissions appear on the malware-abuse watchlist." />}
+      </div>
+
+      {/* Obfuscation indicators */}
+      <div className="ws-section">
+        <h2>Obfuscation &amp; Evasion Indicators</h2>
+        <div className="ws-masvs-grid">
+          {indicators.map(([label, present]) => (
+            <div key={label} className="ws-mcard" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              {present ? <Bug size={16} style={{ color: SEV_COLOR.medium }} /> : <ShieldCheck size={16} className="ws-muted" />}
+              <div><div style={{ fontWeight: 600, fontSize: 13 }}>{label}</div><div className="ws-muted" style={{ fontSize: 12 }}>{present ? 'Detected' : 'Not detected'}</div></div>
+            </div>
+          ))}
+        </div>
       </div>
 
       {Object.keys(apkid).length ? (
         <div className="ws-section">
-          <h2>APKiD Fingerprints</h2>
+          <h2>APKiD / YARA Fingerprints</h2>
           {Object.entries(apkid).map(([dex, cats]) => (
             <div key={dex} className="ws-card ws-card--pad" style={{ marginBottom: 8 }}>
               <div className="ws-mono" style={{ fontWeight: 560, marginBottom: 6 }}>{dex}</div>
