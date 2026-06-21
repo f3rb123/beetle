@@ -38,6 +38,7 @@ import BrandLogo from '../components/BrandLogo.jsx'
 import CodeBlockViewer, { inferLanguage } from '../components/CodeBlockViewer.jsx'
 import Footer from '../components/Footer.jsx'
 import SectionViews from '../components/workspace/SectionViews.jsx'
+import Workspace from '../components/workspace2/Workspace.jsx'
 import {
   SECTION_IDS,
   SECTION_MAP,
@@ -1022,165 +1023,22 @@ export default function Results() {
   const severityBoxes = SEVERITY_ORDER.filter(key => (summary[key] || 0) > 0)
   const sectionDescription = SECTION_COPY[resolvedSectionId] || sectionMeta.hint
 
+  const workspaceActions = {
+    onHome: () => navigate('/'),
+    onExport: () => setExportOpen(true),
+    onSbom: handleSbomDownload,
+    onSarif: handleSarifDownload,
+    onCiGate: () => setGateOpen(true),
+    onSignOut: () => { clearAuth(); window.location.href = '/login' },
+    user: getToken() ? (getUser()?.username ?? 'Sign out') : '',
+  }
+
   return (
-    <div className="workspace-page">
-      <div className="workspace-shell">
-        <aside className="workspace-sidebar">
-          <div className="workspace-sidebar__top">
-            <div className="workspace-sidebar__brand">
-              <BrandLogo size="compact" subtitle={results.app_name || 'Security Analysis'} />
-            </div>
-          </div>
-
-          <nav className="workspace-nav">
-            <div className="workspace-nav__list">
-              {navItems.map(item => {
-                const Icon = SECTION_ICONS[item.id] || ShieldCheck
-                const active = item.id === resolvedSectionId
-                const badgeCount = counts[item.id]
-
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className={`workspace-nav__item${active ? ' is-active' : ''}`}
-                    onClick={() => navigate(`/scans/${scanId}/${item.id}`)}
-                  >
-                    <span className="workspace-nav__item-icon"><Icon size={16} /></span>
-                    <span className="workspace-nav__item-copy">
-                      <span>{item.label}</span>
-                    </span>
-                    {badgeCount ? <span className="workspace-nav__item-count">{badgeCount}</span> : null}
-                  </button>
-                )
-              })}
-            </div>
-          </nav>
-
-          <div className="workspace-sidebar__footer">Beetle v3.3 · Security Analysis</div>
-        </aside>
-
-        <main className="workspace-main">
-          <header className="workspace-header workspace-header--results">
-            <div className="workspace-breadcrumbs">
-              <button type="button" className="workspace-breadcrumbs__home" onClick={() => navigate('/')}>
-                <ChevronLeft size={14} />
-                Home
-              </button>
-              <span className="workspace-breadcrumbs__divider" />
-              <span className="workspace-breadcrumbs__current">Results</span>
-            </div>
-
-            <div className="button-row">
-              {getToken() && (
-                <button
-                  type="button"
-                  className="button button--secondary button--small"
-                  onClick={() => { clearAuth(); window.location.href = '/login' }}
-                  title={`Signed in as ${getUser()?.username ?? '?'} · Click to sign out`}
-                >
-                  {getUser()?.username ?? 'Sign out'}
-                </button>
-              )}
-              <button
-                type="button"
-                className="button button--secondary button--small"
-                onClick={() => handleSbomDownload(results)}
-                title="Download CycloneDX 1.5 SBOM — compatible with Dependency-Track, AWS Inspector, and GitHub Dependency Review"
-              >
-                SBOM
-              </button>
-              <button
-                type="button"
-                className="button button--secondary button--small"
-                onClick={() => handleSarifDownload(results)}
-                title="Download SARIF 2.1 — import into GitHub Code Scanning or VS Code SARIF Viewer"
-              >
-                SARIF
-              </button>
-              <button
-                type="button"
-                className="button button--secondary button--small"
-                onClick={() => setGateOpen(true)}
-                title="CI Gate — check this scan against configured pass/fail thresholds"
-              >
-                CI Gate
-              </button>
-              <button type="button" className="button button--export" onClick={() => setExportOpen(true)}>
-                Export PDF
-              </button>
-            </div>
-          </header>
-
-          <section className="workspace-summary">
-            <div className="workspace-summary__identity">
-              <AppAvatar iconData={info.icon_data} label={results.app_name} platform={results.platform} filename={results.filename} />
-              <div className="workspace-summary__copy">
-                <div className="workspace-summary__headline">
-                  <h1>{results.app_name || 'Unknown app'}</h1>
-                  <span className="workspace-score-pill">{`${score.grade || '—'} · ${score.score ?? 0}/100`}</span>
-                  {counts.trackers ? <span className="workspace-alert-pill">{`${counts.trackers} trackers`}</span> : null}
-                </div>
-                <div className="workspace-summary__package">{info.package || info.bundle_id || results.filename}</div>
-                <div className="workspace-summary__chips">
-                  {summaryChips.map(chip => (
-                    <span key={chip} className="workspace-chip">{chip}</span>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <div className="severity-summary-grid">
-              {severityBoxes.map(key => (
-                <SeveritySummaryBox key={key} severity={key} count={summary[key] || 0} />
-              ))}
-            </div>
-          </section>
-
-          <ScanNotes scanId={scanId} />
-
-          <section className="workspace-section-bar">
-            <div className="workspace-section-bar__copy">
-              <h2>{sectionMeta.label}</h2>
-              <p>{sectionDescription}</p>
-            </div>
-
-            <div className="workspace-section-bar__actions">
-              <div className="view-toggle">
-                {['quick', 'detailed'].map(mode => (
-                  <button
-                    key={mode}
-                    type="button"
-                    className={`view-toggle__button${viewMode === mode ? ' is-active' : ''}`}
-                    onClick={() => setViewMode(mode)}
-                  >
-                    {mode === 'quick' ? 'Quick' : 'Detailed'}
-                  </button>
-                ))}
-              </div>
-              <span className="workspace-chip workspace-chip--muted">{`${counts[resolvedSectionId] || 0} items`}</span>
-              {(results.decompile_info?.tools_used || []).length ? (
-                <span className="workspace-chip workspace-chip--success">Decompiled</span>
-              ) : null}
-            </div>
-          </section>
-
-          <SectionViews
-            sectionId={resolvedSectionId}
-            results={results}
-            scanId={scanId}
-            onNavigateSection={nextSection => navigate(`/scans/${scanId}/${nextSection}`)}
-            onOpenCode={openCode}
-            viewMode={viewMode}
-          />
-
-          <Footer />
-        </main>
-      </div>
-
+    <>
+      <Workspace results={results} scanId={scanId} onOpenCode={openCode} actions={workspaceActions} />
       <WorkspaceCodeModal state={codeState} onClose={() => setCodeState(state => ({ ...state, open: false }))} />
       {exportOpen ? <ExportModal results={results} onClose={() => setExportOpen(false)} /> : null}
       {gateOpen   ? <CiGateModal results={results} onClose={() => setGateOpen(false)}   /> : null}
-    </div>
+    </>
   )
 }

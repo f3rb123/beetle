@@ -1,0 +1,173 @@
+// Phase 13 — Explainable Security Workspace shell. Presentation only; reuses the
+// already-loaded `results` blob and the host's openCode/export/CI plumbing.
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  LayoutDashboard, ShieldAlert, GitBranch, KeyRound, ShieldCheck, FileCode2,
+  Download, Search, ChevronLeft, Command,
+} from 'lucide-react'
+import beetleIcon from '../../assets/beetle-icon.png'
+import {
+  OverviewPanel, FindingsPanel, FindingDrawer, ChainsPanel, SecretsPanel,
+  MasvsPanel, FilesPanel, ExportsPanel,
+} from './panels.jsx'
+import { severityCounts, findingPath, useEscape } from './ui.jsx'
+
+const SECTIONS = [
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'findings', label: 'Findings', icon: ShieldAlert },
+  { id: 'chains', label: 'Attack Chains', icon: GitBranch },
+  { id: 'secrets', label: 'Secrets', icon: KeyRound },
+  { id: 'masvs', label: 'MASVS Coverage', icon: ShieldCheck },
+  { id: 'files', label: 'Files', icon: FileCode2 },
+  { id: 'exports', label: 'Exports', icon: Download },
+]
+
+// ── Global search palette ──────────────────────────────────────────────────
+function SearchPalette({ index, onClose, onPick }) {
+  const [q, setQ] = useState('')
+  const inputRef = useRef(null)
+  useEscape(onClose)
+  useEffect(() => { inputRef.current?.focus() }, [])
+
+  const groups = useMemo(() => {
+    const ql = q.trim().toLowerCase()
+    if (!ql) return index.slice(0, 7)
+    const matched = index.map(g => ({
+      ...g, items: g.items.filter(it => it.text.toLowerCase().includes(ql)).slice(0, 6),
+    })).filter(g => g.items.length)
+    return matched
+  }, [q, index])
+
+  return (
+    <div className="ws-palette-backdrop" onClick={onClose}>
+      <div className="ws-palette" onClick={e => e.stopPropagation()}>
+        <input ref={inputRef} className="ws-palette__input" placeholder="Search findings, files, packages, secrets, MASVS, chains…"
+          value={q} onChange={e => setQ(e.target.value)} />
+        <div className="ws-palette__results">
+          {groups.length ? groups.map(g => (
+            <div key={g.group}>
+              <div className="ws-palette__group">{g.group}</div>
+              {g.items.map((it, i) => (
+                <div key={i} className="ws-palette__item" onClick={() => { onPick(it); onClose() }}>
+                  <it.icon size={15} className="ws-muted" />
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.text}</span>
+                  <span className="ws-mono">{g.group}</span>
+                </div>
+              ))}
+            </div>
+          )) : <div className="ws-palette__empty">No matches for “{q}”.</div>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export default function Workspace({ results, onOpenCode, actions }) {
+  const [section, setSection] = useState('overview')
+  const [drawer, setDrawer] = useState(null)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const scrollRef = useRef(null)
+
+  // Cmd/Ctrl+K opens search
+  useEffect(() => {
+    const h = e => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setSearchOpen(true) }
+    }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [])
+
+  // Preserve scroll position when opening the drawer (no layout shift).
+  const openFinding = f => setDrawer(f)
+
+  const counts = useMemo(() => {
+    const findings = results.findings || []
+    return {
+      findings: findings.length,
+      chains: (results.cloud_attack_paths || []).length + findings.filter(f => f.is_attack_chain).length,
+      secrets: (results.secrets || []).length,
+      masvs: (results.masvs_coverage || []).length,
+      files: new Set(findings.map(findingPath).filter(Boolean)).size,
+    }
+  }, [results])
+
+  const searchIndex = useMemo(() => {
+    const findings = results.findings || []
+    const idx = []
+    if (findings.length) idx.push({ group: 'Findings', items: findings.slice(0, 200).map(f => ({ text: f.title || f.name, icon: ShieldAlert, go: 'findings', finding: f })) })
+    const files = [...new Set(findings.map(findingPath).filter(Boolean))]
+    if (files.length) idx.push({ group: 'Files', items: files.map(p => ({ text: p, icon: FileCode2, go: 'files' })) })
+    const pkgs = [...new Set(findings.map(f => f.owner_package).filter(Boolean))]
+    if (pkgs.length) idx.push({ group: 'Packages', items: pkgs.map(p => ({ text: p, icon: FileCode2, go: 'findings' })) })
+    const secrets = results.secrets || []
+    if (secrets.length) idx.push({ group: 'Secrets', items: secrets.map(s => ({ text: s.name || s.type || s.provider, icon: KeyRound, go: 'secrets' })) })
+    const masvs = results.masvs_coverage || []
+    if (masvs.length) idx.push({ group: 'MASVS', items: masvs.map(m => ({ text: `${m.category} — ${m.maturity}`, icon: ShieldCheck, go: 'masvs' })) })
+    const chains = results.cloud_attack_paths || []
+    if (chains.length) idx.push({ group: 'Chains', items: chains.map(c => ({ text: c.title, icon: GitBranch, go: 'chains' })) })
+    return idx
+  }, [results])
+
+  const onPick = it => {
+    if (it.go) setSection(it.go)
+    if (it.finding) setTimeout(() => setDrawer(it.finding), 60)
+  }
+
+  const active = SECTIONS.find(s => s.id === section) || SECTIONS[0]
+  const info = results.app_info || {}
+
+  return (
+    <div className="ws">
+      <div className="ws-shell">
+        <aside className="ws-sidebar">
+          <div className="ws-sidebar__brand">
+            <img src={beetleIcon} alt="" />
+            <div><b>Beetle</b><span>{results.app_name || 'Security Analysis'}</span></div>
+          </div>
+          <nav className="ws-nav">
+            {SECTIONS.map(s => {
+              const Icon = s.icon
+              const n = counts[s.id]
+              return (
+                <button key={s.id} type="button" className={`ws-nav__item${s.id === section ? ' is-active' : ''}`}
+                  onClick={() => { setSection(s.id); scrollRef.current?.scrollTo({ top: 0 }) }}>
+                  <Icon size={16} />
+                  <span className="ws-nav__label">{s.label}</span>
+                  {n ? <span className="ws-nav__count">{n}</span> : null}
+                </button>
+              )
+            })}
+          </nav>
+          <div className="ws-sidebar__foot">Beetle · Explainable Security Workspace</div>
+        </aside>
+
+        <div className="ws-main">
+          <header className="ws-topbar">
+            <button type="button" className="ws-btn" onClick={actions.onHome} title="Back home"><ChevronLeft size={15} /> Home</button>
+            <div className="ws-topbar__title">{active.label}</div>
+            <div className="ws-topbar__spacer" />
+            <button type="button" className="ws-search-trigger" onClick={() => setSearchOpen(true)}>
+              <Search size={14} /> Search workspace
+              <kbd><Command size={10} style={{ verticalAlign: '-1px' }} />K</kbd>
+            </button>
+            <button type="button" className="ws-btn ws-btn--primary" onClick={actions.onExport}><Download size={14} /> Export</button>
+            {actions.user ? <button type="button" className="ws-btn" onClick={actions.onSignOut} title="Sign out">{actions.user}</button> : null}
+          </header>
+
+          <div className="ws-content" ref={scrollRef}>
+            {section === 'overview' && <OverviewPanel results={results} onOpenSection={setSection} onOpenFinding={openFinding} />}
+            {section === 'findings' && <FindingsPanel results={results} onOpenFinding={openFinding} />}
+            {section === 'chains' && <ChainsPanel results={results} />}
+            {section === 'secrets' && <SecretsPanel results={results} />}
+            {section === 'masvs' && <MasvsPanel results={results} />}
+            {section === 'files' && <FilesPanel results={results} onOpenCode={onOpenCode} />}
+            {section === 'exports' && <ExportsPanel actions={actions} results={results} />}
+          </div>
+        </div>
+      </div>
+
+      {drawer ? <FindingDrawer finding={drawer} onClose={() => setDrawer(null)} onOpenCode={onOpenCode} /> : null}
+      {searchOpen ? <SearchPalette index={searchIndex} onClose={() => setSearchOpen(false)} onPick={onPick} /> : null}
+    </div>
+  )
+}
