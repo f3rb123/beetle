@@ -228,27 +228,135 @@ def _band(score) -> str:
     return "HIGH" if s >= 70 else ("MEDIUM" if s >= 40 else "LOW")
 
 
-# ─── AnalystExplanation builder (Task 1) ─────────────────────────────────────
+# ─── Detector-specific detail (Task 3): why_dangerous / developer_fix / example ─
+_DETAIL = {
+    "WEBVIEW": {
+        "why_dangerous": "The WebView accepts attacker-controllable content or exposes a JS bridge, so injected script runs with the app's privileges.",
+        "developer_fix": "Disable JS/file access if unused; remove or @JavascriptInterface-restrict bridges; allowlist loaded URLs; in onReceivedSslError call handler.cancel().",
+        "code_example": "// Reject invalid certificates instead of proceeding:\nwebView.setWebViewClient(new WebViewClient(){\n  public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e){ h.cancel(); }\n});",
+    },
+    "CRYPTO": {
+        "why_dangerous": "A broken primitive or hardcoded key means the protected data can be recovered or forged by an attacker who obtains it.",
+        "developer_fix": "Use AES-GCM with a Keystore-backed key, SHA-256+, and a CSPRNG; never hardcode keys/IVs.",
+        "code_example": "KeyGenParameterSpec spec = new KeyGenParameterSpec.Builder(alias,\n  KeyProperties.PURPOSE_ENCRYPT|KeyProperties.PURPOSE_DECRYPT)\n  .setBlockModes(KeyProperties.BLOCK_MODE_GCM)\n  .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build();",
+    },
+    "NETWORK": {
+        "why_dangerous": "Cleartext or unvalidated TLS lets a network attacker read and modify traffic in transit.",
+        "developer_fix": "Enforce HTTPS via a strict Network Security Config (no cleartext, no user CAs) and remove custom TrustManagers.",
+        "code_example": "<!-- res/xml/network_security_config.xml -->\n<network-security-config>\n  <base-config cleartextTrafficPermitted=\"false\"/>\n</network-security-config>",
+    },
+    "SECRETS": {
+        "why_dangerous": "A shipped credential is extractable from the binary and usable directly against your backend or a third-party service.",
+        "developer_fix": "Revoke + rotate the key, move it server-side, and scope any key that must reach the client.",
+        "code_example": "// Client calls your backend; the backend holds the secret:\nString token = api.getScopedToken();  // no provider secret in the app",
+    },
+    "FIREBASE": {
+        "why_dangerous": "Permissive Firebase rules expose the database to anyone with the URL — no auth required.",
+        "developer_fix": "Require authentication in the rules and scope per-user access.",
+        "code_example": "{ \"rules\": { \".read\": \"auth != null\", \".write\": \"auth != null\" } }",
+    },
+    "S3": {
+        "why_dangerous": "A public bucket lists and serves its objects to anyone.",
+        "developer_fix": "Enable Block Public Access, remove public-read ACLs, and serve content via signed URLs.",
+        "code_example": "aws s3api put-public-access-block --bucket <b> \\\n  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true",
+    },
+    "CERTIFICATE": {
+        "why_dangerous": "Weak signing (v1/Janus, debug cert, small key) lets an attacker repackage or impersonate the app.",
+        "developer_fix": "Sign with APK Signature Scheme v2+/v3, use a 2048-bit+ production key, never ship debug builds.",
+        "code_example": "// build.gradle signingConfigs — release key, v2/v3 enabled\nv2SigningEnabled true\nv3SigningEnabled true",
+    },
+    "ROOT_DETECTION": {
+        "why_dangerous": "Not dangerous in itself — but treating on-device root detection as a hard boundary is bypassable.",
+        "developer_fix": "Combine with server-side Play Integrity / DeviceCheck attestation.",
+        "code_example": "IntegrityManagerFactory.create(ctx)\n  .requestIntegrityToken(...);  // verify the token server-side",
+    },
+    "DEEP_LINKS": {
+        "why_dangerous": "An unverified deep link lets external content drive the app into sensitive flows with attacker-chosen data.",
+        "developer_fix": "Verify App Links (autoVerify + assetlinks.json), authenticate before acting, and validate link params.",
+        "code_example": "<intent-filter android:autoVerify=\"true\"> … </intent-filter>",
+    },
+    "INTENT_INJECTION": {
+        "why_dangerous": "An exported component lets any installed app invoke privileged functionality or read returned data.",
+        "developer_fix": "Set exported=false unless required, enforce a signature permission, and validate Intent action/extras.",
+        "code_example": "<activity android:name=\".Secret\" android:exported=\"false\"/>",
+    },
+    "SQL_INJECTION": {
+        "why_dangerous": "Untrusted input concatenated into SQL lets an attacker rewrite the query.",
+        "developer_fix": "Use parameterized queries with bound arguments — never concatenate input.",
+        "code_example": "db.rawQuery(\"SELECT * FROM t WHERE id = ?\", new String[]{ userId });",
+    },
+    "FILE_STORAGE": {
+        "why_dangerous": "Sensitive data on external/world-readable storage can be read by other apps or backups.",
+        "developer_fix": "Use app-internal storage with Keystore-backed encryption (EncryptedFile / EncryptedSharedPreferences).",
+        "code_example": "EncryptedSharedPreferences.create(ctx, \"secret\", masterKey,\n  PrefKeyEncryptionScheme.AES256_SIV, PrefValueEncryptionScheme.AES256_GCM);",
+    },
+    "GENERIC": {
+        "why_dangerous": "An attacker who reaches this code path can leverage the weakness toward data access or control.",
+        "developer_fix": "Review the evidence, confirm exploitability, and apply the platform's secure-coding guidance.",
+        "code_example": "// See the remediation summary and references for the secure pattern.",
+    },
+}
+
+
+def _evidence_locations(finding: dict) -> list:
+    """Task 2 — exact, navigable evidence: file + line_start/end + highlight_line."""
+    locs = []
+    fe = finding.get("file_evidence")
+    if isinstance(fe, list):
+        for e in fe:
+            if not isinstance(e, dict) or not e.get("path"):
+                continue
+            lines = e.get("lines") or ([finding["line"]] if finding.get("line") else [])
+            hl = lines[0] if lines else None
+            locs.append({
+                "file": e["path"],
+                "line_start": min(lines) if lines else None,
+                "line_end": max(lines) if lines else None,
+                "highlight_line": hl,
+                "snippet": e.get("snippet") or finding.get("snippet") or "",
+            })
+    if not locs:
+        path = finding.get("file_path") or finding.get("full_path")
+        if path:
+            ln = finding.get("line") or None
+            locs.append({
+                "file": path, "line_start": ln, "line_end": ln,
+                "highlight_line": ln, "snippet": finding.get("snippet") or "",
+            })
+    return locs
+
+
+# ─── AnalystExplanation builder (Task 1/2/3) ─────────────────────────────────
 def build_explanation(finding: dict) -> dict:
     cat = categorize(finding)
     tpl = _TEMPLATES[cat]
+    det = _DETAIL.get(cat, _DETAIL["GENERIC"])
     masvs = finding.get("masvs") or tpl["masvs"]
     owasp = finding.get("owasp") or tpl["owasp"]
     references = list(tpl["references"])
     if finding.get("cwe") and finding["cwe"] not in " ".join(references):
         references.append(str(finding["cwe"]))
+    # what_found is the CONCRETE thing detected (matched code), not a template.
+    what_found = (finding.get("snippet") or finding.get("value")
+                  or finding.get("matched_string") or "").strip() or det.get("why_dangerous", "")[:0] or "See evidence."
     return {
         "title": finding.get("title") or finding.get("name") or "Finding",
         "category_template": cat,
+        "what_found": what_found,
         "why_it_matters": tpl["why_it_matters"],
+        "why_dangerous": det["why_dangerous"],
         "attack_scenario": tpl["attack_scenario"],
         "prerequisites": list(tpl["prerequisites"]),
         "impact": tpl["impact"],
         "remediation": {
             "summary": finding.get("recommendation") or tpl["remediation_summary"],
+            "developer_fix": det["developer_fix"],
             "masvs": masvs,
             "owasp": owasp,
         },
+        "developer_fix": det["developer_fix"],
+        "code_example": det["code_example"],
+        "evidence_locations": _evidence_locations(finding),
         "references": references,
         "false_positive_notes": tpl["false_positive_notes"],
         "confidence_reason": _confidence_reason(finding),

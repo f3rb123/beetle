@@ -885,6 +885,12 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         masvs_intel.annotate(results)
     except Exception:
         log.exception("[masvs_intel] failed; no MASVS coverage emitted")
+    # ── Phase 11.75: analyst workspaces + evidence intelligence (additive) ──
+    try:
+        from . import workspaces
+        workspaces.annotate(results)
+    except Exception:
+        log.exception("[workspaces] failed; workspace structures not emitted")
     _build_quick_summary(results)
     _record_module_metric(results, "finalize_results", finalize_started, finding_count=len(results.get("findings", [])))
 

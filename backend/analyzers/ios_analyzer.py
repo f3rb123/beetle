@@ -406,6 +406,12 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         masvs_intel.annotate(results)
     except Exception:
         log.exception("[masvs_intel] failed; no MASVS coverage emitted")
+    # ── Phase 11.75: analyst workspaces + evidence intelligence (additive) ──
+    try:
+        from . import workspaces
+        workspaces.annotate(results)
+    except Exception:
+        log.exception("[workspaces] failed; workspace structures not emitted")
 
     # ── Quick summary ─────────────────────────────────────────────────────────
     _build_ios_quick_summary(results)
