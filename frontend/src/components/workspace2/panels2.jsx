@@ -276,6 +276,14 @@ export function TaintFlowPanel({ results, onOpenCode }) {
                     : <Step kind="Transformation" label="direct flow (no intermediate calls)" />}
                   <Step kind="Sink" label={t.sink} last exposure />
                 </div>
+                {(t.call_chain || []).length ? (
+                  <div style={{ marginTop: 10 }}>
+                    <div className="ws-block__label">Call chain</div>
+                    <div className="ws-mono ws-muted" style={{ fontSize: 11.5, lineHeight: 1.7, wordBreak: 'break-word' }}>
+                      {t.call_chain.join('  →  ')}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             )
           })}
@@ -853,9 +861,11 @@ export function MalwarePanel({ results }) {
   const vt = results.virustotal || {}
   const mp = (results.malware_perms || {}).malware_permissions || {}
   const suspiciousPerms = mp.matched || []
+  const sdks = results.sdks || []
   const hasCtl = rx => findings.some(f => rx.test(`${f.title} ${f.category}`))
   const blob = JSON.stringify(apkid).toLowerCase()
   const [tq, setTq] = useState('')
+  const [sq, setSq] = useState('')
 
   const indicators = [
     ['Obfuscation', /obfuscat|proguard|r8|dexguard/.test(blob) || hasCtl(/obfuscat/i)],
@@ -877,6 +887,9 @@ export function MalwarePanel({ results }) {
 
   const avDetections = vt.available ? (vt.main?.malicious ?? vt.malicious ?? 0) : null
 
+  // SDKs (searchable).
+  const sdkRows = sdks.filter(s => !sq || `${s.name} ${s.category} ${s.package}`.toLowerCase().includes(sq.toLowerCase()))
+
   return (
     <div>
       <div className="ws-section__head"><h1>Malware Analysis</h1></div>
@@ -884,6 +897,7 @@ export function MalwarePanel({ results }) {
       {/* Risk summary */}
       <div className="ws-metrics ws-section">
         <Metric label="Trackers" value={trackers.length} />
+        <Metric label="SDKs" value={sdks.length} />
         <Metric label="Suspicious Perms" value={`${suspiciousPerms.length}${mp.total ? ` / ${mp.total}` : ''}`} />
         <Metric label="Obfuscation Signals" value={obfCount} />
         <Metric label="AV Detections" value={avDetections === null ? 'N/A' : avDetections} />
@@ -909,6 +923,28 @@ export function MalwarePanel({ results }) {
             </div>
           </>
         ) : <EmptyState title="No trackers detected" body="No known third-party tracking/analytics SDK signatures matched this package." />}
+      </div>
+
+      {/* SDKs */}
+      <div className="ws-section">
+        <div className="ws-section__head"><h2>Bundled SDKs</h2><span className="ws-muted">{sdks.length}</span></div>
+        {sdks.length ? (
+          <>
+            <div className="ws-toolbar"><input className="ws-input" placeholder="Search SDKs…" value={sq} onChange={e => setSq(e.target.value)} style={{ minWidth: 240 }} /></div>
+            <div className="ws-card" style={{ overflow: 'hidden' }}>
+              {sdkRows.map((s, i) => (
+                <div key={i} className="ws-file">
+                  <Boxes size={13} className="ws-muted" />
+                  <span style={{ fontWeight: 560, fontSize: 13 }}>{s.name}</span>
+                  {s.category ? <SoftTag>{s.category}</SoftTag> : null}
+                  {s.severity && s.severity !== 'info' ? <SeverityTag severity={s.severity} compact /> : null}
+                  <span className="ws-file__path ws-mono ws-muted" title={s.package}>{s.package}</span>
+                </div>
+              ))}
+              {!sdkRows.length ? <p className="ws-muted" style={{ padding: 14 }}>No SDKs match your search.</p> : null}
+            </div>
+          </>
+        ) : <EmptyState title="No SDKs identified" body="No known third-party SDK package signatures were detected in this app's code." />}
       </div>
 
       {/* AV detections */}
