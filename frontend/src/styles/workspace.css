@@ -142,7 +142,7 @@
 .ws-sevlegend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; }
 .ws-sevlegend__item { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ws-ink-2); }
 
-.ws-two { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; align-items: start; }
+.ws-two { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 16px; align-items: start; }
 .ws-two > * { min-width: 0; }
 .ws-grid > * { min-width: 0; }
 .ws-list { display: flex; flex-direction: column; }
@@ -225,6 +225,16 @@
 .ws-secret { display: flex; align-items: center; gap: 12px; padding: 13px 16px; border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); margin-bottom: 8px; }
 .ws-secret__name { font-weight: 580; font-size: 14px; }
 .ws-secret__val { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 12px; color: var(--ws-ink-2); background: var(--ws-bg-sunken); padding: 2px 8px; border-radius: 6px; margin-top: 4px; display: inline-block; }
+/* Secret evidence cards (Phase 11.96) — full type/confidence/file:line/snippet */
+.ws-seccard { border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); padding: 13px 16px; margin-bottom: 10px; min-width: 0; }
+.ws-seccard__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ws-seccard__type { font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+.ws-seccard__val { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 12px; color: var(--ws-ink-2); background: var(--ws-bg-sunken); padding: 4px 8px; border-radius: 6px; margin-top: 8px; overflow-wrap: anywhere; word-break: break-all; }
+.ws-seccard__loc { font-size: 12px; color: var(--ws-ink-3); margin-top: 6px; overflow-wrap: anywhere; }
+.ws-seccard__loc--none { font-style: italic; }
+.ws-seccard__actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.ws-code--inline { margin-top: 8px; max-height: 120px; overflow: auto; }
+
 .ws-vstate { font-size: 11px; font-weight: 650; padding: 2px 8px; border-radius: 6px; text-transform: capitalize; }
 .ws-vstate--valid { background: #fef3f2; color: #b42318; }
 .ws-vstate--invalid { background: #f1f1f3; color: #52525b; }
@@ -343,7 +353,12 @@
 
 /* Two-column overview: scrolling left column + sticky right rail */
 .ws-col { display: flex; flex-direction: column; gap: 26px; min-width: 0; }
-.ws-rail { position: sticky; top: 76px; align-self: start; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+/* The rail is sticky inside its own grid track. min-width:0 + overflow-wrap keep
+   long titles/values from forcing the track wider than its share, which is what
+   previously let rail cards bleed over the left column at non-100% zoom. */
+.ws-rail { position: sticky; top: 76px; align-self: start; display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%; }
+.ws-rail .ws-card { min-width: 0; max-width: 100%; }
+.ws-rail .ws-card * { overflow-wrap: anywhere; }
 @media (max-width: 1120px) {
   .ws-rail { position: static; }
 }

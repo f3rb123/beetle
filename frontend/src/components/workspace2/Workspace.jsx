@@ -199,7 +199,7 @@ export default function Workspace({ results, scanId, onOpenCode, actions }) {
             {section === 'overview' && <OverviewPanel results={results} onOpenSection={setSection} onOpenFinding={openFinding} onOpenCode={onOpenCode} />}
             {section === 'findings' && <FindingsPanel results={results} onOpenFinding={openFinding} onOpenCode={onOpenCode} />}
             {section === 'chains' && <ChainsPanel results={results} />}
-            {section === 'secrets' && <SecretsPanel results={results} />}
+            {section === 'secrets' && <SecretsPanel results={results} onOpenCode={onOpenCode} />}
             {section === 'masvs' && <MasvsPanel results={results} />}
             {section === 'ciso' && <CisoSummaryPanel results={results} onOpenSection={setSection} />}
             {section === 'developer' && <DeveloperGuidePanel results={results} onOpenCode={onOpenCode} />}

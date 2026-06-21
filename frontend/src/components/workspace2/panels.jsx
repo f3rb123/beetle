@@ -529,28 +529,84 @@ export function ChainsPanel({ results }) {
 }
 
 // ───────────────────────────── Secrets ───────────────────────────────────
-function SecretRow({ s }) {
-  const state = (s.validation_result || 'skipped').toLowerCase()
+// Phase 11.96 — every secret exposes type, confidence, file:line, snippet,
+// masked value, View Code and Open Finding (no anonymous cards). Reuses the
+// canonical secret schema (evidence.{file_path,line,snippet}, provider, type,
+// confidence, validation_result, is_pair, members, relationship_type).
+const VSTATE_CLASS = s => ['valid', 'invalid', 'eligible', 'skipped'].includes(s) ? s : 'skipped'
+
+function secretType(s) {
+  return s.provider || s.type || s.name || s.title || 'Secret'
+}
+
+// Build the navigable evidence list for a secret (single → one location;
+// pair → one per member). Each entry feeds onOpenCode for exact-line/highlight.
+function secretEvidence(s) {
+  const out = []
+  const seen = new Set()
+  const push = (path, line, snippet, label) => {
+    if (!path) return
+    const key = `${path}#${line || ''}`
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push({ path, line: line || null, lines: line ? [line] : [], snippet: snippet || '', source: label })
+  }
+  for (const m of (s.members || [])) push(m.file_path, m.line, m.snippet, `${m.provider || m.type || 'member'} location`)
+  for (const fe of (s.file_evidence || [])) push(fe.path, (fe.lines || [])[0], fe.snippet, 'credential pair')
+  const ev = s.evidence || {}
+  push(ev.file_path || s.full_path || s.file_path, ev.line || s.line, ev.snippet || s.snippet, 'secret location')
+  return out
+}
+
+function openSecretCode(loc, evidence, i, onOpenCode) {
+  if (!onOpenCode || !loc?.path) return
+  onOpenCode(loc.path, loc.lines, {
+    snippet: loc.snippet, source: loc.source || 'secret', highlightLine: loc.line || undefined,
+    evidence, index: i,
+  })
+}
+
+function SecretCard({ s, onOpenCode, onOpen }) {
+  const state = VSTATE_CLASS((s.validation_result || 'skipped').toLowerCase())
+  const ev = secretEvidence(s)
+  const primary = ev[0]
+  const conf = s.confidence || confidenceLabel(s)
+  const masked = s.masked_value || s.value || '••••••••'
   return (
-    <div className="ws-secret">
-      <KeyRound size={16} className="ws-muted" />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div className="ws-secret__name">{s.name || s.type || s.provider}</div>
-        <div className="ws-secret__val">{s.masked_value || s.value || '••••'}</div>
+    <div className="ws-seccard">
+      <div className="ws-seccard__head">
+        <KeyRound size={15} className="ws-muted" />
+        <span className="ws-seccard__type">{secretType(s)}</span>
+        {s.is_pair ? <SoftTag>credential pair</SoftTag> : null}
+        {conf ? <SoftTag title="Confidence">{String(conf).toUpperCase()} confidence</SoftTag> : null}
+        {s.severity ? <SeverityTag severity={s.severity} compact /> : null}
+        <span className={`ws-vstate ws-vstate--${state}`} style={{ marginLeft: 'auto' }}>{state}</span>
       </div>
-      {s.severity ? <SeverityTag severity={s.severity} compact /> : null}
-      <span className={`ws-vstate ws-vstate--${['valid', 'invalid', 'eligible', 'skipped'].includes(state) ? state : 'skipped'}`}>{state}</span>
+      <div className="ws-seccard__val ws-mono">{masked}</div>
+      {primary
+        ? <div className="ws-seccard__loc ws-mono" title={primary.path}>{primary.path.split('/').pop()}{primary.line ? `:${primary.line}` : ''}{ev.length > 1 ? `  ·  +${ev.length - 1} more` : ''}</div>
+        : <div className="ws-seccard__loc ws-seccard__loc--none">No source location</div>}
+      {primary?.snippet ? <pre className="ws-code ws-code--inline">{primary.snippet}</pre> : null}
+      <div className="ws-seccard__actions">
+        {primary && onOpenCode ? (
+          <button type="button" className="ws-btn ws-btn--sm" onClick={() => openSecretCode(primary, ev, 0, onOpenCode)}>
+            <FileCode2 size={13} /> View Code
+          </button>
+        ) : null}
+        <button type="button" className="ws-btn ws-btn--sm" onClick={onOpen}>Open Finding</button>
+      </div>
     </div>
   )
 }
 
-export function SecretsPanel({ results }) {
+export function SecretsPanel({ results, onOpenCode }) {
   const secrets = results.secrets || []
   const suppressed = results.suppressed_secrets || []
   const exposures = results.cloud_exposures || []
   const sum = results.secrets_summary || {}
   const pairs = secrets.filter(s => s.is_pair)
   const singles = secrets.filter(s => !s.is_pair)
+  const [drawer, setDrawer] = useState(null)
 
   if (!secrets.length && !suppressed.length && !exposures.length) {
     return <EmptyState title="No secrets detected" body="No embedded credentials, keys, or tokens were found in application-owned code." />
@@ -567,24 +623,131 @@ export function SecretsPanel({ results }) {
         <Metric label="Cloud Exposures" value={sum.public_cloud_exposures ?? exposures.length} />
       </div>
 
-      <Group title="Credential Pairs" hide={!pairs.length}>{pairs.map((s, i) => <SecretRow key={i} s={s} />)}</Group>
-      <Group title="Credentials" hide={!singles.length}>{singles.map((s, i) => <SecretRow key={i} s={s} />)}</Group>
+      <Group title="Credential Pairs" hide={!pairs.length}>{pairs.map((s, i) => <SecretCard key={i} s={s} onOpenCode={onOpenCode} onOpen={() => setDrawer(s)} />)}</Group>
+      <Group title="Credentials" hide={!singles.length}>{singles.map((s, i) => <SecretCard key={i} s={s} onOpenCode={onOpenCode} onOpen={() => setDrawer(s)} />)}</Group>
       <Group title="Cloud Exposure" hide={!exposures.length}>
         {exposures.map((e, i) => (
-          <div key={i} className="ws-secret">
-            <ShieldAlert size={16} style={{ color: SEV_COLOR[normSev(e.severity)] }} />
-            <div style={{ flex: 1 }}>
-              <div className="ws-secret__name">{e.summary || e.exposure_type}</div>
-              <div className="ws-secret__val">{e.evidence?.target_masked || e.exposure_type}</div>
+          <div key={i} className="ws-seccard">
+            <div className="ws-seccard__head">
+              <ShieldAlert size={15} style={{ color: SEV_COLOR[normSev(e.severity)] }} />
+              <span className="ws-seccard__type">{e.summary || e.exposure_type}</span>
+              {e.confidence ? <SoftTag>{String(e.confidence).toUpperCase()} confidence</SoftTag> : null}
+              <SeverityTag severity={e.severity} compact />
             </div>
-            <SeverityTag severity={e.severity} compact />
+            <div className="ws-seccard__val ws-mono">{e.evidence?.target_masked || e.exposure_type}</div>
+            {e.evidence?.detail || e.detail ? <div className="ws-seccard__loc">{e.evidence?.detail || e.detail}</div> : null}
           </div>
         ))}
       </Group>
       <Group title="Suppressed" hide={!suppressed.length} muted>
-        {suppressed.map((s, i) => <SecretRow key={i} s={s} />)}
+        {suppressed.map((s, i) => <SecretCard key={i} s={s} onOpenCode={onOpenCode} onOpen={() => setDrawer(s)} />)}
       </Group>
+
+      {drawer ? <SecretDrawer secret={drawer} results={results} onClose={() => setDrawer(null)} onOpenCode={onOpenCode} /> : null}
     </div>
+  )
+}
+
+// ─── Secret detail drawer (Task 3) — pattern type, entropy, SDK suppression,
+// validation result, chain relationships, cloud exposure, credential pairs,
+// plus per-location View Code (exact line / highlight / multiple locations). ──
+function SecretDrawer({ secret: s, results, onClose, onOpenCode }) {
+  useEscape(onClose)
+  const ev = secretEvidence(s)
+  const conf = s.confidence || confidenceLabel(s)
+  const state = (s.validation_result || 'skipped').toLowerCase()
+  const partners = [...(s.paired_with || []), ...((s.members || []).map(m => m.provider || m.type))].filter(Boolean)
+  // Cross-reference any cloud exposure that names this secret's provider.
+  const exposures = (results.cloud_exposures || []).filter(e =>
+    s.provider && `${e.summary || ''} ${e.exposure_type || ''} ${e.provider || ''}`.toLowerCase().includes(String(s.provider).toLowerCase()))
+
+  return (
+    <>
+      <div className="ws-drawer-backdrop" onClick={onClose} />
+      <aside className="ws-drawer" role="dialog" aria-label="Secret details">
+        <div className="ws-drawer__head">
+          <div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
+              {s.severity ? <SeverityTag severity={s.severity} /> : null}
+              {conf ? <SoftTag>{String(conf).toUpperCase()} conf</SoftTag> : null}
+              <span className={`ws-vstate ws-vstate--${VSTATE_CLASS(state)}`}>{state}</span>
+            </div>
+            <h3>{secretType(s)}</h3>
+          </div>
+          <button type="button" className="ws-drawer__close" onClick={onClose}>×</button>
+        </div>
+        <div className="ws-drawer__body">
+          <Block label="Masked Value"><pre className="ws-code">{s.masked_value || s.value || '••••••••'}</pre></Block>
+
+          <Block label="Details">
+            <div className="ws-kv">
+              {[
+                ['Pattern Type', s.type || s.provider || s.name],
+                ['Provider', s.provider],
+                ['Confidence', conf ? `${String(conf).toUpperCase()}${s.detector_confidence != null ? ` (${s.detector_confidence})` : ''}` : ''],
+                ['Entropy', s.entropy != null ? Number(s.entropy).toFixed(2) : ''],
+                ['Ownership', ownershipLabel(s)],
+                ['Validation Result', state],
+                ['SDK Suppression', s.suppressed_reason || (s.suppressed ? 'suppressed' : 'not suppressed')],
+                ['Relationship', s.relationship_type],
+                ['Value SHA-256', s.value_sha256 ? `${String(s.value_sha256).slice(0, 16)}…` : ''],
+              ].filter(([, v]) => v !== undefined && v !== null && v !== '').map(([k, v]) => (
+                <div key={k} className="ws-kv__row"><span className="ws-kv__k">{k}</span><span className="ws-kv__v ws-mono">{v}</span></div>
+              ))}
+            </div>
+          </Block>
+
+          {partners.length ? (
+            <Block label="Chain Relationships">
+              <p style={{ fontSize: 13 }}>{s.is_pair ? 'Credential pair' : 'Linked'} {s.relationship_type ? `(${s.relationship_type})` : ''} with:</p>
+              <div className="ws-refs">{partners.map((p, i) => <SoftTag key={i}>{p}</SoftTag>)}</div>
+            </Block>
+          ) : null}
+
+          {(s.members || []).length ? (
+            <Block label="Credential Pair Members">
+              {s.members.map((m, i) => (
+                <div key={i} className="ws-list__row" style={{ borderTop: i ? '1px solid var(--ws-line)' : 'none' }}>
+                  <span className="ws-list__grow">
+                    <span className="ws-list__title">{m.provider || m.type}</span>
+                    <span className="ws-list__why ws-mono">{m.masked_value || ''} · {m.file_path ? `${String(m.file_path).split('/').pop()}${m.line ? `:${m.line}` : ''}` : 'no location'}</span>
+                  </span>
+                  {m.file_path && onOpenCode ? <button type="button" className="ws-btn ws-btn--sm" onClick={() => onOpenCode(m.file_path, m.line ? [m.line] : [], { highlightLine: m.line, snippet: m.snippet, source: 'pair member' })}><FileCode2 size={12} /></button> : null}
+                </div>
+              ))}
+            </Block>
+          ) : null}
+
+          {exposures.length ? (
+            <Block label="Cloud Exposure">
+              {exposures.map((e, i) => (
+                <div key={i} className="ws-callout" style={{ marginBottom: 8 }}>
+                  <b>{e.summary || e.exposure_type}</b>
+                  <div className="ws-mono" style={{ marginTop: 4 }}>{e.evidence?.target_masked || e.exposure_type}</div>
+                </div>
+              ))}
+            </Block>
+          ) : null}
+
+          {/* Evidence locations with exact-line View Code (Task 4) */}
+          <Block label={`Evidence${ev.length > 1 ? ` · ${ev.length} locations` : ''}`}>
+            {ev.length ? ev.map((loc, i) => (
+              <div key={i} className="ws-evid">
+                <div className="ws-evid__head">
+                  <span className="ws-evid__num">Evidence #{i + 1}</span>
+                  <span className="ws-evid__src">{loc.source}</span>
+                </div>
+                <div className="ws-evid__loc ws-mono" title={loc.path}>{loc.path.split('/').pop()}{loc.line ? <span className="ws-evid__line">:{loc.line}</span> : null}</div>
+                {loc.snippet ? <pre className="ws-code">{loc.snippet}</pre> : null}
+                <div className="ws-evid__actions">
+                  {onOpenCode ? <button type="button" className="ws-btn" onClick={() => openSecretCode(loc, ev, i, onOpenCode)}><FileCode2 size={14} /> View Code</button> : null}
+                </div>
+              </div>
+            )) : <div className="ws-evid ws-evid--none"><div className="ws-evid__reason">No source location was resolved for this secret.</div></div>}
+          </Block>
+        </div>
+      </aside>
+    </>
   )
 }
 
