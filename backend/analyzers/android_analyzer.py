@@ -798,6 +798,16 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
             if s.get("value", "") not in jwt_values_final
         ]
 
+    # ── Phase 9.1: secret intelligence foundation (canonical model + masking) ──
+    # Runs AFTER all secret producers + legacy validation + JWT/JS dedup so it is
+    # the single choke point that masks raw values before serialization. Additive
+    # and network-free; partitions results["secrets"] and builds secrets_summary.
+    try:
+        from . import secret_intel
+        secret_intel.process_secrets(results, results.get("app_info", {}).get("package", ""))
+    except Exception:
+        log.exception("[secret_intel] failed; leaving secrets unprocessed")
+
     # ── Severity summary ──────────────────────────────────────────────────────
     finalize_started = time.perf_counter()
     _apply_finding_validation_layer(results)

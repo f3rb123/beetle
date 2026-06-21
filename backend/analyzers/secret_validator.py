@@ -12,6 +12,7 @@ Each validator returns one of:
 
 from __future__ import annotations
 
+import os
 import re
 import json
 import urllib.request
@@ -22,6 +23,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ─── Probe timeout (seconds) ─────────────────────────────────────────────────
 PROBE_TIMEOUT = 6
+
+
+def _live_checks_disabled() -> bool:
+    """Live validation is OFF whenever live checks are disabled or a benchmark is
+    running. This keeps offline/benchmark scans network-free and deterministic
+    (Phase 9 safety model). No probe is issued; every secret is marked skipped."""
+    for var in ("CORTEX_DISABLE_LIVE_CHECKS", "CORTEX_BENCHMARK"):
+        if os.environ.get(var, "").strip().lower() in ("1", "true", "yes"):
+            return True
+    return False
 
 
 def _get(url: str, headers: dict = None, timeout: int = PROBE_TIMEOUT) -> tuple[int, str]:
@@ -281,6 +292,14 @@ def validate_secrets(secrets: list) -> list:
     Runs probes concurrently (max 8 threads).
     """
     if not secrets:
+        return secrets
+
+    # Benchmark / offline safety: never touch the network. Mark all skipped so
+    # downstream (secret_intel) sees a deterministic, network-free result.
+    if _live_checks_disabled():
+        for secret in secrets:
+            secret["validated"] = False
+            secret["validation_result"] = "skipped"
         return secrets
 
     # Only probe secrets that have a known validator

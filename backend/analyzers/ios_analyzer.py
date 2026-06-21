@@ -360,6 +360,12 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     results["findings"] = dedupe_findings(results["findings"])
     # ── Phase 0/1: canonical normalization + ownership (additive, non-destructive) ──
     _app_pkg = results.get("app_info", {}).get("bundle_id", "")
+    # ── Phase 9.1: secret intelligence foundation (canonical model + masking) ──
+    try:
+        from . import secret_intel
+        secret_intel.process_secrets(results, _app_pkg)
+    except Exception:
+        log.exception("[secret_intel] failed; leaving secrets unprocessed")
     finding_model.canonicalize_findings(results["findings"], _app_pkg)
     results["ownership_metrics"] = finding_model.emit_diagnostics(
         results["findings"], platform="ios", app_package=_app_pkg,
