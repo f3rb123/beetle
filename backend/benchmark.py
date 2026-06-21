@@ -141,13 +141,49 @@ def _is_app_owned(f: dict) -> bool:
     return f.get("is_app_code") is True or f.get("ownership") == "APP"
 
 
-def run_scan(apk_path: str, name: str):
+# Where decompile_apk lays down its output: /tmp/cortex/scans/<scan_id>/{jadx,apktool}
+_SCANS_DIR = os.environ.get("CORTEX_SCAN_DIR", "/tmp/cortex/scans")
+
+
+def _java_file_count(jadx_dir: str) -> int:
+    n = 0
+    for _root, _dirs, files in os.walk(jadx_dir or ""):
+        n += sum(1 for f in files if f.endswith(".java"))
+        if n > 50:  # cheap "non-empty" check — no need to count all of a huge app
+            break
+    return n
+
+
+def run_scan(profile: dict, apk_path: str, refresh_decompile: bool = False):
+    """Decompile (cached) then analyze, using a STABLE scan_id per app so the
+    decompiled corpus is frozen and reused across runs.
+
+    jadx decompiles a slightly different class subset on each fresh run of a large
+    app, which perturbs the finding set and nudges the trust score across rounding
+    boundaries. Freezing the decompile per app removes that run-to-run variance so
+    trust comparisons are reproducible. The SAME scan_id is used for decompile and
+    analyze so source resolution resolves against the frozen corpus.
+    """
     from decompiler import decompile_apk
     from analyzers.android_analyzer import analyze_apk
-    sid = "bench-" + uuid.uuid4().hex[:8]
-    info = decompile_apk(apk_path, sid)
+
+    sid = "benchcache-" + profile["key"]
+    jadx_dir = os.path.join(_SCANS_DIR, sid, "jadx")
+    apktool_dir = os.path.join(_SCANS_DIR, sid, "apktool")
+    cache_hit = (not refresh_decompile and os.path.isdir(jadx_dir)
+                 and _java_file_count(jadx_dir) > 0)
+
+    if cache_hit:
+        info = {"jadx_dir": jadx_dir, "apktool_dir": apktool_dir,
+                "tools_used": ["jadx (cached)", "apktool (cached)"], "errors": [], "cached": True}
+    else:
+        info = decompile_apk(apk_path, sid)
+        info["cached"] = False
+        jadx_dir = info.get("jadx_dir") or jadx_dir
+        apktool_dir = info.get("apktool_dir") or apktool_dir
+
     res = analyze_apk(apk_path, sid, os.path.basename(apk_path),
-                      jadx_dir=info.get("jadx_dir"), apktool_dir=info.get("apktool_dir"))
+                      jadx_dir=jadx_dir, apktool_dir=apktool_dir)
     return sid, res, info
 
 
@@ -388,6 +424,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Cortex benchmark & quality gate")
     ap.add_argument("--apk", help="run a single profile by key (e.g. insecureshop)")
     ap.add_argument("--update-baseline", action="store_true", help="write current run as the regression baseline")
+    ap.add_argument("--refresh-decompile", action="store_true",
+                    help="rebuild the cached decompilation instead of reusing it")
     ap.add_argument("--out", default=OUT_DIR, help="output directory")
     args = ap.parse_args()
 
@@ -415,7 +453,8 @@ def main() -> int:
             continue
         print(f"[run ] {profile['name']} ({os.path.basename(apk)}) …", flush=True)
         try:
-            sid, res, _info = run_scan(apk, profile["name"])
+            sid, res, _info = run_scan(profile, apk, refresh_decompile=args.refresh_decompile)
+            print(f"       decompile: {'cached (frozen corpus)' if _info.get('cached') else 'fresh'}", flush=True)
             pdf_ok, pdf_detail = check_pdf(res, sid)
             m = collect_metrics(profile, res, pdf_ok, pdf_detail, apk)
             apps.append(m)

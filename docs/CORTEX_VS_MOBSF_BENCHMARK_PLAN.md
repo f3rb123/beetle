@@ -48,6 +48,15 @@ The framework is the **quality gate every future Cortex release must pass**.
   product produces, so the benchmark cannot drift from reality.
 * **Deterministic inputs.** A fixed APK dataset (see §6) under a configurable
   directory. Apps that are not present are reported as `missing`, never faked.
+* **Frozen decompilation.** jadx decompiles a slightly different class subset on
+  each fresh run of a large app, which perturbs the finding set and nudges trust
+  across rounding boundaries (observed on the 85 MB Washington Post app: trust
+  drifted in an 82–84 band while source/view-code stayed pinned at 97%). To make
+  fine-grained trust comparisons reproducible, the runner decompiles each app
+  **once** to a stable scan id (`benchcache-<key>`) and **reuses that frozen
+  corpus** on subsequent runs (analysis is deterministic given a fixed corpus).
+  `--refresh-decompile` rebuilds the cache. (NB: taint is unrelated — it is
+  deterministically skipped on apps whose combined DEX exceeds the 30 MB guard.)
 * **Baseline-relative.** First run writes `benchmark_baseline.json`. Subsequent
   runs diff against it and flag any tracked metric that drops beyond tolerance.
 
