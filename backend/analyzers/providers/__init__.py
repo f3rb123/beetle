@@ -15,12 +15,12 @@ from __future__ import annotations
 
 import os
 
-from .base_provider import BaseProvider
-from .claude_provider import ClaudeProvider
-from .openai_provider import OpenAIProvider
-from .gemini_provider import GeminiProvider
-from .deepseek_provider import DeepSeekProvider
-from .ollama_provider import OllamaProvider
+from .base import BaseProvider
+from .claude import ClaudeProvider
+from .openai import OpenAIProvider
+from .gemini import GeminiProvider
+from .deepseek import DeepSeekProvider
+from .ollama import OllamaProvider
 
 _REGISTRY = {
     "claude": ClaudeProvider(),

@@ -57,6 +57,13 @@ except Exception as _ai_err:
     AI_AVAILABLE = False
     def enrich_finding(*a, **kw): return {"error": f"AI module unavailable: {_ai_err}", "cached": False}
     def enrich_findings_batch(*a, **kw): return []
+
+try:
+    import ai_actions
+    ai_actions.init_ai_actions_db()
+except Exception as _aia_err:
+    ai_actions = None
+    logging.getLogger("cortex").warning("ai_actions unavailable: %s", _aia_err)
     log_msg = f"[main] AI enrichment unavailable: {_ai_err}"
 
 try:
@@ -466,6 +473,41 @@ async def api_test_webhook(wid: int, _admin: dict = Depends(_require_admin)):
 async def ai_status(_user: dict = Depends(_require_auth)):
     """Check whether AI enrichment is available."""
     return {"available": AI_AVAILABLE, "model": "claude-haiku-4-5-20251001"}
+
+
+@app.get("/api/ai/providers")
+async def ai_providers(_user: dict = Depends(_require_auth)):
+    """List AI providers and their availability (drives the UI selector).
+    Unavailable providers are returned too, so the UI can disable them."""
+    if ai_actions is None:
+        return {"providers": [], "any_available": False}
+    provs = ai_actions.list_providers()
+    return {"providers": provs, "any_available": any(p.get("available") for p in provs)}
+
+
+@app.post("/api/ai/action")
+async def ai_action(request: Request, _user: dict = Depends(_require_auth)):
+    """Run one AI finding-action.
+    Body: { action, provider?, model?, finding?, results? }
+    action ∈ explain | verify | worth_testing | generate_poc | generate_fix | summary
+
+    Offline-safe: with no provider configured it returns a deterministic,
+    evidence-only result (mode='deterministic'). Never suppresses a finding."""
+    if ai_actions is None:
+        raise HTTPException(503, detail="AI actions module unavailable")
+    body = await request.json()
+    action = (body.get("action") or "").strip()
+    if action not in ai_actions.ACTIONS:
+        raise HTTPException(400, detail=f"Unknown action. Valid: {list(ai_actions.ACTIONS)}")
+    result = ai_actions.run_action(
+        action,
+        finding=body.get("finding") or {},
+        results=body.get("results") or {},
+        provider_name=body.get("provider"),
+        model=body.get("model"),
+        use_cache=bool(body.get("use_cache", True)),
+    )
+    return JSONResponse(content=result)
 
 
 @app.post("/api/ai/enrich")

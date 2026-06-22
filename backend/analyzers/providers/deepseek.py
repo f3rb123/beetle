@@ -6,7 +6,7 @@ import json
 import urllib.request
 import os
 
-from .base_provider import BaseProvider
+from .base import BaseProvider
 
 
 class DeepSeekProvider(BaseProvider):

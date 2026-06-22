@@ -1,7 +1,7 @@
 // Phase 13 workspace panels. Presentation only — consumes the existing `results`
 // blob (findings, analyst_explanation, secrets_summary, cloud_attack_paths,
 // masvs_coverage/masvs_summary, trust_score). No backend calls except onOpenCode.
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   ArrowUpRight, FileCode2, KeyRound, ShieldAlert, Boxes, ExternalLink,
   ChevronRight, Layers, Download, FileJson, GitBranch, ShieldCheck,
@@ -14,6 +14,7 @@ import {
   severityCounts, ownershipLabel, confidenceLabel, findingPath, findingLines, buildEvidence,
   evidenceUnavailableReason, useEscape,
 } from './ui.jsx'
+import { FINDING_AI_ACTIONS, fetchAiProviders, runFindingAction } from '../../lib/ai-providers.js'
 
 // ───────────────────────────── Overview ──────────────────────────────────
 export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCode }) {
@@ -288,11 +289,31 @@ export function FindingsPanel({ results, onOpenFinding, onOpenCode }) {
 // ───────────────────────── Finding details drawer ────────────────────────
 export function FindingDrawer({ finding, onClose, onOpenCode }) {
   useEscape(onClose)
+  const [providers, setProviders] = useState([])
+  const [provider, setProvider] = useState('')
+  const [busy, setBusy] = useState('')
+  const [aiResult, setAiResult] = useState(null)
+  useEffect(() => {
+    let live = true
+    fetchAiProviders().then(d => { if (live) setProviders(d.providers || []) })
+    return () => { live = false }
+  }, [])
+
   if (!finding) return null
   const f = finding
   const ex = f.analyst_explanation || {}
   const snippet = f.snippet || f.code_context || (f.file_evidence?.[0]?.snippet) || ''
   const rem = ex.remediation || {}
+
+  const runAi = async action => {
+    setBusy(action)
+    try {
+      const res = await runFindingAction({ action, provider: provider || undefined, finding: f })
+      setAiResult({ ...res, action })
+    } finally {
+      setBusy('')
+    }
+  }
 
   return (
     <>
@@ -310,6 +331,33 @@ export function FindingDrawer({ finding, onClose, onOpenCode }) {
           <button type="button" className="ws-drawer__close" onClick={onClose}>×</button>
         </div>
         <div className="ws-drawer__body">
+          {/* AI analysis (Phase 11.97) — reasons only about the evidence above */}
+          <Block label="AI Analysis">
+            <div className="ws-ai-bar">
+              <select className="ws-input ws-ai-provider" value={provider} onChange={e => setProvider(e.target.value)} aria-label="AI provider">
+                <option value="">Auto / Deterministic</option>
+                {providers.map(p => (
+                  <option key={p.id} value={p.id} disabled={!p.available}>
+                    {p.name}{p.available ? '' : ' (unavailable)'}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="ws-ai-actions">
+              {FINDING_AI_ACTIONS.map(a => (
+                <button key={a.id} type="button" className="ws-btn ws-btn--sm" disabled={!!busy} onClick={() => runAi(a.id)}>
+                  <Sparkles size={13} /> {busy === a.id ? 'Working…' : a.label}
+                </button>
+              ))}
+            </div>
+            {!providers.some(p => p.available) ? (
+              <p className="ws-muted" style={{ fontSize: 12, marginTop: 8 }}>
+                No LLM provider is configured — actions return a deterministic, evidence-only result.
+                Set an API key (ANTHROPIC/OPENAI/GEMINI/DEEPSEEK) or OLLAMA_HOST to enable a model.
+              </p>
+            ) : null}
+          </Block>
+
           {ex.what_found || snippet ? (
             <Block label="What Found"><pre className="ws-code">{ex.what_found || snippet}</pre></Block>
           ) : null}
@@ -341,6 +389,115 @@ export function FindingDrawer({ finding, onClose, onOpenCode }) {
           {ex.false_positive_notes ? <Block label="False-Positive Notes"><div className="ws-callout ws-callout--fp">{ex.false_positive_notes}</div></Block> : null}
           {ex.confidence_reason ? <Block label="Confidence Reason"><div className="ws-callout">{ex.confidence_reason}</div></Block> : null}
           {(ex.references || []).length ? <Block label="References"><div className="ws-refs">{ex.references.map((r, i) => <SoftTag key={i}>{r}</SoftTag>)}</div></Block> : null}
+        </div>
+      </aside>
+      {aiResult ? <AiResultDrawer data={aiResult} onClose={() => setAiResult(null)} /> : null}
+    </>
+  )
+}
+
+// ─── AI Result Drawer (Phase 11.97 Task 7) — stacked over the finding drawer ──
+const AI_ACTION_TITLE = {
+  explain: 'AI · Explain Finding', verify: 'AI · Verify Finding',
+  worth_testing: 'AI · Worth Testing?', generate_poc: 'AI · Generate PoC',
+  generate_fix: 'AI · Generate Fix', summary: 'AI · Executive Summary',
+}
+const LEVEL_TONE = { high: '#7f1d1d', medium: '#ea8600', low: '#3b82f6' }
+
+function LevelTag({ value, label }) {
+  if (!value) return null
+  const v = String(value).toLowerCase()
+  return <span className="ws-tag" style={{ background: (LEVEL_TONE[v] || '#52525b') + '1a', color: LEVEL_TONE[v] || '#52525b', fontWeight: 650 }}>{label}: {v}</span>
+}
+
+function AiResultDrawer({ data, onClose }) {
+  useEscape(onClose)
+  const r = data.result || {}
+  const action = data.action
+  const isError = data.mode === 'error' || data.error
+  return (
+    <>
+      <div className="ws-drawer-backdrop ws-drawer-backdrop--stacked" onClick={onClose} />
+      <aside className="ws-drawer ws-drawer--stacked" role="dialog" aria-label="AI result">
+        <div className="ws-drawer__head">
+          <div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
+              <span className="ws-tag ws-tag--soft"><Sparkles size={12} /> {data.provider || 'deterministic'}</span>
+              {data.model ? <span className="ws-tag ws-tag--soft">{data.model}</span> : null}
+              <span className={`ws-tag ws-tag--soft`}>{data.mode === 'llm' ? 'model-written' : data.mode === 'error' ? 'error' : 'deterministic'}</span>
+              {data.cached ? <span className="ws-tag ws-tag--soft">cached</span> : null}
+              {data.confidence ? <LevelTag value={data.confidence} label="confidence" /> : null}
+            </div>
+            <h3>{AI_ACTION_TITLE[action] || 'AI Result'}</h3>
+          </div>
+          <button type="button" className="ws-drawer__close" onClick={onClose}>×</button>
+        </div>
+        <div className="ws-drawer__body">
+          {isError ? (
+            <Block label="Unavailable"><div className="ws-callout">{data.error || 'The AI action could not be completed.'}</div></Block>
+          ) : null}
+
+          {/* Verify */}
+          {action === 'verify' ? (
+            <Block label="Assessment">
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                <LevelTag value={r.likelihood} label="likelihood" />
+                <span className="ws-tag" style={{ background: r.false_positive ? '#fef3f2' : '#ecfdf3', color: r.false_positive ? '#b42318' : '#067647', fontWeight: 650 }}>
+                  false positive: {String(!!r.false_positive)}
+                </span>
+              </div>
+              {r.reasoning ? <p>{r.reasoning}</p> : null}
+              <div className="ws-callout" style={{ marginTop: 10 }}>The analyst is the final authority — this assessment never suppresses a finding automatically.</div>
+            </Block>
+          ) : null}
+          {action === 'verify' && (r.manual_steps || []).length ? (
+            <Block label="Manual Verification Steps"><ol className="ws-ol">{r.manual_steps.map((s, i) => <li key={i}>{s}</li>)}</ol></Block>
+          ) : null}
+
+          {/* Worth testing */}
+          {action === 'worth_testing' ? (
+            <Block label="Triage">
+              <div style={{ marginBottom: 8 }}><LevelTag value={r.priority} label="priority" /></div>
+              {r.expected_impact ? <p><b>Expected impact:</b> {r.expected_impact}</p> : null}
+            </Block>
+          ) : null}
+          {action === 'worth_testing' && (r.manual_validation_steps || []).length ? (
+            <Block label="Manual Validation Steps"><ol className="ws-ol">{r.manual_validation_steps.map((s, i) => <li key={i}>{s}</li>)}</ol></Block>
+          ) : null}
+          {action === 'worth_testing' && (r.required_prerequisites || []).length ? (
+            <Block label="Prerequisites"><ul>{r.required_prerequisites.map((s, i) => <li key={i}>{s}</li>)}</ul></Block>
+          ) : null}
+
+          {/* PoC */}
+          {action === 'generate_poc' ? (
+            <>
+              {r.summary ? <Block label="Summary"><p>{r.summary}</p></Block> : null}
+              {(r.steps || []).length ? <Block label="Steps"><ol className="ws-ol">{r.steps.map((s, i) => <li key={i}>{s}</li>)}</ol></Block> : null}
+              {(r.commands || []).length ? <Block label="Commands"><pre className="ws-code">{r.commands.join('\n')}</pre></Block> : null}
+              {(r.assumptions || []).length ? <Block label="Assumptions / Placeholders"><ul>{r.assumptions.map((s, i) => <li key={i}>{s}</li>)}</ul></Block> : null}
+            </>
+          ) : null}
+
+          {/* Fix */}
+          {action === 'generate_fix' ? (
+            <>
+              {r.why_vulnerable ? <Block label="Why Vulnerable"><p>{r.why_vulnerable}</p></Block> : null}
+              {r.current_code ? <Block label="Current Code"><pre className="ws-code">{r.current_code}</pre></Block> : null}
+              {r.patched_code ? <Block label="Patched Code"><pre className="ws-code">{r.patched_code}</pre></Block> : null}
+              {r.best_practice ? <Block label="Best Practice"><p>{r.best_practice}</p></Block> : null}
+              {(r.masvs || r.owasp) ? <Block label="Standards"><div className="ws-refs">{r.masvs ? <SoftTag>{r.masvs}</SoftTag> : null}{r.owasp ? <SoftTag>OWASP {r.owasp}</SoftTag> : null}</div></Block> : null}
+            </>
+          ) : null}
+
+          {/* Explain / summary / generic */}
+          {(action === 'explain' || action === 'summary') && data.summary ? (
+            <Block label="Summary"><p>{data.summary}</p></Block>
+          ) : null}
+          {(action === 'explain' || action === 'summary') && data.reasoning ? (
+            <Block label="Reasoning"><p style={{ whiteSpace: 'pre-wrap' }}>{data.reasoning}</p></Block>
+          ) : null}
+
+          {data.limitations ? <Block label="Limitations"><div className="ws-callout ws-callout--fp">{data.limitations}</div></Block> : null}
         </div>
       </aside>
     </>

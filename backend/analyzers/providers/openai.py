@@ -7,7 +7,7 @@ import urllib.request
 import urllib.error
 import os
 
-from .base_provider import BaseProvider
+from .base import BaseProvider
 
 
 class OpenAIProvider(BaseProvider):

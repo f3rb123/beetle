@@ -85,6 +85,54 @@ export function liveAiEnabled() {
   return false
 }
 
+// ── Phase 11.97: Finding Drawer AI actions (backed by /api/ai/action) ────────
+// Provider-agnostic: the UI never contains provider-specific code. It lists
+// providers from the backend, lets the user pick one, and posts an action +
+// finding evidence. The backend calls the provider (or returns a deterministic,
+// evidence-only result when none is configured). Responses are cached here per
+// session AND in the backend, so repeats reuse the previous response.
+export const FINDING_AI_ACTIONS = [
+  { id: 'explain', label: 'Explain' },
+  { id: 'verify', label: 'Verify' },
+  { id: 'worth_testing', label: 'Worth Testing?' },
+  { id: 'generate_poc', label: 'Generate PoC' },
+  { id: 'generate_fix', label: 'Generate Fix' },
+]
+
+export async function fetchAiProviders() {
+  try {
+    const { apiFetch } = await import('./auth.js')
+    const r = await apiFetch('/api/ai/providers')
+    if (r.ok) return await r.json()
+  } catch { /* offline / unauth */ }
+  return { providers: [], any_available: false }
+}
+
+const _actionCache = new Map()
+
+function _findingId(f = {}) {
+  return f.id || f.canonical_id || `${f.title || f.name || ''}|${f.file_path || ''}|${f.line || ''}`
+}
+
+export async function runFindingAction({ action, provider, model, finding, results }) {
+  const key = `${action}|${provider || 'auto'}|${model || ''}|${action === 'summary' ? (results?.scan_id || '') : _findingId(finding)}`
+  if (_actionCache.has(key)) return { ..._actionCache.get(key), cached: true }
+  let out = null
+  try {
+    const { apiFetch } = await import('./auth.js')
+    const body = action === 'summary'
+      ? { action, provider, model, results }
+      : { action, provider, model, finding }
+    const r = await apiFetch('/api/ai/action', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    })
+    if (r.ok) out = await r.json()
+  } catch { /* network/offline */ }
+  if (!out) out = { error: 'AI action unavailable', action, mode: 'error', provider: provider || '', result: {} }
+  _actionCache.set(key, out)
+  return out
+}
+
 export async function runAssist({ provider, model, action, context }) {
   // Provider abstraction seam: when a live gateway is enabled, POST to it.
   if (liveAiEnabled()) {

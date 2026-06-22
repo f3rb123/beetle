@@ -2,7 +2,7 @@
 current behavior is preserved exactly (Phase 11.75 Task 10)."""
 from __future__ import annotations
 
-from .base_provider import BaseProvider
+from .base import BaseProvider
 
 
 class ClaudeProvider(BaseProvider):
@@ -27,10 +27,11 @@ class ClaudeProvider(BaseProvider):
             mdl = getattr(ai_enrichment, "_MODEL", model or self.default_model)
             if client is None:
                 return {"error": "Claude client unavailable", "provider": self.id}
-            msg = client.messages.create(
-                model=mdl, max_tokens=1024,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            kwargs = {"model": mdl, "max_tokens": 1024,
+                      "messages": [{"role": "user", "content": prompt}]}
+            if system:
+                kwargs["system"] = system
+            msg = client.messages.create(**kwargs)
             text = "".join(getattr(b, "text", "") for b in msg.content)
             return {"text": text, "model": mdl, "provider": self.id}
         except Exception as e:  # never raise into the pipeline

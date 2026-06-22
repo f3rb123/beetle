@@ -194,6 +194,15 @@
 .ws-drawer__close { margin-left: auto; border: none; background: var(--ws-accent-soft); width: 30px; height: 30px; border-radius: 8px; cursor: pointer; color: var(--ws-ink-2); font-size: 18px; flex-shrink: 0; }
 .ws-drawer__close:hover { background: var(--ws-line-strong); }
 .ws-drawer__body { overflow-y: auto; padding: 20px 22px 40px; }
+
+/* AI analysis (Phase 11.97) */
+.ws-ai-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.ws-ai-provider { max-width: 100%; }
+.ws-ai-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.ws-ol { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+/* Stacked AI result drawer sits above the finding drawer */
+.ws-drawer-backdrop--stacked { z-index: 70; }
+.ws-drawer--stacked { z-index: 71; width: min(600px, 94vw); }
 .ws-block { margin-bottom: 22px; }
 .ws-block__label { font-size: 11.5px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ws-ink-3); margin-bottom: 7px; }
 .ws-block p { font-size: 13.5px; }
