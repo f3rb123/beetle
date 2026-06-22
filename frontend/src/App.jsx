@@ -5,6 +5,7 @@ import Results from './pages/Results.jsx'
 import Login from './pages/Login.jsx'
 import Webhooks from './pages/Webhooks.jsx'
 import CustomRules from './pages/CustomRules.jsx'
+import History from './pages/History.jsx'
 import { getToken } from './lib/auth.js'
 
 class ErrorBoundary extends Component {
@@ -75,6 +76,14 @@ export default function App() {
             element={
               <RequireAuth>
                 <Results />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/history"
+            element={
+              <RequireAuth>
+                <History />
               </RequireAuth>
             }
           />

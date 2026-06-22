@@ -475,6 +475,7 @@ export default function Home() {
             <div className="ws-recent__head">
               <span className="ws-recent__title"><Clock3 size={14} /> Recent scans</span>
               {history.length ? <span className="ws-recent__count">{history.length}</span> : null}
+              <button type="button" className="ws-recent__all" onClick={() => navigate('/history')}>View all history →</button>
             </div>
 
             <div className="ws-recent__list">

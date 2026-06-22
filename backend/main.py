@@ -102,6 +102,10 @@ try:
         init_db,
         save_scan,
         update_scan_note,
+        restore_scans_on_startup,
+        cleanup_workspace,
+        export_workspace,
+        import_workspace,
     )
 
     DB_AVAILABLE = True
@@ -778,6 +782,14 @@ async def startup():
             log.info("Database initialized")
         except Exception as e:
             log.warning(f"DB init failed: {e}")
+        # Phase 11.99: restore persisted scans; mark any with a missing
+        # results.json as BROKEN (never crash on startup).
+        try:
+            summary = restore_scans_on_startup()
+            log.info(f"Restored {summary['ok']}/{summary['total']} scans "
+                     f"({summary['broken']} broken)")
+        except Exception as e:
+            log.warning(f"Scan restore failed: {e}")
     # Best-effort cleanup of stale scan extractions at startup. This also runs
     # after each scan completes (see _run_scan_job's finally clause).
     try:
@@ -967,11 +979,89 @@ async def list_scans(limit: int = Query(20, ge=1, le=100), _user: dict = Depends
     if not DB_AVAILABLE:
         return JSONResponse(content={"scans": [], "db_available": False})
     try:
-        history = get_scan_history(limit)
-        return JSONResponse(content={"scans": history, "db_available": True})
+        hist = get_scan_history(limit)
+        return JSONResponse(content={"scans": hist["items"], "total": hist["total"], "db_available": True})
     except Exception as e:
         log.error(f"list_scans error: {e}")
         return JSONResponse(content={"scans": [], "error": str(e)})
+
+
+@app.get("/api/scans/history")
+async def scans_history(
+    limit: int = Query(25, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    search: str = Query(""),
+    sort: str = Query("created_at"),
+    order: str = Query("desc"),
+    _user: dict = Depends(_require_auth),
+):
+    """Paginated, searchable, sortable scan history (metadata only)."""
+    if not DB_AVAILABLE:
+        return JSONResponse(content={"items": [], "total": 0, "db_available": False})
+    hist = get_scan_history(limit=limit, offset=offset, search=search, sort=sort, order=order)
+    return JSONResponse(content={**hist, "db_available": True, "limit": limit, "offset": offset})
+
+
+@app.get("/api/scans/compare")
+async def compare_scans_endpoint(a: str = Query(...), b: str = Query(...), _user: dict = Depends(_require_auth)):
+    """Diff two persisted scans (a=baseline, b=current)."""
+    if not DB_AVAILABLE:
+        raise HTTPException(503, detail="Database not available")
+    return JSONResponse(content=compare_scans(a, b))
+
+
+@app.post("/api/scans/cleanup")
+async def scans_cleanup(_user: dict = Depends(_require_admin)):
+    """Remove orphaned result dirs + broken records. Never deletes active scans."""
+    if not DB_AVAILABLE:
+        raise HTTPException(503, detail="Database not available")
+    with SCAN_JOBS_LOCK:
+        active = {sid for sid, job in SCAN_JOBS.items()
+                  if job.get("status") not in ("completed", "failed")}
+    return JSONResponse(content=cleanup_workspace(active_ids=active))
+
+
+@app.post("/api/scans/export")
+def scans_export(_user: dict = Depends(_require_auth)):
+    """Export the whole workspace (results + reports + metadata) as a zip.
+
+    Sync def so FastAPI runs the blocking zip build in a worker thread (never on
+    the event loop). The zip is written to UPLOAD_DIR — NOT inside the results or
+    reports dirs it bundles — so it can't recursively include itself."""
+    if not DB_AVAILABLE:
+        raise HTTPException(503, detail="Database not available")
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    out = UPLOAD_DIR / f"workspace_{uuid.uuid4().hex}.zip"
+    try:
+        export_workspace(str(out), reports_dir=str(REPORT_DIR))
+    except Exception as e:
+        log.error(f"workspace export failed: {e}")
+        raise HTTPException(500, detail="Workspace export failed")
+    return FileResponse(str(out), media_type="application/zip", filename="workspace.zip")
+
+
+@app.post("/api/scans/import")
+async def scans_import(file: UploadFile = File(...), _user: dict = Depends(_require_admin)):
+    """Import a previously-exported workspace.zip (idempotent — no duplicates)."""
+    if not DB_AVAILABLE:
+        raise HTTPException(503, detail="Database not available")
+    from starlette.concurrency import run_in_threadpool
+    tmp = UPLOAD_DIR / f"import_{uuid.uuid4().hex}.zip"
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        content = await file.read()
+        with open(tmp, "wb") as fh:
+            fh.write(content)
+        report = await run_in_threadpool(import_workspace, str(tmp))
+        return JSONResponse(content=report)
+    except Exception as e:
+        log.error(f"workspace import failed: {e}")
+        raise HTTPException(400, detail="Workspace import failed")
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 @app.get("/api/scans/{scan_id}")

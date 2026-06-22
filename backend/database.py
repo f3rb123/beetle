@@ -28,6 +28,10 @@ except Exception:
 
 DATA_DIR = Path(os.environ.get("CORTEX_DATA_DIR", "/data"))
 DB_PATH  = DATA_DIR / "cortex.db"
+# Phase 11.99: full results JSON lives on disk, one dir per scan; the DB keeps
+# metadata + a pointer (result_path). Reports written by the PDF/SARIF endpoints
+# also land under the scan dir so a workspace export captures everything.
+RESULTS_DIR = DATA_DIR / "scans"
 
 
 def get_conn() -> sqlite3.Connection:
@@ -36,6 +40,34 @@ def get_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
+
+
+def _scalar(v):
+    """Coerce a value to something sqlite3 can bind. Lists/dicts are the reason
+    persistence silently failed before: attack-chain findings carry `masvs` /
+    `owasp` as lists, and a single unbindable value aborts the whole save_scan
+    transaction (rolling back the scan row too). Lists → comma-joined; dicts →
+    JSON; everything else passes through unchanged."""
+    if v is None or isinstance(v, (str, int, float, bytes)):
+        return v
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, (list, tuple)):
+        return ", ".join(str(x) for x in v)
+    if isinstance(v, dict):
+        try:
+            return json.dumps(v)
+        except Exception:
+            return str(v)
+    return str(v)
+
+
+def _results_dir(scan_id: str) -> Path:
+    return RESULTS_DIR / scan_id
+
+
+def _results_path(scan_id: str) -> Path:
+    return _results_dir(scan_id) / "results.json"
 
 
 def init_db():
@@ -139,19 +171,58 @@ def init_db():
                     conn.execute(ddl)
                 except Exception as e:
                     print(f"[DB] migration skip {col}: {e}")
+
+        # Phase 11.99: scan persistence metadata (status, completed_at, trust,
+        # findings_count, result_path on disk, icon_data for history thumbnails).
+        scan_cols = {row["name"] for row in conn.execute("PRAGMA table_info(scans)")}
+        for col, ddl in (
+            ("status",         "ALTER TABLE scans ADD COLUMN status TEXT DEFAULT 'completed'"),
+            ("completed_at",   "ALTER TABLE scans ADD COLUMN completed_at TEXT"),
+            ("trust_score",    "ALTER TABLE scans ADD COLUMN trust_score INTEGER"),
+            ("findings_count", "ALTER TABLE scans ADD COLUMN findings_count INTEGER DEFAULT 0"),
+            ("result_path",    "ALTER TABLE scans ADD COLUMN result_path TEXT"),
+            ("icon_data",      "ALTER TABLE scans ADD COLUMN icon_data TEXT"),
+        ):
+            if col not in scan_cols:
+                try:
+                    conn.execute(ddl)
+                except Exception as e:
+                    print(f"[DB] migration skip scans.{col}: {e}")
         try:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_cve ON findings(cve)")
         except Exception:
             pass
 
 
+def _write_results_file(scan_id: str, results: dict) -> str | None:
+    """Persist the full results JSON to /data/scans/<scan_id>/results.json.
+    Returns the path (str) or None on failure (DB metadata still saved)."""
+    try:
+        d = _results_dir(scan_id)
+        d.mkdir(parents=True, exist_ok=True)
+        path = _results_path(scan_id)
+        tmp = path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(results, fh, default=str)
+        os.replace(tmp, path)  # atomic — never leaves a half-written results.json
+        return str(path)
+    except Exception as e:
+        log.warning(f"[{scan_id}] results.json write failed: {e}")
+        return None
+
+
 def save_scan(results: dict):
-    """Persist full scan results to DB."""
+    """Persist a completed scan: full results JSON to disk, metadata to SQLite.
+
+    The DB row is metadata-only (results_json is NULL); the full blob lives at
+    result_path on disk. Findings rows are also written (deduped) for fast
+    queries + the compare engine. All bound values are coerced via _scalar so a
+    list-typed field (e.g. attack-chain masvs/owasp) can never abort the save."""
     try:
         init_db()
+        scan_id = results.get("scan_id")
         # Normalize severity on every finding, then recompute the authoritative
-        # severity_summary from that list so DB counts, severity_summary, and
-        # actual findings rows can never disagree.
+        # severity_summary so DB counts, severity_summary, and findings agree.
         findings_list = results.get("findings") or []
         for f in findings_list:
             f["severity"] = normalize_severity(f.get("severity"))
@@ -159,24 +230,32 @@ def save_scan(results: dict):
         findings_list = dedupe_findings(findings_list)
         dropped = pre_dedup - len(findings_list)
         if dropped:
-            log.info(f"[{results.get('scan_id')}] dedupe: collapsed {dropped} duplicate finding(s)")
+            log.info(f"[{scan_id}] dedupe: collapsed {dropped} duplicate finding(s)")
         results["findings"] = findings_list
         ss = compute_severity_summary(findings_list)
         results["severity_summary"] = ss
         info = results.get("app_info", {})
         score = results.get("score", {})
+        trust = results.get("trust_score", {})
 
+        # 1) Full results JSON → disk (metadata-only stays in the DB).
+        result_path = _write_results_file(scan_id, results)
+
+        # 2) Metadata → DB. Every value passes through _scalar().
         with get_conn() as conn:
-            # Upsert scan record
             conn.execute("""
                 INSERT OR REPLACE INTO scans
                 (scan_id, app_name, package, filename, platform, score, grade, risk,
-                 version, size_mb, sha256, framework, scan_time,
+                 version, size_mb, sha256, framework, scan_time, created_at, completed_at,
+                 status, trust_score, findings_count, result_path, icon_data,
                  s_critical, s_high, s_medium, s_low, s_info,
                  secrets_count, trackers_count, results_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                results.get("scan_id"),
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,
+                        COALESCE((SELECT created_at FROM scans WHERE scan_id=?), datetime('now')),
+                        datetime('now'),
+                        ?,?,?,?,?,?,?,?,?,?,?,?,NULL)
+            """, tuple(_scalar(v) for v in (
+                scan_id,
                 results.get("app_name"),
                 info.get("package") or info.get("bundle_id"),
                 results.get("filename"),
@@ -187,8 +266,14 @@ def save_scan(results: dict):
                 info.get("version_name") or info.get("version"),
                 info.get("size_mb"),
                 info.get("sha256"),
-                results.get("framework", {}).get("type"),
+                (results.get("framework") or {}).get("type"),
                 results.get("scan_time"),
+                scan_id,                       # for the COALESCE created_at subquery
+                "completed",
+                (trust or {}).get("score"),
+                len(findings_list),
+                result_path,
+                (info.get("icon_data") or results.get("icon_data") or ""),
                 ss.get("critical", 0),
                 ss.get("high", 0),
                 ss.get("medium", 0),
@@ -196,11 +281,10 @@ def save_scan(results: dict):
                 ss.get("info", 0),
                 len(results.get("secrets", [])),
                 len(results.get("trackers", [])),
-                json.dumps(results),
-            ))
+            )))
 
-            # Insert findings
-            conn.execute("DELETE FROM findings WHERE scan_id = ?", (results.get("scan_id"),))
+            # Findings rows (deduped) — _scalar() neutralizes list-typed fields.
+            conn.execute("DELETE FROM findings WHERE scan_id = ?", (scan_id,))
             for f in findings_list:
                 conn.execute("""
                     INSERT INTO findings
@@ -210,8 +294,8 @@ def save_scan(results: dict):
                      cve, cvss, kev)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT DO NOTHING
-                """, (
-                    results.get("scan_id"),
+                """, tuple(_scalar(v) for v in (
+                    scan_id,
                     f.get("title"),
                     normalize_severity(f.get("severity")),
                     f.get("category"),
@@ -231,52 +315,67 @@ def save_scan(results: dict):
                     f.get("cve"),
                     f.get("cvss"),
                     1 if f.get("kev") else 0,
-                ))
+                )))
     except Exception as e:
         print(f"[DB] save_scan error: {e}")
 
 
-def get_scan_history(limit: int = 20) -> list:
-    """Return recent scan summaries."""
+_HISTORY_COLS = """scan_id, app_name, package, filename, platform,
+                   score, grade, risk, version, scan_time, created_at, completed_at,
+                   status, trust_score, findings_count, result_path, icon_data,
+                   s_critical, s_high, s_medium, s_low, s_info,
+                   secrets_count, trackers_count, framework"""
+
+_SORT_COLUMNS = {
+    "created_at": "created_at", "date": "created_at", "app_name": "app_name",
+    "app": "app_name", "score": "score", "risk": "score",
+    "trust": "trust_score", "findings": "findings_count",
+}
+
+
+def get_scan_history(limit: int = 20, offset: int = 0, search: str = "",
+                     sort: str = "created_at", order: str = "desc") -> dict:
+    """Return scan history (metadata only) with search / sort / pagination.
+
+    Returns {"items": [...], "total": n}. icon_data comes from its own column
+    (no results_json read), so listing is cheap and survives the on-disk move."""
     try:
         init_db()
+        sort_col = _SORT_COLUMNS.get((sort or "created_at").lower(), "created_at")
+        direction = "ASC" if (order or "desc").lower() == "asc" else "DESC"
+        where, params = "", []
+        if search:
+            where = ("WHERE app_name LIKE ? OR package LIKE ? OR filename LIKE ? "
+                     "OR scan_id LIKE ?")
+            like = f"%{search}%"
+            params = [like, like, like, like]
         with get_conn() as conn:
-            rows = conn.execute("""
-                SELECT scan_id, app_name, package, filename, platform,
-                       score, grade, risk, scan_time, created_at,
-                       s_critical, s_high, s_medium, s_low, s_info,
-                       secrets_count, trackers_count, framework, results_json
-                FROM scans
-                ORDER BY created_at DESC
-                LIMIT ?
-            """, (limit,)).fetchall()
+            total = conn.execute(f"SELECT COUNT(*) c FROM scans {where}", params).fetchone()["c"]
+            rows = conn.execute(
+                f"SELECT {_HISTORY_COLS} FROM scans {where} "
+                f"ORDER BY {sort_col} {direction} LIMIT ? OFFSET ?",
+                params + [int(limit), int(offset)],
+            ).fetchall()
             items = []
             for row in rows:
                 item = dict(row)
-                raw_results = item.pop("results_json", None)
-                if raw_results:
-                    try:
-                        parsed = json.loads(raw_results)
-                        item["icon_data"] = (
-                            (parsed.get("app_info") or {}).get("icon_data")
-                            or parsed.get("icon_data")
-                            or ""
-                        )
-                    except Exception:
-                        item["icon_data"] = ""
-                else:
-                    item["icon_data"] = ""
+                item["icon_data"] = item.get("icon_data") or ""
                 items.append(item)
-            return items
+            return {"items": items, "total": total}
     except Exception as e:
         print(f"[DB] get_scan_history error: {e}")
-        return []
+        return {"items": [], "total": 0}
 
 
 def get_scan_results(scan_id: str) -> dict | None:
-    """Return full scan results JSON."""
+    """Return the full scan results JSON, preferring the on-disk file and
+    falling back to a legacy results_json blob if one exists."""
     try:
         init_db()
+        path = _results_path(scan_id)
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
         with get_conn() as conn:
             row = conn.execute(
                 "SELECT results_json FROM scans WHERE scan_id = ?", (scan_id,)
@@ -423,7 +522,8 @@ def delete_scan_note(note_id: int) -> bool:
 
 
 def delete_scan(scan_id: str) -> bool:
-    """Delete a scan and all associated data."""
+    """Delete a scan: DB rows (scan, findings, triage, notes, AI cache) and its
+    on-disk results/reports directory."""
     try:
         init_db()
         with get_conn() as conn:
@@ -432,37 +532,201 @@ def delete_scan(scan_id: str) -> bool:
             conn.execute("DELETE FROM findings   WHERE scan_id = ?", (scan_id,))
             conn.execute("DELETE FROM scans      WHERE scan_id = ?", (scan_id,))
             conn.commit()
+        # Remove the on-disk results/report dir.
+        import shutil
+        d = _results_dir(scan_id)
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
         return True
     except Exception as e:
         print(f"[DB] delete_scan error: {e}")
         return False
 
 
+# ─── Phase 11.99: startup restore, cleanup, export/import ────────────────────
+def restore_scans_on_startup() -> dict:
+    """Verify each persisted scan still has its results.json. Missing files are
+    marked status='BROKEN' (kept in the list, never crash). Returns a summary."""
+    summary = {"total": 0, "ok": 0, "broken": 0, "broken_ids": []}
+    try:
+        init_db()
+        with get_conn() as conn:
+            rows = conn.execute("SELECT scan_id, result_path, status FROM scans").fetchall()
+            summary["total"] = len(rows)
+            for row in rows:
+                sid = row["scan_id"]
+                path = Path(row["result_path"]) if row["result_path"] else _results_path(sid)
+                if path.exists():
+                    summary["ok"] += 1
+                    # Heal a previously-broken row whose file came back.
+                    if row["status"] == "BROKEN":
+                        conn.execute("UPDATE scans SET status='completed' WHERE scan_id=?", (sid,))
+                else:
+                    summary["broken"] += 1
+                    summary["broken_ids"].append(sid)
+                    conn.execute("UPDATE scans SET status='BROKEN' WHERE scan_id=?", (sid,))
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] restore_scans_on_startup error: {e}")
+    return summary
+
+
+def cleanup_workspace(active_ids: set | None = None) -> dict:
+    """Remove orphaned result directories (no DB row) and broken DB records
+    (status BROKEN with a missing file). Never touches active scans."""
+    active_ids = active_ids or set()
+    report = {"orphan_dirs_removed": [], "broken_records_removed": []}
+    try:
+        init_db()
+        import shutil
+        with get_conn() as conn:
+            db_ids = {r["scan_id"] for r in conn.execute("SELECT scan_id FROM scans").fetchall()}
+            # Orphaned dirs on disk with no DB row and not currently active.
+            if RESULTS_DIR.exists():
+                for child in RESULTS_DIR.iterdir():
+                    if not child.is_dir():
+                        continue
+                    sid = child.name
+                    if sid in db_ids or sid in active_ids:
+                        continue
+                    shutil.rmtree(child, ignore_errors=True)
+                    report["orphan_dirs_removed"].append(sid)
+            # Broken DB records whose file is still missing and aren't active.
+            broken = conn.execute("SELECT scan_id, result_path FROM scans WHERE status='BROKEN'").fetchall()
+            for row in broken:
+                sid = row["scan_id"]
+                if sid in active_ids:
+                    continue
+                path = Path(row["result_path"]) if row["result_path"] else _results_path(sid)
+                if not path.exists():
+                    conn.execute("DELETE FROM findings WHERE scan_id=?", (sid,))
+                    conn.execute("DELETE FROM triage   WHERE scan_id=?", (sid,))
+                    conn.execute("DELETE FROM scan_notes WHERE scan_id=?", (sid,))
+                    conn.execute("DELETE FROM scans    WHERE scan_id=?", (sid,))
+                    report["broken_records_removed"].append(sid)
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] cleanup_workspace error: {e}")
+    return report
+
+
+def export_workspace(out_path: str, reports_dir: str | None = None) -> str:
+    """Bundle the whole workspace into a zip: every scan's results dir, the DB
+    metadata as metadata.json, and any generated reports. Returns out_path."""
+    import zipfile
+    init_db()
+    with get_conn() as conn:
+        rows = [dict(r) for r in conn.execute(f"SELECT {_HISTORY_COLS} FROM scans").fetchall()]
+    meta = {"version": 1, "exported_at": datetime.utcnow().isoformat(), "scans": rows}
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("metadata.json", json.dumps(meta, default=str))
+        # results (+ any per-scan reports written under the scan dir)
+        if RESULTS_DIR.exists():
+            for path in RESULTS_DIR.rglob("*"):
+                if path.is_file():
+                    zf.write(path, arcname=str(Path("scans") / path.relative_to(RESULTS_DIR)))
+        # standalone reports dir, if provided. Skip any .zip (never re-bundle a
+        # prior workspace export — that's what produced a runaway self-include).
+        if reports_dir:
+            rp = Path(reports_dir)
+            if rp.exists():
+                for path in rp.rglob("*"):
+                    if path.is_file() and path.suffix.lower() != ".zip":
+                        zf.write(path, arcname=str(Path("reports") / path.relative_to(rp)))
+    return out_path
+
+
+def import_workspace(zip_path: str) -> dict:
+    """Restore a workspace.zip: extract results to disk and upsert DB metadata.
+    Existing scans with the same id are replaced (no duplicates)."""
+    import zipfile
+    init_db()
+    report = {"imported": 0, "skipped": 0, "scan_ids": []}
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        names = zf.namelist()
+        # 1) extract scan result dirs
+        for name in names:
+            if name.startswith("scans/") and not name.endswith("/"):
+                target = RESULTS_DIR / Path(name).relative_to("scans")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(name) as src, open(target, "wb") as dst:
+                    dst.write(src.read())
+        # 2) upsert metadata
+        meta = {}
+        if "metadata.json" in names:
+            try:
+                meta = json.loads(zf.read("metadata.json").decode("utf-8", "replace"))
+            except Exception:
+                meta = {}
+    for row in (meta.get("scans") or []):
+        sid = row.get("scan_id")
+        if not sid:
+            continue
+        res = get_scan_results(sid)  # reads the just-extracted disk file
+        if res:
+            save_scan(res)           # rebuilds metadata + findings rows (idempotent upsert)
+            report["imported"] += 1
+            report["scan_ids"].append(sid)
+        else:
+            report["skipped"] += 1
+    return report
+
+
 def compare_scans(scan_id_a: str, scan_id_b: str) -> dict:
-    """Diff two scans — return new, fixed, and changed findings."""
+    """Diff two persisted scans (A=baseline, B=current): added / removed findings,
+    severity changes, trust-score delta, and attack-chain changes. Read-only —
+    never mutates findings or chains."""
     try:
         findings_a = {f["rule_id"] or f["title"]: f for f in get_scan_findings(scan_id_a) if f.get("rule_id") or f.get("title")}
         findings_b = {f["rule_id"] or f["title"]: f for f in get_scan_findings(scan_id_b) if f.get("rule_id") or f.get("title")}
 
-        keys_a = set(findings_a.keys())
-        keys_b = set(findings_b.keys())
+        keys_a, keys_b = set(findings_a), set(findings_b)
+        added    = [findings_b[k] for k in keys_b - keys_a]   # in B, not A
+        removed  = [findings_a[k] for k in keys_a - keys_b]   # in A, not B
+        common   = [findings_b[k] for k in keys_a & keys_b]
 
-        new_findings     = [findings_b[k] for k in keys_b - keys_a]
-        fixed_findings   = [findings_a[k] for k in keys_a - keys_b]
-        common_findings  = [findings_b[k] for k in keys_a & keys_b]
+        severity_changes = []
+        for k in keys_a & keys_b:
+            sa, sb = normalize_severity(findings_a[k].get("severity")), normalize_severity(findings_b[k].get("severity"))
+            if sa != sb:
+                severity_changes.append({"key": k, "title": findings_b[k].get("title"),
+                                          "from": sa, "to": sb})
+
+        # Trust + attack-chain deltas from the on-disk results (best-effort).
+        res_a, res_b = get_scan_results(scan_id_a) or {}, get_scan_results(scan_id_b) or {}
+        ta = (res_a.get("trust_score") or {}).get("score")
+        tb = (res_b.get("trust_score") or {}).get("score")
+        def _chain_titles(res):
+            qs = res.get("quick_summary") or {}
+            titles = {c.get("title") for c in (qs.get("attack_chain") or []) if isinstance(c, dict) and c.get("title")}
+            titles |= {f.get("title") for f in (res.get("findings") or []) if f.get("is_attack_chain") and f.get("title")}
+            return titles
+        chains_a, chains_b = _chain_titles(res_a), _chain_titles(res_b)
 
         return {
-            "new":    new_findings,
-            "fixed":  fixed_findings,
-            "common": common_findings,
+            # legacy keys kept for any existing callers
+            "new": added, "fixed": removed, "common": common,
+            # Phase 11.99 explicit naming
+            "added": added, "removed": removed,
+            "severity_changes": severity_changes,
+            "trust": {"a": ta, "b": tb,
+                      "delta": (tb - ta) if isinstance(ta, (int, float)) and isinstance(tb, (int, float)) else None},
+            "attack_chains": {
+                "added":   sorted(chains_b - chains_a),
+                "removed": sorted(chains_a - chains_b),
+                "a_count": len(chains_a), "b_count": len(chains_b),
+            },
             "summary": {
-                "new_count":   len(new_findings),
-                "fixed_count": len(fixed_findings),
-                "unchanged":   len(common_findings),
-            }
+                "new_count": len(added), "added_count": len(added),
+                "fixed_count": len(removed), "removed_count": len(removed),
+                "unchanged": len(common),
+                "severity_changed": len(severity_changes),
+            },
         }
     except Exception as e:
         print(f"[DB] compare_scans error: {e}")
-        return {"new": [], "fixed": [], "common": [], "summary": {}}
+        return {"new": [], "fixed": [], "added": [], "removed": [], "common": [],
+                "severity_changes": [], "trust": {}, "attack_chains": {}, "summary": {}}
 
 
