@@ -403,3 +403,48 @@
 .ws-pill--ok { background: #ecfdf3; color: #067647; }
 .ws-pill--warn { background: #fffaeb; color: #b54708; }
 .ws-pill--risk { background: #fef3f2; color: #b42318; }
+
+/* ── Ask AI conversational workspace (Phase 11.98) ────────────────────────── */
+.ws-askai { display: grid; grid-template-columns: minmax(0, 240px) minmax(0, 1fr); gap: 16px; height: calc(100vh - 140px); min-height: 480px; }
+.ws-askai__side { display: flex; flex-direction: column; gap: 10px; min-width: 0; border-right: 1px solid var(--ws-line); padding-right: 14px; }
+.ws-askai__new { justify-content: center; }
+.ws-askai__convos { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+.ws-askai__convo { display: flex; align-items: center; gap: 7px; padding: 8px 9px; border-radius: 9px; cursor: pointer; font-size: 13px; }
+.ws-askai__convo:hover { background: var(--ws-bg-sunken); }
+.ws-askai__convo.is-active { background: var(--ws-accent-soft, #eef2ff); }
+.ws-askai__convo-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-askai__convo-count { font-size: 11px; color: var(--ws-ink-3); }
+.ws-askai__convo-act { border: none; background: none; color: var(--ws-ink-3); cursor: pointer; padding: 2px; opacity: 0; }
+.ws-askai__convo:hover .ws-askai__convo-act { opacity: 1; }
+.ws-askai__convo-act:hover { color: #b42318; }
+
+.ws-askai__main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.ws-askai__bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.ws-askai__bar .ws-input { max-width: 240px; }
+.ws-askai__picker { max-height: 180px; overflow-y: auto; border: 1px solid var(--ws-line); border-radius: 10px; padding: 8px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; }
+.ws-askai__pick { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 3px 4px; cursor: pointer; }
+.ws-askai__pick-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.ws-askai__thread { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding: 6px 2px; }
+.ws-askai__welcome { margin: auto; text-align: center; max-width: 460px; color: var(--ws-ink-2); }
+.ws-askai__welcome h3 { margin: 10px 0 6px; font-size: 17px; }
+.ws-askai__suggest { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 16px; }
+
+.ws-chat-msg { display: flex; }
+.ws-chat-msg--user { justify-content: flex-end; }
+.ws-chat-msg--ai { justify-content: flex-start; }
+.ws-chat-bubble { max-width: 82%; padding: 12px 14px; border-radius: 14px; font-size: 13.5px; line-height: 1.55; min-width: 0; overflow-wrap: anywhere; }
+.ws-chat-bubble--user { background: #18181b; color: #fff; border-bottom-right-radius: 4px; }
+.ws-chat-bubble--ai { background: var(--ws-surface); border: 1px solid var(--ws-line); border-bottom-left-radius: 4px; }
+.ws-chat-ans { white-space: pre-wrap; }
+.ws-chat-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--ws-line); }
+.ws-chat-detail-toggle { border: none; background: none; color: var(--ws-ink-3); cursor: pointer; font-size: 11.5px; display: inline-flex; align-items: center; gap: 3px; margin-left: auto; }
+.ws-chat-detail { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+
+.ws-askai__input { display: flex; gap: 8px; align-items: flex-end; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--ws-line); }
+.ws-askai__input .ws-input { flex: 1; resize: vertical; font-family: inherit; }
+
+@media (max-width: 860px) {
+  .ws-askai { grid-template-columns: 1fr; height: auto; }
+  .ws-askai__side { border-right: none; border-bottom: 1px solid var(--ws-line); padding-right: 0; padding-bottom: 12px; }
+}

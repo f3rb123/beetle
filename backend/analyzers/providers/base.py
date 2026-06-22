@@ -185,6 +185,28 @@ class BaseProvider:
         )
         return self._structured(prompt, model)
 
+    def ask(self, question: str, context: str, *, history: list | None = None,
+            model: str | None = None) -> dict:
+        """Free-form conversational analysis (Phase 11.98). `context` is the
+        pre-summarized analyzer evidence for the scan/selected findings; `history`
+        is prior [{role, content}] turns. The model answers ONLY from the evidence
+        and conversation — it must not invent findings, chains, or parameters."""
+        convo = ""
+        for turn in (history or [])[-8:]:
+            role = "User" if turn.get("role") == "user" else "Assistant"
+            convo += f"\n{role}: {str(turn.get('content', ''))[:800]}"
+        prompt = (
+            "Answer the analyst's question using ONLY the analyzer evidence below and the "
+            "conversation so far. Do not invent vulnerabilities, attack chains, code, file "
+            "paths, or exploit parameters. If the evidence is insufficient, say so and explain "
+            "what to check manually.\n\n=== ANALYZER EVIDENCE ===\n" + context +
+            ("\n\n=== CONVERSATION ===" + convo if convo else "") +
+            f"\n\n=== QUESTION ===\n{question}\n\n"
+            'Respond JSON: {"answer": str, "reasoning": str, "confidence": "high|medium|low", '
+            '"limitations": str}'
+        )
+        return self._structured(prompt, model)
+
     def enrich_finding(self, finding: dict, app_context: dict | None = None) -> dict:
         """Legacy hook retained for the existing enrichment path."""
         return self.explain_finding(finding)

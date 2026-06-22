@@ -1,13 +1,14 @@
 // Phase 11.75 — deep-analysis workspace pages. Exposes EXISTING backend
 // intelligence (certificate, network, manifest, components, android_api, apkid/
 // behavior, compare history, AI analyst, source files). Presentation only.
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ShieldCheck, ShieldAlert, Network, FileCode2, Boxes, Cpu, Bug, GitCompare,
   Sparkles, Folder, FileText, Search, ChevronRight, ArrowUpRight, Copy, Minus,
+  MessageSquare, Plus, Trash2, Pencil, Send, ChevronDown,
 } from 'lucide-react'
 import { SEV_COLOR, normSev, SeverityTag, SoftTag, EmptyState, Metric } from './ui.jsx'
-import { AI_PROVIDERS, AI_ACTIONS, runAssist } from '../../lib/ai-providers.js'
+import { AI_PROVIDERS, AI_ACTIONS, runAssist, fetchAiProviders } from '../../lib/ai-providers.js'
 import { apiFetch } from '../../lib/auth.js'
 import { loadLocalHistory, getStoredScan } from '../../lib/scan-data.js'
 
@@ -1371,6 +1372,202 @@ export function DeveloperGuidePanel({ results, onOpenCode }) {
           </div>
         )
       })}
+    </div>
+  )
+}
+
+// ───────────────────────────── Ask AI (Phase 11.98) ───────────────────────────
+// Conversational analysis over the analyzer evidence. The backend builds context
+// automatically (no pasting), reasons over evidence only, persists conversations
+// per scan, and degrades to a deterministic answer when no provider is set.
+// "No provider-specific code in components" — the panel only uses /api/ai/chat
+// plus the generic provider list.
+const ASKAI_SUGGESTIONS = [
+  'Is this remotely exploitable?',
+  'Could this become RCE?',
+  'Is this worth reporting?',
+  'What manual steps should I perform?',
+  'Could this be a false positive?',
+  'Generate adb commands.',
+  'Compare with MASVS.',
+  'Explain like a pentester.',
+  'Business impact?',
+  'Prioritized remediation?',
+]
+
+function AiMessage({ m }) {
+  const [open, setOpen] = useState(false)
+  const meta = m.meta || {}
+  if (m.role === 'user') {
+    return <div className="ws-chat-msg ws-chat-msg--user"><div className="ws-chat-bubble ws-chat-bubble--user">{m.content}</div></div>
+  }
+  return (
+    <div className="ws-chat-msg ws-chat-msg--ai">
+      <div className="ws-chat-bubble ws-chat-bubble--ai">
+        <div className="ws-chat-ans">{m.content}</div>
+        <div className="ws-chat-meta">
+          <span className="ws-tag ws-tag--soft"><Sparkles size={11} /> {meta.provider || 'deterministic'}</span>
+          {meta.model ? <span className="ws-tag ws-tag--soft">{meta.model}</span> : null}
+          <span className="ws-tag ws-tag--soft">{meta.mode === 'llm' ? 'model' : meta.mode === 'error' ? 'error' : 'deterministic'}</span>
+          {meta.confidence ? <span className="ws-tag ws-tag--soft">conf: {meta.confidence}</span> : null}
+          {meta.cached ? <span className="ws-tag ws-tag--soft">cached</span> : null}
+          {meta.tokens != null ? <span className="ws-tag ws-tag--soft">~{meta.tokens} tok</span> : null}
+          {meta.generation_ms != null ? <span className="ws-tag ws-tag--soft">{meta.generation_ms}ms</span> : null}
+          <button type="button" className="ws-chat-detail-toggle" onClick={() => setOpen(o => !o)}>
+            <ChevronDown size={12} style={{ transform: open ? 'rotate(180deg)' : 'none' }} /> details
+          </button>
+        </div>
+        {open ? (
+          <div className="ws-chat-detail">
+            {meta.reasoning ? <div className="ws-block"><div className="ws-block__label">Reasoning</div><p style={{ whiteSpace: 'pre-wrap' }}>{meta.reasoning}</p></div> : null}
+            {(meta.evidence_used || []).length ? (
+              <div className="ws-block"><div className="ws-block__label">Evidence used</div>
+                <div className="ws-refs">{meta.evidence_used.map((e, i) => <SoftTag key={i}>{e}</SoftTag>)}</div></div>
+            ) : null}
+            {meta.limitations ? <div className="ws-block"><div className="ws-block__label">Limitations</div><div className="ws-callout ws-callout--fp">{meta.limitations}</div></div> : null}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+export function AskAiPanel({ results, scanId }) {
+  const findings = results.findings || []
+  const [providers, setProviders] = useState([])
+  const [provider, setProvider] = useState('')
+  const [convos, setConvos] = useState([])
+  const [chatId, setChatId] = useState(null)
+  const [messages, setMessages] = useState([])
+  const [input, setInput] = useState('')
+  const [selected, setSelected] = useState(() => new Set())
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const threadRef = useRef(null)
+
+  const loadConvos = useCallback(() => {
+    apiFetch(`/api/ai/chats?scan_id=${scanId}`).then(r => (r.ok ? r.json() : { conversations: [] }))
+      .then(d => setConvos(d.conversations || [])).catch(() => {})
+  }, [scanId])
+
+  useEffect(() => { fetchAiProviders().then(d => setProviders(d.providers || [])) }, [])
+  useEffect(() => { loadConvos() }, [loadConvos])
+  useEffect(() => { threadRef.current?.scrollTo({ top: 9e9 }) }, [messages])
+
+  const fid = f => f.id || f.canonical_id || `${f.title || f.name || ''}|${f.file_path || ''}|${f.line || ''}`
+
+  const openConvo = async cid => {
+    const r = await apiFetch(`/api/ai/chats/${cid}`)
+    if (!r.ok) return
+    const c = await r.json()
+    setChatId(cid); setMessages(c.messages || [])
+  }
+  const newConvo = () => { setChatId(null); setMessages([]) }
+
+  const renameConvo = async (cid, e) => {
+    e.stopPropagation()
+    const title = window.prompt('Rename conversation')
+    if (!title) return
+    await apiFetch(`/api/ai/chats/${cid}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }) })
+    loadConvos()
+  }
+  const deleteConvo = async (cid, e) => {
+    e.stopPropagation()
+    if (!window.confirm('Delete this conversation?')) return
+    await apiFetch(`/api/ai/chats/${cid}`, { method: 'DELETE' })
+    if (cid === chatId) newConvo()
+    loadConvos()
+  }
+
+  const send = async (text) => {
+    const q = (text ?? input).trim()
+    if (!q || busy) return
+    setBusy(true)
+    const finding_ids = [...selected]
+    setMessages(m => [...m, { role: 'user', content: q, meta: {} }])
+    setInput('')
+    try {
+      const r = await apiFetch('/api/ai/chat', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scan_id: scanId, question: q, chat_id: chatId, finding_ids, provider: provider || undefined }),
+      })
+      const env = r.ok ? await r.json() : { answer: 'AI request failed.', mode: 'error' }
+      if (env.chat_id && env.chat_id !== chatId) { setChatId(env.chat_id); loadConvos() }
+      setMessages(m => [...m, {
+        role: 'assistant', content: env.answer || '(no answer)',
+        meta: {
+          reasoning: env.reasoning, confidence: env.confidence, limitations: env.limitations,
+          provider: env.provider, model: env.model, mode: env.mode, cached: env.cached,
+          evidence_used: env.evidence_used, tokens: env.tokens, generation_ms: env.generation_ms,
+        },
+      }])
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <div className="ws-askai">
+      <aside className="ws-askai__side">
+        <button type="button" className="ws-btn ws-btn--primary ws-askai__new" onClick={newConvo}><Plus size={14} /> New conversation</button>
+        <div className="ws-askai__convos">
+          {convos.length ? convos.map(c => (
+            <div key={c.chat_id} className={`ws-askai__convo${c.chat_id === chatId ? ' is-active' : ''}`} onClick={() => openConvo(c.chat_id)}>
+              <MessageSquare size={13} className="ws-muted" />
+              <span className="ws-askai__convo-title">{c.title}</span>
+              <span className="ws-askai__convo-count">{c.message_count}</span>
+              <button type="button" className="ws-askai__convo-act" title="Rename" onClick={e => renameConvo(c.chat_id, e)}><Pencil size={12} /></button>
+              <button type="button" className="ws-askai__convo-act" title="Delete" onClick={e => deleteConvo(c.chat_id, e)}><Trash2 size={12} /></button>
+            </div>
+          )) : <p className="ws-muted" style={{ fontSize: 12.5, padding: '8px 4px' }}>No conversations yet.</p>}
+        </div>
+      </aside>
+
+      <div className="ws-askai__main">
+        <div className="ws-askai__bar">
+          <select className="ws-input" value={provider} onChange={e => setProvider(e.target.value)} aria-label="AI provider">
+            <option value="">Auto / Deterministic</option>
+            {providers.map(p => <option key={p.id} value={p.id} disabled={!p.available}>{p.name}{p.available ? '' : ' (unavailable)'}</option>)}
+          </select>
+          <button type="button" className={`ws-chip${selected.size ? ' is-active' : ''}`} onClick={() => setPickerOpen(o => !o)}>
+            {selected.size ? `${selected.size} finding${selected.size !== 1 ? 's' : ''} selected` : 'Select findings'} <ChevronDown size={12} />
+          </button>
+        </div>
+
+        {pickerOpen ? (
+          <div className="ws-askai__picker">
+            {findings.slice(0, 60).map((f, i) => {
+              const id = fid(f)
+              return (
+                <label key={i} className="ws-askai__pick">
+                  <input type="checkbox" checked={selected.has(id)} onChange={e => setSelected(s => { const n = new Set(s); if (e.target.checked) n.add(id); else n.delete(id); return n })} />
+                  <SeverityTag severity={f.severity} compact />
+                  <span className="ws-askai__pick-title">{f.title || f.name}</span>
+                </label>
+              )
+            })}
+          </div>
+        ) : null}
+
+        <div className="ws-askai__thread" ref={threadRef}>
+          {messages.length ? messages.map((m, i) => <AiMessage key={i} m={m} />) : (
+            <div className="ws-askai__welcome">
+              <Sparkles size={26} className="ws-muted" />
+              <h3>Ask AI about this scan</h3>
+              <p>Questions are answered from the analyzer evidence only — never fabricated. Select findings to reason across them.</p>
+              <div className="ws-askai__suggest">
+                {ASKAI_SUGGESTIONS.map(s => <button key={s} type="button" className="ws-chip" onClick={() => send(s)}>{s}</button>)}
+              </div>
+            </div>
+          )}
+          {busy ? <div className="ws-chat-msg ws-chat-msg--ai"><div className="ws-chat-bubble ws-chat-bubble--ai ws-muted">Thinking…</div></div> : null}
+        </div>
+
+        <div className="ws-askai__input">
+          <textarea className="ws-input" rows={2} placeholder="Ask anything about this scan… (evidence-grounded)" value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} />
+          <button type="button" className="ws-btn ws-btn--primary" disabled={busy || !input.trim()} onClick={() => send()}><Send size={15} /></button>
+        </div>
+      </div>
     </div>
   )
 }

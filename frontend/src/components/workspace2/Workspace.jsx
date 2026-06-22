@@ -5,7 +5,7 @@ import {
   LayoutDashboard, ShieldAlert, GitBranch, KeyRound, ShieldCheck, FileCode2,
   Download, Search, ChevronLeft, Command, ScrollText, Network, Fingerprint,
   Boxes, Cpu, Bug, GitCompare, Sparkles, FolderTree, Lock, ShieldHalf, Workflow,
-  Briefcase, Wrench,
+  Briefcase, Wrench, MessageSquare,
 } from 'lucide-react'
 import beetleIcon from '../../assets/beetle-icon.png'
 import {
@@ -16,7 +16,7 @@ import {
   CertificatePanel, NetworkPanel, ManifestPanel, ComponentsPanel, AndroidApiPanel,
   MalwarePanel, ComparePanel, AiAssistantPanel, CodeBrowserPanel,
   PermissionsPanel, AndroidPosturePanel, TaintFlowPanel,
-  CisoSummaryPanel, DeveloperGuidePanel,
+  CisoSummaryPanel, DeveloperGuidePanel, AskAiPanel,
 } from './panels2.jsx'
 import { severityCounts, findingPath, useEscape } from './ui.jsx'
 
@@ -28,6 +28,7 @@ const NAV_GROUPS = [
       { id: 'chains', label: 'Attack Chains', icon: GitBranch },
       { id: 'secrets', label: 'Secrets', icon: KeyRound },
       { id: 'masvs', label: 'MASVS Coverage', icon: ShieldCheck },
+      { id: 'askai', label: 'Ask AI', icon: MessageSquare },
       { id: 'files', label: 'Files', icon: FileCode2 },
       { id: 'exports', label: 'Exports', icon: Download },
     ],
@@ -201,6 +202,7 @@ export default function Workspace({ results, scanId, onOpenCode, actions }) {
             {section === 'chains' && <ChainsPanel results={results} />}
             {section === 'secrets' && <SecretsPanel results={results} onOpenCode={onOpenCode} />}
             {section === 'masvs' && <MasvsPanel results={results} />}
+            {section === 'askai' && <AskAiPanel results={results} scanId={scanId} />}
             {section === 'ciso' && <CisoSummaryPanel results={results} onOpenSection={setSection} />}
             {section === 'developer' && <DeveloperGuidePanel results={results} onOpenCode={onOpenCode} />}
             {section === 'files' && <FilesPanel results={results} onOpenCode={onOpenCode} />}

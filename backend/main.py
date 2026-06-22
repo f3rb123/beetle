@@ -64,6 +64,16 @@ try:
 except Exception as _aia_err:
     ai_actions = None
     logging.getLogger("cortex").warning("ai_actions unavailable: %s", _aia_err)
+
+try:
+    import ai_chat
+    from database import (
+        create_conversation, list_conversations, get_conversation,
+        rename_conversation, delete_conversation,
+    )
+except Exception as _chat_err:
+    ai_chat = None
+    logging.getLogger("cortex").warning("ai_chat unavailable: %s", _chat_err)
     log_msg = f"[main] AI enrichment unavailable: {_ai_err}"
 
 try:
@@ -512,6 +522,76 @@ async def ai_action(request: Request, _user: dict = Depends(_require_auth)):
         use_cache=bool(body.get("use_cache", True)),
     )
     return JSONResponse(content=result)
+
+
+# ─── Ask-AI conversational workspace (Phase 11.98) ───────────────────────────
+def _load_results_for(scan_id: str) -> dict:
+    """Resolve a scan's full results from the persistent store, then in-memory."""
+    res = get_scan_results(scan_id) if DB_AVAILABLE else None
+    if not res:
+        payload = _scan_status_response(scan_id)
+        res = (payload or {}).get("result") if payload else None
+    return res or {}
+
+
+@app.post("/api/ai/chat")
+async def ai_chat_message(request: Request, _user: dict = Depends(_require_auth)):
+    """Send a conversational question about a scan.
+    Body: { scan_id, question, chat_id?, finding_ids?, provider?, model? }
+    Offline-safe: returns a deterministic, evidence-only answer when no provider
+    is configured. Persists the conversation (survives restart)."""
+    if ai_chat is None:
+        raise HTTPException(503, detail="AI chat module unavailable")
+    body = await request.json()
+    scan_id = (body.get("scan_id") or "").strip()
+    question = (body.get("question") or "").strip()
+    if not scan_id or not question:
+        raise HTTPException(400, detail="scan_id and question are required")
+    results = _load_results_for(scan_id)
+    if not results:
+        raise HTTPException(404, detail=f"Scan {scan_id} not found")
+    from starlette.concurrency import run_in_threadpool
+    env = await run_in_threadpool(
+        ai_chat.send_message,
+        scan_id=scan_id, question=question, results=results,
+        chat_id=body.get("chat_id"), finding_ids=body.get("finding_ids") or [],
+        provider_name=body.get("provider"), model=body.get("model"),
+    )
+    return JSONResponse(content=env)
+
+
+@app.get("/api/ai/chats")
+async def ai_list_chats(scan_id: str = Query(...), _user: dict = Depends(_require_auth)):
+    if ai_chat is None:
+        return JSONResponse(content={"conversations": []})
+    return JSONResponse(content={"conversations": list_conversations(scan_id)})
+
+
+@app.get("/api/ai/chats/{chat_id}")
+async def ai_get_chat(chat_id: str, _user: dict = Depends(_require_auth)):
+    if ai_chat is None:
+        raise HTTPException(503, detail="AI chat module unavailable")
+    convo = get_conversation(chat_id)
+    if not convo:
+        raise HTTPException(404, detail="Conversation not found")
+    return JSONResponse(content=convo)
+
+
+@app.patch("/api/ai/chats/{chat_id}")
+async def ai_rename_chat(chat_id: str, request: Request, _user: dict = Depends(_require_auth)):
+    if ai_chat is None:
+        raise HTTPException(503, detail="AI chat module unavailable")
+    body = await request.json()
+    rename_conversation(chat_id, (body.get("title") or "").strip())
+    return JSONResponse(content={"chat_id": chat_id, "title": body.get("title")})
+
+
+@app.delete("/api/ai/chats/{chat_id}")
+async def ai_delete_chat(chat_id: str, _user: dict = Depends(_require_auth)):
+    if ai_chat is None:
+        raise HTTPException(503, detail="AI chat module unavailable")
+    delete_conversation(chat_id)
+    return JSONResponse(content={"deleted": chat_id})
 
 
 @app.post("/api/ai/enrich")

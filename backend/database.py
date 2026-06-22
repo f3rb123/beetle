@@ -157,6 +157,28 @@ def init_db():
             );
 
             CREATE INDEX IF NOT EXISTS idx_notes_scan ON scan_notes(scan_id);
+
+            -- Phase 11.98: Ask-AI conversations, persisted per scan.
+            CREATE TABLE IF NOT EXISTS ai_conversations (
+                chat_id    TEXT PRIMARY KEY,
+                scan_id    TEXT NOT NULL,
+                title      TEXT DEFAULT 'New conversation',
+                provider   TEXT DEFAULT '',
+                model      TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_convo_scan ON ai_conversations(scan_id);
+
+            CREATE TABLE IF NOT EXISTS ai_messages (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id    TEXT NOT NULL,
+                role       TEXT NOT NULL,
+                content    TEXT NOT NULL DEFAULT '',
+                meta       TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_msg_chat ON ai_messages(chat_id);
         """)
 
         # Lightweight, idempotent column migrations for pre-existing DBs.
@@ -634,6 +656,102 @@ def export_workspace(out_path: str, reports_dir: str | None = None) -> str:
                     if path.is_file() and path.suffix.lower() != ".zip":
                         zf.write(path, arcname=str(Path("reports") / path.relative_to(rp)))
     return out_path
+
+
+# ─── Phase 11.98: Ask-AI conversation persistence ───────────────────────────
+def create_conversation(scan_id: str, title: str = "New conversation",
+                        provider: str = "", model: str = "", chat_id: str | None = None) -> dict:
+    import uuid
+    cid = chat_id or str(uuid.uuid4())
+    try:
+        init_db()
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO ai_conversations (chat_id, scan_id, title, provider, model) "
+                "VALUES (?,?,?,?,?)", (cid, scan_id, title, provider or "", model or ""))
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] create_conversation error: {e}")
+    return {"chat_id": cid, "scan_id": scan_id, "title": title, "provider": provider, "model": model}
+
+
+def list_conversations(scan_id: str) -> list[dict]:
+    try:
+        init_db()
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT c.*, (SELECT COUNT(*) FROM ai_messages m WHERE m.chat_id=c.chat_id) AS message_count "
+                "FROM ai_conversations c WHERE scan_id=? ORDER BY updated_at DESC", (scan_id,)).fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[DB] list_conversations error: {e}")
+        return []
+
+
+def get_conversation(chat_id: str) -> dict | None:
+    try:
+        init_db()
+        with get_conn() as conn:
+            convo = conn.execute("SELECT * FROM ai_conversations WHERE chat_id=?", (chat_id,)).fetchone()
+            if not convo:
+                return None
+            msgs = conn.execute(
+                "SELECT id, role, content, meta, created_at FROM ai_messages WHERE chat_id=? ORDER BY id",
+                (chat_id,)).fetchall()
+            out = dict(convo)
+            out["messages"] = []
+            for m in msgs:
+                md = dict(m)
+                try:
+                    md["meta"] = json.loads(md["meta"]) if md.get("meta") else {}
+                except Exception:
+                    md["meta"] = {}
+                out["messages"].append(md)
+            return out
+    except Exception as e:
+        print(f"[DB] get_conversation error: {e}")
+        return None
+
+
+def add_message(chat_id: str, role: str, content: str, meta: dict | None = None) -> dict:
+    try:
+        init_db()
+        with get_conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO ai_messages (chat_id, role, content, meta) VALUES (?,?,?,?)",
+                (chat_id, role, content or "", json.dumps(meta or {})))
+            conn.execute("UPDATE ai_conversations SET updated_at=datetime('now') WHERE chat_id=?", (chat_id,))
+            conn.commit()
+            return {"id": cur.lastrowid, "chat_id": chat_id, "role": role, "content": content, "meta": meta or {}}
+    except Exception as e:
+        print(f"[DB] add_message error: {e}")
+        return {"error": str(e)}
+
+
+def rename_conversation(chat_id: str, title: str) -> bool:
+    try:
+        init_db()
+        with get_conn() as conn:
+            conn.execute("UPDATE ai_conversations SET title=?, updated_at=datetime('now') WHERE chat_id=?",
+                         (title.strip() or "Untitled", chat_id))
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB] rename_conversation error: {e}")
+        return False
+
+
+def delete_conversation(chat_id: str) -> bool:
+    try:
+        init_db()
+        with get_conn() as conn:
+            conn.execute("DELETE FROM ai_messages WHERE chat_id=?", (chat_id,))
+            conn.execute("DELETE FROM ai_conversations WHERE chat_id=?", (chat_id,))
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB] delete_conversation error: {e}")
+        return False
 
 
 def import_workspace(zip_path: str) -> dict:
