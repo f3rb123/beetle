@@ -17,8 +17,43 @@ never invent findings, code, paths, or parameters.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import urllib.error
+
+log = logging.getLogger("cortex.providers")
+
+
+def http_error_detail(e: Exception) -> str:
+    """Human-readable detail for a provider HTTP failure.
+
+    Surfaces the HTTP status code AND the response body (the part that actually
+    says *why* — e.g. "Insufficient Balance", "Invalid API key", "model not
+    found"). Without this the caller only sees the exception class name, which
+    is why a failing key looked identical to offline mode. NEVER raises."""
+    if isinstance(e, urllib.error.HTTPError):
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")[:600]
+        except Exception:
+            pass
+        msg = body
+        try:
+            j = json.loads(body)
+            err = j.get("error")
+            if isinstance(err, dict):
+                msg = err.get("message") or err.get("type") or body
+            elif isinstance(err, str):
+                msg = err
+            else:
+                msg = j.get("message") or body
+        except Exception:
+            pass
+        return f"HTTP {e.code} {getattr(e, 'reason', '')}: {(msg or '').strip()}".strip()
+    if isinstance(e, urllib.error.URLError):
+        return f"connection failed: {getattr(e, 'reason', e)}"
+    return f"{type(e).__name__}: {e}"
 
 # ── System prompt: the guardrail that keeps the model on the evidence ────────
 _SYSTEM = (
@@ -111,13 +146,17 @@ class BaseProvider:
         res = self.complete(prompt, model=model or self.default_model, system=_SYSTEM)
         if res.get("error"):
             return {"error": res["error"], "provider": self.id}
+        # Carry real API usage/latency through so the UI can show token counts
+        # and generation time from the provider rather than an estimate.
+        meta = {k: res[k] for k in ("usage", "latency_ms") if res.get(k) is not None}
         parsed = _parse_json(res.get("text", ""))
         if parsed is None:
             # Model replied but not as JSON — surface the raw text rather than fail.
             return {"summary": (res.get("text") or "").strip()[:1200],
-                    "provider": self.id, "model": res.get("model", model)}
+                    "provider": self.id, "model": res.get("model", model), **meta}
         parsed.setdefault("provider", self.id)
         parsed.setdefault("model", res.get("model", model or self.default_model))
+        parsed.update(meta)
         return parsed
 
     # ── The six structured actions (Phase 11.97) ─────────────────────────────

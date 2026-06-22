@@ -299,18 +299,23 @@ def run_action(action: str, *, finding: dict | None = None, results: dict | None
     note = None
     result: dict = {}
 
+    log.info("[action] action=%s provider_requested=%s provider_selected=%s",
+             action, provider_name or "(auto)", used_provider)
     if provider is not None:
         try:
             llm = _call_provider(provider, action, finding, results, model)
         except Exception as e:  # defensive — providers shouldn't raise
-            llm = {"error": f"{type(e).__name__}"}
+            llm = {"error": f"{type(e).__name__}: {e}"}
         if llm and not llm.get("error"):
             result = {k: v for k, v in llm.items() if k not in ("provider", "model")}
             mode = "llm"
             used_provider = llm.get("provider", used_provider)
             used_model = llm.get("model", used_model)
+            log.info("[action] llm result from provider=%s model=%s", used_provider, used_model)
         else:
             note = (llm or {}).get("error") or "provider returned no usable result"
+            # Surface, never hide: a provider was requested but failed.
+            log.warning("[action] provider=%s FAILED, falling back to deterministic: %s", used_provider, note)
 
     if mode == "deterministic":
         result = _deterministic(action, finding, results)

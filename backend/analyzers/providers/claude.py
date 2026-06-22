@@ -2,7 +2,7 @@
 current behavior is preserved exactly (Phase 11.75 Task 10)."""
 from __future__ import annotations
 
-from .base import BaseProvider
+from .base import BaseProvider, log
 
 
 class ClaudeProvider(BaseProvider):
@@ -33,9 +33,13 @@ class ClaudeProvider(BaseProvider):
                 kwargs["system"] = system
             msg = client.messages.create(**kwargs)
             text = "".join(getattr(b, "text", "") for b in msg.content)
-            return {"text": text, "model": mdl, "provider": self.id}
+            usage = getattr(msg, "usage", None)
+            tokens = (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "output_tokens", 0) or 0) if usage else None
+            return {"text": text, "model": mdl, "provider": self.id,
+                    "usage": {"total_tokens": tokens} if tokens else {}}
         except Exception as e:  # never raise into the pipeline
-            return {"error": f"Claude call failed: {type(e).__name__}", "provider": self.id}
+            log.warning("[claude] call failed: %s: %s", type(e).__name__, e)
+            return {"error": f"Claude call failed: {type(e).__name__}: {e}", "provider": self.id}
 
     def enrich_finding(self, finding: dict, app_context: dict | None = None) -> dict:
         import ai_enrichment

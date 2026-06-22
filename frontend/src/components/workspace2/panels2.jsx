@@ -1401,17 +1401,24 @@ function AiMessage({ m }) {
   if (m.role === 'user') {
     return <div className="ws-chat-msg ws-chat-msg--user"><div className="ws-chat-bubble ws-chat-bubble--user">{m.content}</div></div>
   }
+  // A provider was requested but it errored and we fell back to deterministic.
+  const providerFailed = meta.mode !== 'llm' && !!meta.note
   return (
     <div className="ws-chat-msg ws-chat-msg--ai">
       <div className="ws-chat-bubble ws-chat-bubble--ai">
+        {providerFailed ? (
+          <div className="ws-callout ws-callout--fp" style={{ marginBottom: 10 }}>
+            <b>Provider failed — showing deterministic answer.</b><br />{meta.note}
+          </div>
+        ) : null}
         <div className="ws-chat-ans">{m.content}</div>
         <div className="ws-chat-meta">
-          <span className="ws-tag ws-tag--soft"><Sparkles size={11} /> {meta.provider || 'deterministic'}</span>
-          {meta.model ? <span className="ws-tag ws-tag--soft">{meta.model}</span> : null}
+          <span className="ws-tag ws-tag--soft"><Sparkles size={11} /> Provider: {meta.provider || 'deterministic'}</span>
+          {meta.model ? <span className="ws-tag ws-tag--soft">Model: {meta.model}</span> : null}
           <span className="ws-tag ws-tag--soft">{meta.mode === 'llm' ? 'model' : meta.mode === 'error' ? 'error' : 'deterministic'}</span>
           {meta.confidence ? <span className="ws-tag ws-tag--soft">conf: {meta.confidence}</span> : null}
-          {meta.cached ? <span className="ws-tag ws-tag--soft">cached</span> : null}
-          {meta.tokens != null ? <span className="ws-tag ws-tag--soft">~{meta.tokens} tok</span> : null}
+          <span className="ws-tag ws-tag--soft">Cached: {meta.cached ? 'yes' : 'no'}</span>
+          {meta.tokens != null ? <span className="ws-tag ws-tag--soft">{meta.token_estimate ? '~' : ''}{meta.tokens} tok</span> : null}
           {meta.generation_ms != null ? <span className="ws-tag ws-tag--soft">{meta.generation_ms}ms</span> : null}
           <button type="button" className="ws-chat-detail-toggle" onClick={() => setOpen(o => !o)}>
             <ChevronDown size={12} style={{ transform: open ? 'rotate(180deg)' : 'none' }} /> details
@@ -1498,7 +1505,8 @@ export function AskAiPanel({ results, scanId }) {
         meta: {
           reasoning: env.reasoning, confidence: env.confidence, limitations: env.limitations,
           provider: env.provider, model: env.model, mode: env.mode, cached: env.cached,
-          evidence_used: env.evidence_used, tokens: env.tokens, generation_ms: env.generation_ms,
+          evidence_used: env.evidence_used, tokens: env.tokens, token_estimate: env.token_estimate,
+          generation_ms: env.generation_ms, note: env.note,
         },
       }])
     } finally { setBusy(false) }

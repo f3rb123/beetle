@@ -311,21 +311,30 @@ def run_chat(*, scan_id: str, question: str, results: dict, finding_ids: list[st
             return hit
 
     mode, note, result = "deterministic", None, {}
+    log.info("[ask] scan=%s provider_requested=%s provider_selected=%s findings=%d",
+             scan_id, provider_name or "(auto)", used_provider, len(findings))
     if provider is not None:
         try:
             llm = provider.ask(question, context_text, history=history or [], model=model)
         except Exception as e:
-            llm = {"error": f"{type(e).__name__}"}
+            llm = {"error": f"{type(e).__name__}: {e}"}
         if llm and not llm.get("error"):
             result = {k: v for k, v in llm.items() if k not in ("provider", "model")}
             mode = "llm"
             used_provider = llm.get("provider", used_provider)
             used_model = llm.get("model", used_model)
+            log.info("[ask] llm answer from provider=%s model=%s", used_provider, used_model)
         else:
             note = (llm or {}).get("error") or "provider returned no usable result"
+            # Surface, never hide: a provider was requested but failed.
+            log.warning("[ask] provider=%s FAILED, falling back to deterministic: %s", used_provider, note)
 
     if mode == "deterministic":
         result = deterministic_ask(question, results, findings)
+
+    # Prefer the provider's real token count; fall back to a char-based estimate.
+    real_tokens = (result.get("usage") or {}).get("total_tokens") if isinstance(result.get("usage"), dict) else None
+    tokens = real_tokens or _estimate_tokens(context_text, question, result.get("answer", "") or result.get("summary", ""), result.get("reasoning", ""))
 
     envelope = {
         "answer": result.get("answer") or result.get("summary", ""),
@@ -338,9 +347,9 @@ def run_chat(*, scan_id: str, question: str, results: dict, finding_ids: list[st
         "note": note,
         "cached": False,
         "evidence_used": evidence_used,
-        "tokens": _estimate_tokens(context_text, question, result.get("answer", ""), result.get("reasoning", "")),
-        "token_estimate": True,
-        "generation_ms": int((time.time() - t0) * 1000),
+        "tokens": tokens,
+        "token_estimate": real_tokens is None,
+        "generation_ms": result.get("latency_ms") or int((time.time() - t0) * 1000),
     }
     if use_cache:
         ai_actions._cache_set(key, dict(envelope))

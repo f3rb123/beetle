@@ -360,17 +360,18 @@
 /* ── Phase 11.86 — overview layout, sticky rail, evidence + finding cards ───── */
 .ws-btn--sm { padding: 5px 11px; font-size: 12.5px; border-radius: 8px; }
 
-/* Two-column overview: scrolling left column + sticky right rail */
+/* Two-column overview: both columns flow naturally with the page.
+   Phase 11.985: the right column is NO LONGER sticky — it previously pinned
+   (position: sticky; top: 76px) and floated over Top Risks while the left
+   column scrolled underneath. Top Risks now spans full width above this grid,
+   and both tracks scroll together. align-self:start keeps cards top-aligned so
+   no empty min-height is reserved between rows. */
 .ws-col { display: flex; flex-direction: column; gap: 26px; min-width: 0; }
-/* The rail is sticky inside its own grid track. min-width:0 + overflow-wrap keep
-   long titles/values from forcing the track wider than its share, which is what
-   previously let rail cards bleed over the left column at non-100% zoom. */
-.ws-rail { position: sticky; top: 76px; align-self: start; display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%; }
+/* min-width:0 + overflow-wrap keep long titles/values from forcing a track
+   wider than its share (which let rail cards bleed over at non-100% zoom). */
+.ws-rail { align-self: start; display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%; }
 .ws-rail .ws-card { min-width: 0; max-width: 100%; }
 .ws-rail .ws-card * { overflow-wrap: anywhere; }
-@media (max-width: 1120px) {
-  .ws-rail { position: static; }
-}
 
 /* Stacked finding cards (Recent Findings) */
 .ws-fcard { position: relative; display: flex; background: var(--ws-surface); border: 1px solid var(--ws-line); border-radius: var(--ws-radius); padding: 13px 15px 13px 18px; margin-bottom: 10px; cursor: pointer; overflow: hidden; transition: border-color 120ms, box-shadow 120ms; }

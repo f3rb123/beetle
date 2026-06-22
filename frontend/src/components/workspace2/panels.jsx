@@ -76,39 +76,40 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCod
         </div>
       </div>
 
-      {/* Two-column: scrolling main list + sticky right rail (Tasks 6/7) */}
+      {/* Top Risks — full width, directly below Risk Summary (no sticky, no overlap) */}
+      <div className="ws-card ws-card--pad ws-section">
+        <h2>Top Risks</h2>
+        {(topRisks.length ? topRisks : null) ? (
+          <div className="ws-list">
+            {topRisks.map((r, i) => (
+              <button key={i} type="button" className="ws-list__row" style={{ background: 'none', border: 'none', borderTop: i ? '1px solid var(--ws-line)' : 'none', cursor: 'pointer', textAlign: 'left', width: '100%' }}
+                onClick={() => { const f = findings.find(x => x.title === r.title); if (f) onOpenFinding(f) }}>
+                <SeverityTag severity={r.severity} compact />
+                <span className="ws-list__grow">
+                  <span className="ws-list__title">{r.title}</span>
+                  {r.why ? <span className="ws-list__why">{r.why}</span> : null}
+                </span>
+                <ChevronRight size={15} className="ws-muted" />
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="ws-list">
+            {[...findings].sort((a, b) => SEV_RANK[normSev(a.severity)] - SEV_RANK[normSev(b.severity)]).slice(0, 5).map((f, i) => (
+              <button key={i} type="button" className="ws-list__row" style={{ background: 'none', border: 'none', borderTop: i ? '1px solid var(--ws-line)' : 'none', cursor: 'pointer', textAlign: 'left', width: '100%' }} onClick={() => onOpenFinding(f)}>
+                <SeverityTag severity={f.severity} compact />
+                <span className="ws-list__grow"><span className="ws-list__title">{f.title}</span></span>
+                <ChevronRight size={15} className="ws-muted" />
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Two-column: Recent Findings + Attack Chains | Most Exploitable Chain + MASVS Posture.
+          Both columns flow with the page — no sticky rail (Phase 11.985 layout fix). */}
       <div className="ws-two ws-section">
         <div className="ws-col">
-          {/* Top risks */}
-          <div className="ws-card ws-card--pad">
-            <h2>Top Risks</h2>
-            {(topRisks.length ? topRisks : null) ? (
-              <div className="ws-list">
-                {topRisks.map((r, i) => (
-                  <button key={i} type="button" className="ws-list__row" style={{ background: 'none', border: 'none', borderTop: i ? '1px solid var(--ws-line)' : 'none', cursor: 'pointer', textAlign: 'left', width: '100%' }}
-                    onClick={() => { const f = findings.find(x => x.title === r.title); if (f) onOpenFinding(f) }}>
-                    <SeverityTag severity={r.severity} compact />
-                    <span className="ws-list__grow">
-                      <span className="ws-list__title">{r.title}</span>
-                      {r.why ? <span className="ws-list__why">{r.why}</span> : null}
-                    </span>
-                    <ChevronRight size={15} className="ws-muted" />
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <div className="ws-list">
-                {[...findings].sort((a, b) => SEV_RANK[normSev(a.severity)] - SEV_RANK[normSev(b.severity)]).slice(0, 5).map((f, i) => (
-                  <button key={i} type="button" className="ws-list__row" style={{ background: 'none', border: 'none', borderTop: i ? '1px solid var(--ws-line)' : 'none', cursor: 'pointer', textAlign: 'left', width: '100%' }} onClick={() => onOpenFinding(f)}>
-                    <SeverityTag severity={f.severity} compact />
-                    <span className="ws-list__grow"><span className="ws-list__title">{f.title}</span></span>
-                    <ChevronRight size={15} className="ws-muted" />
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
           {/* Recent findings (stacked cards, Task 8) */}
           <div>
             <div className="ws-section__head"><h2>Recent Findings</h2>
@@ -137,7 +138,7 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCod
           ) : null}
         </div>
 
-        {/* Sticky right rail: Most Exploitable Chain + MASVS Posture + Strong Controls */}
+        {/* Right column: Most Exploitable Chain + MASVS Posture + Strong Controls (flows with the page) */}
         <aside className="ws-rail">
           <div className="ws-card ws-card--pad">
             <h2>Most Exploitable Chain</h2>
