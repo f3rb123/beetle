@@ -40,16 +40,13 @@ export default function Login() {
 
   return (
     <div className="login-page">
-      {/* subtle grid background */}
-      <div className="login-page__grid" aria-hidden="true" />
-
       <div className="login-card">
         <div className="login-card__header">
           <div className="login-card__logo-ring">
             <img src={beetleIcon} alt="Beetle" className="login-card__logo" />
           </div>
           <h1 className="login-card__title">Beetle</h1>
-          <p className="login-card__sub">Mobile Static Security Framework</p>
+          <p className="login-card__sub">Mobile Static Security Workspace</p>
         </div>
 
         <form className="login-form" onSubmit={handleSubmit} autoComplete="on">

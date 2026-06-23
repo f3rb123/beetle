@@ -16,3 +16,12 @@ coverage/
 
 # Phase 9.1.5 secret-safety validation scratch (jadx binary + decompiled APKs)
 .tools/
+
+# Validation / review scratch artifacts (never commit — may contain tokens)
+.val_token
+.val_ids
+.val*
+.valout/
+.uireview/
+frontend/preview-live/
+frontend/public/render-ws.html

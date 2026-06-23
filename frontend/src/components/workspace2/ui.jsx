@@ -126,7 +126,12 @@ export function buildEvidence(finding) {
   const push = ({ path, lineStart, lineEnd, highlightLine, snippet, source }) => {
     if (!path) return
     const declared = highlightLine || lineStart || null
-    const key = `${path}#${declared || ''}#${source}`
+    // Collapse the same physical location reported by multiple sources (analyst
+    // evidence + code reference + finding location often all point at one line):
+    // when the line is known, dedup by path#line so it is ONE navigable location,
+    // not three identical ones. Approximate entries (no line) stay distinct by
+    // source+snippet so genuinely different guesses are still shown.
+    const key = declared ? `${path}#${declared}` : `${path}#${source}#${(snippet || '').slice(0, 40)}`
     if (seen.has(key)) return
     seen.add(key)
     const lines = highlightLine && lineStart

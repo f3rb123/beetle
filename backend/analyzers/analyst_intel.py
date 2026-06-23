@@ -12,6 +12,7 @@ and every cloud attack path, and builds results["analyst_summary"] (Task 7).
 from __future__ import annotations
 
 import logging
+import re
 
 log = logging.getLogger("cortex.analyst_intel")
 
@@ -326,6 +327,78 @@ def _evidence_locations(finding: dict) -> list:
     return locs
 
 
+# ─── Finding-specific text helpers (Phase 11.987) ────────────────────────────
+def _strip_md(text: str) -> str:
+    """Light markdown/backtick strip so a description reads as plain prose."""
+    return re.sub(r"[`*_]+", "", str(text or "")).strip()
+
+
+def _snippet_code(finding: dict) -> str:
+    """The actual matched code line from a finding's snippet/file_evidence.
+
+    Snippets are gutter-formatted ('> 24 | code'); return the focused ('>') line's
+    code, else the first real code line. Empty when there is no snippet.
+    """
+    snip = finding.get("snippet") or ""
+    if not snip:
+        for e in finding.get("file_evidence") or []:
+            if isinstance(e, dict) and e.get("snippet"):
+                snip = e["snippet"]
+                break
+    if not snip:
+        return ""
+    focus, first = "", ""
+    for ln in str(snip).splitlines():
+        m = re.match(r"^([>\s])\s*\d+\s*\|\s?(.*)$", ln)
+        code = (m.group(2) if m else ln).strip()
+        if not code:
+            continue
+        if not first:
+            first = code
+        if m and m.group(1) == ">":
+            focus = code
+            break
+    return (focus or first)[:300]
+
+
+def _concrete_subject(finding: dict) -> str:
+    """A specific noun for this finding: component / file:line / matched value."""
+    comp = finding.get("component")
+    if comp:
+        return str(comp).rstrip(";").split(".")[-1].split("$", 1)[0]
+    fe = finding.get("file_evidence") or []
+    path = finding.get("file_path") or (fe[0].get("path") if fe else "")
+    if path:
+        base = str(path).replace("\\", "/").split("/")[-1]
+        line = finding.get("line") or (fe[0].get("lines") or [None])[0] if fe else finding.get("line")
+        return f"{base}:{line}" if line else base
+    val = finding.get("value") or finding.get("matched_string")
+    return str(val)[:60] if val else ""
+
+
+def _what_found(finding: dict) -> str:
+    """Concrete, finding-specific 'what was found' — never a generic placeholder."""
+    code = _snippet_code(finding)
+    subj = _concrete_subject(finding)
+    if code:
+        return f"`{code}`" + (f"  ({subj})" if subj and subj not in code else "")
+    val = finding.get("value") or finding.get("matched_string")
+    if val:
+        return f"Matched value: {str(val)[:120]}" + (f" in {subj}" if subj else "")
+    desc = _strip_md(finding.get("description"))
+    if desc:
+        return desc[:400]
+    return _strip_md(finding.get("title")) or "Evidence attached below."
+
+
+def _specific_scenario(finding: dict, tpl_scenario: str) -> str:
+    """Lead the category scenario with this finding's concrete target."""
+    subj = _concrete_subject(finding)
+    if subj:
+        return f"Targeting {subj}: {tpl_scenario}"
+    return tpl_scenario
+
+
 # ─── AnalystExplanation builder (Task 1/2/3) ─────────────────────────────────
 def build_explanation(finding: dict) -> dict:
     cat = categorize(finding)
@@ -336,18 +409,19 @@ def build_explanation(finding: dict) -> dict:
     references = list(tpl["references"])
     if finding.get("cwe") and finding["cwe"] not in " ".join(references):
         references.append(str(finding["cwe"]))
-    # what_found is the CONCRETE thing detected (matched code), not a template.
-    what_found = (finding.get("snippet") or finding.get("value")
-                  or finding.get("matched_string") or "").strip() or det.get("why_dangerous", "")[:0] or "See evidence."
+    # what_found is the CONCRETE thing detected (matched code / value / specific
+    # description) — never a generic "See evidence." placeholder.
+    subject = _concrete_subject(finding)
+    impact_specific = (f"{tpl['impact']} (affected: {subject})" if subject else tpl["impact"])
     return {
         "title": finding.get("title") or finding.get("name") or "Finding",
         "category_template": cat,
-        "what_found": what_found,
+        "what_found": _what_found(finding),
         "why_it_matters": tpl["why_it_matters"],
         "why_dangerous": det["why_dangerous"],
-        "attack_scenario": tpl["attack_scenario"],
+        "attack_scenario": _specific_scenario(finding, tpl["attack_scenario"]),
         "prerequisites": list(tpl["prerequisites"]),
-        "impact": tpl["impact"],
+        "impact": impact_specific,
         "remediation": {
             "summary": finding.get("recommendation") or tpl["remediation_summary"],
             "developer_fix": det["developer_fix"],
@@ -371,11 +445,12 @@ def build_chain_explanation(chain: dict) -> dict:
     flow = " → ".join(steps) if steps else chain.get("summary", "")
     validated = any(c.get("kind") == "validation" and c.get("state") == "valid"
                     for c in chain.get("components", []))
+    title = chain.get("title", "this attack path")
     why = (
-        f"Individually these findings look minor, but together they form a usable path: "
-        f"{flow}. A {provider} credential present in the app combined with a confirmed public "
-        f"exposure means an attacker can go from 'string in the binary' to actual data access "
-        f"without a device or a user."
+        f"{title}: {flow}. "
+        f"A {provider} credential recovered from the app combines with a confirmed public "
+        f"exposure, so an attacker moves from a string in the binary to actual data access "
+        f"with no device and no user — a chain that is materially worse than any of its steps alone."
     )
     conf_reason = (
         "Confidence HIGH: the credential was validated AND the exposure was confirmed by a read-only probe."

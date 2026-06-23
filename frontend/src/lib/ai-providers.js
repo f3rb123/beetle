@@ -4,6 +4,7 @@
 // available, otherwise it falls back to the deterministic analyst intelligence
 // the backend already generated (analyst_explanation / analyst_summary). This
 // keeps the AI Assistant useful offline and ready to wire any LLM later.
+import { apiFetch } from './auth.js'
 
 export const AI_PROVIDERS = [
   { id: 'claude', name: 'Claude (Anthropic)', models: ['claude-haiku', 'claude-sonnet', 'claude-opus'] },
@@ -101,7 +102,6 @@ export const FINDING_AI_ACTIONS = [
 
 export async function fetchAiProviders() {
   try {
-    const { apiFetch } = await import('./auth.js')
     const r = await apiFetch('/api/ai/providers')
     if (r.ok) return await r.json()
   } catch { /* offline / unauth */ }
@@ -119,7 +119,6 @@ export async function runFindingAction({ action, provider, model, finding, resul
   if (_actionCache.has(key)) return { ..._actionCache.get(key), cached: true }
   let out = null
   try {
-    const { apiFetch } = await import('./auth.js')
     const body = action === 'summary'
       ? { action, provider, model, results }
       : { action, provider, model, finding }
@@ -136,7 +135,6 @@ export async function runFindingAction({ action, provider, model, finding, resul
 export async function runAssist({ provider, model, action, context }) {
   // Provider abstraction seam: when a live gateway is enabled, POST to it.
   if (liveAiEnabled()) {
-    const { apiFetch } = await import('./auth.js')  // lazy: only when a gateway is configured
     try {
       const resp = await apiFetch('/api/ai/assist', {
         method: 'POST',

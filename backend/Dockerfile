@@ -1,13 +1,15 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
-# Install system deps: java (for jadx/apktool), libmagic, file, wget
-RUN apt-get update && apt-get install -y \
-    libmagic1 \
-    file \
-    wget \
-    unzip \
-    default-jre-headless \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    apt-get update --fix-missing && \
+    apt-get install -y --no-install-recommends \
+        libmagic1 \
+        file \
+        wget \
+        unzip \
+        default-jre-headless && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install jadx
 RUN wget -q https://github.com/skylot/jadx/releases/download/v1.5.0/jadx-1.5.0.zip \

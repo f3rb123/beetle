@@ -8,7 +8,7 @@ import {
   MessageSquare, Plus, Trash2, Pencil, Send, ChevronDown,
 } from 'lucide-react'
 import { SEV_COLOR, normSev, SeverityTag, SoftTag, EmptyState, Metric } from './ui.jsx'
-import { AI_PROVIDERS, AI_ACTIONS, runAssist, fetchAiProviders } from '../../lib/ai-providers.js'
+import { fetchAiProviders, runFindingAction } from '../../lib/ai-providers.js'
 import { apiFetch } from '../../lib/auth.js'
 import { loadLocalHistory, getStoredScan } from '../../lib/scan-data.js'
 
@@ -152,7 +152,26 @@ export function PermissionsPanel({ results, onOpenCode }) {
             <span className="ws-mono ws-muted ws-permpkg" title={p.permission}>{p.permission}</span>
           </div>
           {p.description ? <p style={{ fontSize: 13, marginTop: 6 }}>{p.description}</p> : null}
-          {(p.used_in_files || []).length ? (
+          {(p.evidence || []).length ? (
+            <div style={{ marginTop: 8 }}>
+              <div className="ws-block__label">{p.reference_count || p.evidence.length} reference{(p.reference_count || p.evidence.length) !== 1 ? 's' : ''} in source{p.evidence.length > 1 ? ' · navigable with Prev/Next' : ''}</div>
+              {(() => {
+                // Build one navigable evidence set so View Code gets Prev/Next
+                // across the permission's distinct reference locations.
+                const evList = p.evidence.map(e => ({
+                  path: e.path, lines: e.line ? [e.line] : [], snippet: e.snippet,
+                  source: 'permission reference', highlightLine: e.line || undefined, approximate: !e.line,
+                }))
+                return p.evidence.slice(0, 8).map((e, j) => (
+                  <div key={j} className="ws-file" onClick={() => onOpenCode(e.path, e.line ? [e.line] : [], { snippet: e.snippet, source: 'permission reference', highlightLine: e.line, approximate: !e.line, evidence: evList, index: j })}>
+                    <FileCode2 size={12} className="ws-muted" />
+                    <span className="ws-file__path" title={e.path}>{e.path}{e.line ? `:${e.line}` : ''}</span>
+                    <ChevronRight size={12} className="ws-muted" />
+                  </div>
+                ))
+              })()}
+            </div>
+          ) : (p.used_in_files || []).length ? (
             <div style={{ marginTop: 8 }}>
               <div className="ws-block__label">Used in {p.used_in_files.length} file(s)</div>
               {p.used_in_files.slice(0, 8).map((f, j) => (
@@ -414,10 +433,57 @@ export function CertificatePanel({ results }) {
         )) : <div className="ws-assess"><AssessRow ok good="No certificate risks detected — production-grade signing" /></div>}
       </div>
 
+      {(cw.issues || []).length ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>Issue Intelligence <span className="ws-muted" style={{ fontSize: 13 }}>{cw.issues.length}</span></h2>
+          {[...cw.issues].sort((a, b) => (RISK_RANK[a.severity] ?? 4) - (RISK_RANK[b.severity] ?? 4)).map((iss, i) => (
+            <CertIssueCard key={iss.id || i} iss={iss} />
+          ))}
+        </div>
+      ) : null}
+
       {certFindings.length ? (
         <div className="ws-card ws-card--pad">
           <h2>Certificate Findings</h2>
           {certFindings.map((t, i) => <div key={i} className="ws-mcontrol"><ShieldAlert size={13} style={{ color: SEV_COLOR.medium }} /> {t}</div>)}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function CertIssueCard({ iss }) {
+  const [open, setOpen] = useState(false)
+  const row = (label, val) => val ? (
+    <div className="ws-kv__row"><span className="ws-kv__k">{label}</span><span className="ws-kv__v">{val}</span></div>
+  ) : null
+  return (
+    <div className="ws-card ws-card--pad" style={{ marginBottom: 8 }}>
+      <div className="ws-permhead" style={{ cursor: 'pointer' }} onClick={() => setOpen(o => !o)}>
+        <SeverityTag severity={iss.severity} compact />
+        <b style={{ fontSize: 13.5 }}>{iss.title}</b>
+        {iss.masvs ? <SoftTag>{iss.masvs}</SoftTag> : null}
+        {iss.owasp ? <SoftTag title="OWASP Mobile Top 10">{String(iss.owasp).split(':')[0]}</SoftTag> : null}
+        <ChevronRight size={14} className="ws-muted" style={{ marginLeft: 'auto', transform: open ? 'rotate(90deg)' : 'none' }} />
+      </div>
+      {iss.attack_scenario ? <p style={{ fontSize: 13, marginTop: 8 }}>{iss.attack_scenario}</p> : null}
+      {open ? (
+        <div style={{ marginTop: 8 }}>
+          {(iss.prerequisites || []).length ? (
+            <div style={{ marginBottom: 8 }}>
+              <div className="ws-block__label">Prerequisites</div>
+              <ul style={{ margin: '4px 0 0 18px', fontSize: 13 }}>{iss.prerequisites.map((p, j) => <li key={j}>{p}</li>)}</ul>
+            </div>
+          ) : null}
+          <div className="ws-kv">
+            {row('Affected versions', iss.affected_versions)}
+            {row('Business impact', iss.business_impact)}
+            {row('Technical impact', iss.technical_impact)}
+            {row('OWASP', iss.owasp)}
+            {row('MASVS', iss.masvs)}
+            {row('Remediation', iss.remediation)}
+            {row('Developer fix', iss.developer_fix)}
+          </div>
         </div>
       ) : null}
     </div>
@@ -1067,27 +1133,67 @@ export function ComparePanel({ results }) {
 }
 
 // ───────────────────────────── AI Assistant ──────────────────────────────
+// Phase 11.986: dispatches through the SAME backend path as the Finding drawer
+// and Ask-AI chat (/api/ai/action via runFindingAction). The old runAssist seam
+// was hardwired off (liveAiEnabled() === false), so this page always rendered
+// offline deterministic templates even when DeepSeek was selected. It now lists
+// the backend's real providers and reports the true provider/model/mode.
+const ASSISTANT_ACTIONS = [
+  { id: 'summary', label: 'Executive Summary', needs: 'results' },
+  { id: 'explain', label: 'Explain Finding', needs: 'finding' },
+  { id: 'verify', label: 'Verify Finding', needs: 'finding' },
+  { id: 'worth_testing', label: 'Worth Testing?', needs: 'finding' },
+  { id: 'generate_poc', label: 'Generate PoC', needs: 'finding' },
+  { id: 'generate_fix', label: 'Generate Fix', needs: 'finding' },
+]
+const _ASSIST_META_KEYS = new Set(['provider', 'model', 'mode', 'cached', 'note', 'action', 'usage', 'latency_ms', 'confidence', 'limitations', 'summary', 'reasoning', 'answer'])
+
+function AssistantResultFields({ result }) {
+  // Generic, action-agnostic render of the structured envelope result so every
+  // backend action shows meaningfully without per-action code.
+  return (
+    <>
+      {Object.entries(result).map(([k, v]) => {
+        if (_ASSIST_META_KEYS.has(k) || v == null || v === '' || (Array.isArray(v) && !v.length)) return null
+        const label = k.replace(/_/g, ' ')
+        if (Array.isArray(v)) {
+          return <div key={k} className="ws-block"><div className="ws-block__label" style={{ textTransform: 'capitalize' }}>{label}</div><ul>{v.map((x, i) => <li key={i}>{typeof x === 'string' ? x : JSON.stringify(x)}</li>)}</ul></div>
+        }
+        if (typeof v === 'object') return null
+        return <div key={k} className="ws-block"><div className="ws-block__label" style={{ textTransform: 'capitalize' }}>{label}</div><p style={{ whiteSpace: 'pre-wrap' }}>{String(v)}</p></div>
+      })}
+    </>
+  )
+}
+
 export function AiAssistantPanel({ results }) {
-  const [provider, setProvider] = useState(AI_PROVIDERS[0].id)
-  const [model, setModel] = useState(AI_PROVIDERS[0].models[0])
-  const [action, setAction] = useState('executive_summary')
+  const [providers, setProviders] = useState([])
+  const [provider, setProvider] = useState('')
+  const [action, setAction] = useState('summary')
   const [targetId, setTargetId] = useState('')
   const [out, setOut] = useState(null)
   const [busy, setBusy] = useState(false)
 
   const findings = results.findings || []
-  const chains = results.cloud_attack_paths || []
-  const need = (AI_ACTIONS.find(a => a.id === action) || {}).needs
-  const providerObj = AI_PROVIDERS.find(p => p.id === provider) || AI_PROVIDERS[0]
+  const need = (ASSISTANT_ACTIONS.find(a => a.id === action) || {}).needs
+
+  useEffect(() => { fetchAiProviders().then(d => setProviders(d.providers || [])) }, [])
 
   const run = async () => {
     setBusy(true)
-    const context = { results }
-    if (need === 'finding') context.finding = findings.find(f => (f.title || f.id) === targetId) || findings[0]
-    if (need === 'chain') context.chain = chains.find(c => c.title === targetId) || chains[0]
-    const res = await runAssist({ provider, model, action, context })
-    setOut(res); setBusy(false)
+    try {
+      const finding = need === 'finding'
+        ? (findings.find(f => (f.title || f.id) === targetId) || findings[0])
+        : undefined
+      const res = await runFindingAction({ action, provider: provider || undefined, finding, results })
+      setOut({ ...res, action })
+    } finally { setBusy(false) }
   }
+
+  const meta = out || {}
+  const providerFailed = out && meta.mode !== 'llm' && !!meta.note
+  const r = meta.result || {}
+  const headline = r.answer || r.summary || meta.summary || ''
 
   return (
     <div>
@@ -1095,31 +1201,20 @@ export function AiAssistantPanel({ results }) {
       <div className="ws-card ws-card--pad ws-section">
         <div className="ws-aiform">
           <label>Provider
-            <select className="ws-input" value={provider} onChange={e => { setProvider(e.target.value); setModel((AI_PROVIDERS.find(p => p.id === e.target.value) || {}).models[0]) }}>
-              {AI_PROVIDERS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-          </label>
-          <label>Model
-            <select className="ws-input" value={model} onChange={e => setModel(e.target.value)}>
-              {providerObj.models.map(m => <option key={m} value={m}>{m}</option>)}
+            <select className="ws-input" value={provider} onChange={e => { setProvider(e.target.value); setOut(null) }} aria-label="AI provider">
+              <option value="">Auto / Deterministic</option>
+              {providers.map(p => <option key={p.id} value={p.id} disabled={!p.available}>{p.name}{p.available ? '' : ' (unavailable)'}</option>)}
             </select>
           </label>
           <label>Action
             <select className="ws-input" value={action} onChange={e => { setAction(e.target.value); setOut(null) }}>
-              {AI_ACTIONS.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
+              {ASSISTANT_ACTIONS.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
             </select>
           </label>
           {need === 'finding' ? (
             <label>Finding
               <select className="ws-input" value={targetId} onChange={e => setTargetId(e.target.value)}>
                 {findings.slice(0, 100).map((f, i) => <option key={i} value={f.title || f.id}>{f.title}</option>)}
-              </select>
-            </label>
-          ) : null}
-          {need === 'chain' ? (
-            <label>Chain
-              <select className="ws-input" value={targetId} onChange={e => setTargetId(e.target.value)}>
-                {chains.map((c, i) => <option key={i} value={c.title}>{c.title}</option>)}
               </select>
             </label>
           ) : null}
@@ -1131,14 +1226,26 @@ export function AiAssistantPanel({ results }) {
 
       {out ? (
         <div className="ws-card ws-card--pad">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
             <h2 style={{ margin: 0 }}>Result</h2>
-            <SoftTag>{out.live ? `live · ${out.provider}` : 'analyst intelligence (offline)'}</SoftTag>
+            <span className="ws-tag ws-tag--soft"><Sparkles size={11} /> Provider: {meta.provider || 'deterministic'}</span>
+            {meta.model ? <span className="ws-tag ws-tag--soft">Model: {meta.model}</span> : null}
+            <span className="ws-tag ws-tag--soft">Mode: {meta.mode === 'llm' ? 'llm' : meta.mode === 'error' ? 'error' : 'deterministic'}</span>
+            <span className="ws-tag ws-tag--soft">Cached: {meta.cached ? 'yes' : 'no'}</span>
+            {meta.confidence ? <span className="ws-tag ws-tag--soft">conf: {meta.confidence}</span> : null}
           </div>
-          <pre className="ws-code" style={{ whiteSpace: 'pre-wrap' }}>{out.text}</pre>
+          {providerFailed ? (
+            <div className="ws-callout ws-callout--fp" style={{ marginBottom: 10 }}>
+              <b>Provider failed — showing deterministic answer.</b><br />{meta.note}
+            </div>
+          ) : null}
+          {headline ? <p style={{ whiteSpace: 'pre-wrap', marginTop: 0 }}>{headline}</p> : null}
+          <AssistantResultFields result={r} />
+          {meta.reasoning || r.reasoning ? <div className="ws-block"><div className="ws-block__label">Reasoning</div><p style={{ whiteSpace: 'pre-wrap' }}>{meta.reasoning || r.reasoning}</p></div> : null}
+          {meta.limitations || r.limitations ? <div className="ws-block"><div className="ws-block__label">Limitations</div><div className="ws-callout ws-callout--fp">{meta.limitations || r.limitations}</div></div> : null}
         </div>
       ) : (
-        <p className="ws-muted">Pick a provider, action, and target, then Run. Without a configured LLM gateway this uses Beetle's deterministic analyst intelligence; the provider abstraction is ready to dispatch to Claude, OpenAI, Gemini, DeepSeek, or Ollama.</p>
+        <p className="ws-muted">Pick a provider and action, then Run. With no LLM provider configured this returns Beetle's deterministic, evidence-only analysis; select DeepSeek/Claude/OpenAI/Gemini (or Ollama) to dispatch to a model.</p>
       )}
     </div>
   )

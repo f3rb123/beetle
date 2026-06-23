@@ -18,6 +18,7 @@ Adds:
 from __future__ import annotations
 
 import logging
+import os
 import re
 
 log = logging.getLogger("cortex.workspaces")
@@ -130,20 +131,74 @@ def enrich_chains(results: dict) -> None:
 
 
 # ═══════════════════════ Task 4 — permissions workspace ═════════════════════
-def _permission_usage(results: dict) -> dict:
-    """Best-effort permission→files map from EXISTING signals (android_api files,
-    finding paths). Deterministic; empty when no signal — never scans new code."""
-    usage: dict[str, set] = {}
-    api = results.get("android_api") or {}
-    api_files = sorted({f for files in api.values() for f in (files or [])})
-    for f in _findings(results):
-        path = f.get("file_path") or f.get("full_path")
-        if not path:
+# Phase 11.987 — real permission evidence. A single, capped pass over the
+# decompiled source finds where each permission constant is actually referenced
+# (Manifest.permission.X, the permission string, runtime checks) so the
+# permissions page can show file:line:snippet + View Code with Prev/Next.
+_PERM_EV_PER_PERM = 6
+_PERM_EV_TOTAL = 500
+_PERM_EV_MAX_FILES = 12000
+_PERM_EV_MAX_BYTES = 256 * 1024
+
+
+def _scan_permission_evidence(scan_id: str, short_names: list[str]) -> dict:
+    """short_name -> [{path, line, snippet}] from one bounded source pass."""
+    out: dict[str, list] = {}
+    if not scan_id or not short_names:
+        return out
+    try:
+        from . import scan_storage
+    except Exception:
+        return out
+    root = scan_storage.scan_root(scan_id)
+    if not root.exists():
+        return out
+    toks = sorted({s for s in short_names if s and len(s) >= 5}, key=len, reverse=True)
+    if not toks:
+        return out
+    pat = re.compile(r"\b(" + "|".join(re.escape(t) for t in toks) + r")\b")
+    text_exts = scan_storage.TEXT_EXTS
+    skip = scan_storage.SKIP_DIRNAMES
+    seen: dict[str, set] = {t: set() for t in toks}
+    total = files = 0
+    for sub in ("jadx", "apktool", "apk_extract"):
+        base = root / sub
+        if not base.exists():
             continue
-        blob = f"{f.get('title','')} {f.get('description','')}".upper()
-        for tok in re.findall(r"[A-Z_]{6,}", blob):
-            usage.setdefault(tok, set()).add(path)
-    return {k: sorted(v) for k, v in usage.items()}
+        for r, dirs, names in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in skip]
+            for name in names:
+                if os.path.splitext(name)[1].lower() not in text_exts:
+                    continue
+                files += 1
+                if files > _PERM_EV_MAX_FILES or total >= _PERM_EV_TOTAL:
+                    return out
+                fp = os.path.join(r, name)
+                try:
+                    with open(fp, "r", errors="replace") as fh:
+                        data = fh.read(_PERM_EV_MAX_BYTES)
+                except Exception:
+                    continue
+                if not any(t in data for t in toks):  # fast reject
+                    continue
+                rel = os.path.relpath(fp, base).replace("\\", "/")
+                for i, ln in enumerate(data.splitlines(), 1):
+                    m = pat.search(ln)
+                    if not m:
+                        continue
+                    tok = m.group(1)
+                    bucket = out.setdefault(tok, [])
+                    if len(bucket) >= _PERM_EV_PER_PERM:
+                        continue
+                    key = f"{rel}#{i}"
+                    if key in seen[tok]:
+                        continue
+                    seen[tok].add(key)
+                    bucket.append({"path": rel, "line": i, "snippet": ln.strip()[:200]})
+                    total += 1
+                    if total >= _PERM_EV_TOTAL:
+                        return out
+    return out
 
 
 def build_permissions_workspace(results: dict) -> None:
@@ -152,27 +207,188 @@ def build_permissions_workspace(results: dict) -> None:
         all_perms = (results.get("permissions") or {}).get("all") or []
         perms = [{"permission": p, "short_name": str(p).split(".")[-1], "status": "normal"} for p in all_perms]
     findings = _findings(results)
-    usage = _permission_usage(results)
+    short_names = [p.get("short_name") or (p.get("permission") or "").split(".")[-1] for p in perms]
+    scan_id = results.get("scan_id") or ""
+    ev_map = _scan_permission_evidence(scan_id, short_names)
+
+    # Manifest fallback: every declared permission appears in the manifest by
+    # definition, so a permission with no in-code reference still resolves to its
+    # <uses-permission name="…"> line. Reuse finding_model's manifest helpers so
+    # the path/line scheme matches the already-working manifest findings.
+    try:
+        from .finding_model import _load_manifest_text, _find_manifest_line
+        man_text, man_path = _load_manifest_text(scan_id, results.get("manifest_xml") or "")
+    except Exception:
+        man_text, man_path = "", "AndroidManifest.xml"
+
+    def _manifest_ev(full_name: str) -> list:
+        if not man_text or not full_name:
+            return []
+        line, snippet = _find_manifest_line(man_text, {"attr": "name", "value": full_name})
+        if not line:
+            return []
+        return [{"path": man_path, "line": line, "snippet": (snippet or "").strip()[:200]}]
 
     out = []
     for p in perms:
         name = p.get("permission") or ""
         short = p.get("short_name") or name.split(".")[-1]
+        ev = ev_map.get(short, [])
+        if not ev:
+            ev = _manifest_ev(name)
+        files_used = sorted({e["path"] for e in ev})
         related = [f.get("title") for f in findings
                    if short and short.lower() in f"{f.get('title','')} {f.get('description','')}".lower()]
         out.append({
             "permission": name,
             "short_name": short,
             "type": p.get("status") or "normal",
+            "severity": p.get("severity") or ("medium" if p.get("status") == "dangerous" else "info"),
+            "reason": p.get("description", "") or "Declared in the app manifest.",
             "description": p.get("description", ""),
-            "where_used": usage.get(short.upper(), []),
-            "used_in_files": usage.get(short.upper(), []),
+            "where_used": files_used,
+            "used_in_files": files_used,
+            "reference_count": len(ev),
+            "evidence": ev,
             "findings": related[:10],
         })
     results["permissions_workspace"] = out
 
 
 # ═══════════════════════ Task 5 — certificate workspace ═════════════════════
+# Phase 11.987 — per-issue certificate intelligence. Instead of one generic
+# narrative for every certificate weakness, each detected issue carries its own
+# affected versions, attack scenario, prerequisites, business/technical impact,
+# MASVS/OWASP mapping, severity, remediation and developer fix (analyst_intel
+# style — concrete, no boilerplate).
+def _build_cert_issues(c: dict, schemes: list, janus: bool, self_signed: bool) -> list:
+    issues: list[dict] = []
+    algo = str(c.get("signature_algo") or "")
+    algo_l = algo.lower()
+    key_type = str(c.get("key_type") or "")
+    key_size = c.get("key_size")
+    try:
+        key_bits = int(key_size) if key_size is not None else None
+    except (TypeError, ValueError):
+        key_bits = None
+    scheme_l = [str(s).lower() for s in schemes]
+    has_v2plus = any(s in ("v2", "v3", "v4") for s in scheme_l)
+
+    if c.get("debug_cert"):
+        issues.append({
+            "id": "debug_certificate",
+            "title": "APK signed with a debug certificate",
+            "severity": "high",
+            "affected_versions": "All Android versions — the Android debug keystore key (CN=Android Debug) is shared and publicly known.",
+            "attack_scenario": "An attacker downloads the APK, strips the signature, modifies code or resources, and re-signs with the same well-known Android debug key. Because the debug certificate is identical across machines, the repackaged build is indistinguishable from the original by certificate, and any device or sideload flow keyed to that identity accepts it.",
+            "prerequisites": ["Attacker can obtain and redistribute the APK", "A distribution channel that does not enforce Play App Signing"],
+            "business_impact": "Trojanized clones of the app can be distributed under an identity anyone can reproduce, enabling fraud, credential theft from users, and brand damage. Google Play rejects debug-signed uploads outright.",
+            "technical_impact": "No meaningful authorship guarantee: signature-based update integrity and signature-permission protections are void because the signing key is public.",
+            "masvs": "MASVS-RESILIENCE-1",
+            "owasp": "M7: Insufficient Binary Protection",
+            "remediation": "Sign release builds with a private, securely stored release keystore; never ship debug-signed artifacts. Enable Google Play App Signing.",
+            "developer_fix": "Build with the `release` signingConfig (not `debug`) and verify with `apksigner verify --print-certs`; the subject must not be CN=Android Debug.",
+        })
+
+    if "sha1" in algo_l or "sha-1" in algo_l or "md5" in algo_l:
+        weak = "MD5" if "md5" in algo_l else "SHA-1"
+        issues.append({
+            "id": "weak_signature_algo",
+            "title": f"Certificate signed with weak {weak} digest ({algo})",
+            "severity": "high" if weak == "MD5" else "medium",
+            "affected_versions": "Exploitable wherever the APK v1 (JAR) signature is trusted — Android 4.x–6.0 verify v1 only; collision attacks on SHA-1 are practical since the 2017 SHAttered research, and MD5 collisions for over a decade.",
+            "attack_scenario": f"An attacker crafts a second APK whose {weak} digest collides with the legitimate one, so the existing v1 signature block validates against malicious content. On devices that rely on v1 verification, the forged package installs and updates as if genuinely signed.",
+            "prerequisites": [f"{weak} is used for the signature digest", "Target devices verify the v1/JAR signature (no v2+ enforcement)"],
+            "business_impact": "App integrity can be forged, allowing malware to masquerade as a legitimate update and undermining the trust users place in the publisher.",
+            "technical_impact": f"Tamper-evidence of the signature is broken — {weak} no longer provides collision resistance, so signed content is no longer reliably authentic.",
+            "masvs": "MASVS-CRYPTO-1",
+            "owasp": "M10: Insufficient Cryptography",
+            "remediation": "Re-sign with a SHA-256 (or stronger) digest and APK Signature Scheme v2+/v3, which use modern hashing and protect the whole archive.",
+            "developer_fix": "Regenerate the certificate with `-sigalg SHA256withRSA` and enable v2/v3 signing in the Gradle signingConfig; drop reliance on v1-only verification.",
+        })
+
+    if key_bits is not None and "rsa" in key_type.lower() and key_bits < 2048:
+        issues.append({
+            "id": "small_rsa_key",
+            "title": f"Weak {key_bits}-bit RSA signing key",
+            "severity": "high" if key_bits <= 512 else "medium",
+            "affected_versions": "All versions — NIST has deprecated RSA below 2048 bits; 1024-bit RSA is considered factorable by well-resourced adversaries and 512-bit is breakable on commodity hardware.",
+            "attack_scenario": f"A sufficiently resourced attacker factors the {key_bits}-bit RSA modulus to recover the private key, then signs arbitrary malicious builds that validate against the app's published certificate — a full impersonation of the publisher.",
+            "prerequisites": [f"Signing key is {key_bits}-bit RSA", "Attacker has the compute/time to factor the modulus (feasible for ≤1024-bit for capable actors)"],
+            "business_impact": "Catastrophic if the key is recovered: the attacker can sign updates and apps indistinguishable from the genuine publisher, enabling supply-chain compromise of the entire user base.",
+            "technical_impact": "The signing key's secrecy — the root of all signature trust — is at risk; key compromise voids every integrity and update guarantee.",
+            "masvs": "MASVS-CRYPTO-2",
+            "owasp": "M10: Insufficient Cryptography",
+            "remediation": "Generate a new 2048-bit+ RSA (or 256-bit EC) signing key and migrate signing; rotate via the Play App Signing key-upgrade flow.",
+            "developer_fix": "Create a fresh keystore with `keytool -genkeypair -keyalg RSA -keysize 2048` (or `-keyalg EC -keysize 256`) and re-sign.",
+        })
+
+    if janus:
+        issues.append({
+            "id": "janus_v1_only",
+            "title": "v1-only signing — Janus tampering risk (CVE-2017-13156)",
+            "severity": "high",
+            "affected_versions": "Android 5.0–8.0 (API 21–26) that accept v1-signed APKs without v2 verification are vulnerable to the Janus DEX-injection attack.",
+            "attack_scenario": "Using Janus, an attacker prepends a malicious DEX to the APK; because v1 (JAR) signing does not cover the whole file, the original signature still validates while the runtime loads the attacker's injected code on a vulnerable device.",
+            "prerequisites": ["APK is signed with v1 only (no v2/v3)", "Target runs Android 5.0–8.0 and verifies v1 signatures"],
+            "business_impact": "Attackers can ship a trojanized build that passes signature checks, leading to malware distribution under the app's identity.",
+            "technical_impact": "Arbitrary code injection at load time with the app's own permissions and identity.",
+            "masvs": "MASVS-RESILIENCE-1",
+            "owasp": "M7: Insufficient Binary Protection",
+            "remediation": "Enable APK Signature Scheme v2 and v3 (whole-file signing), which closes Janus; keep v1 only for legacy compatibility alongside v2+.",
+            "developer_fix": "In the Gradle signingConfig set `v2SigningEnabled true` and `v3SigningEnabled true`; verify with `apksigner verify -v` that v2/v3 are present.",
+        })
+    elif "v1" in scheme_l and has_v2plus:
+        issues.append({
+            "id": "v1_scheme_enabled",
+            "title": "Legacy v1 (JAR) signature still enabled",
+            "severity": "low",
+            "affected_versions": "Pre-Android 7.0 devices fall back to v1 verification; modern devices prefer v2+ when present.",
+            "attack_scenario": "On old devices that only check v1, the weaker per-entry JAR signature is used, which does not protect the full archive the way v2+ does — a smaller version of the Janus exposure.",
+            "prerequisites": ["v1 signature is present", "App is installed on a pre-7.0 device"],
+            "business_impact": "Marginal residual tampering exposure on legacy devices only.",
+            "technical_impact": "Whole-file integrity relies on v2+; v1 fallback offers weaker guarantees.",
+            "masvs": "MASVS-RESILIENCE-1",
+            "owasp": "M7: Insufficient Binary Protection",
+            "remediation": "If minSdk ≥ 24, you may drop v1 entirely and rely on v2/v3; otherwise the risk is contained by v2+ on modern devices.",
+            "developer_fix": "Set `v1SigningEnabled false` when `minSdkVersion >= 24`, keeping `v2SigningEnabled`/`v3SigningEnabled` true.",
+        })
+
+    if c.get("expired"):
+        issues.append({
+            "id": "expired_certificate",
+            "title": "Signing certificate has expired",
+            "severity": "medium",
+            "affected_versions": "All versions — an expired signing certificate can block installs/updates and signals poor key lifecycle management.",
+            "attack_scenario": "An expired certificate cannot be used to publish updates on Play, and on some flows installation fails; users may be steered to unofficial sideloaded builds, widening the attack surface for trojanized copies.",
+            "prerequisites": ["Certificate validity window has passed", "App needs to be updated or freshly installed"],
+            "business_impact": "Inability to ship security updates through normal channels, leaving users on vulnerable versions and pushing them toward untrusted sources.",
+            "technical_impact": "Update/installation friction; degraded trust signals for the publisher identity.",
+            "masvs": "MASVS-RESILIENCE-1",
+            "owasp": "M7: Insufficient Binary Protection",
+            "remediation": "Use a long-lived release certificate (Play requires validity through at least 2033) and adopt Play App Signing so Google manages the signing key.",
+            "developer_fix": "Generate a new keystore with a long validity (`-validity 10000`) and migrate via Play App Signing key rotation.",
+        })
+
+    if self_signed and not c.get("debug_cert"):
+        issues.append({
+            "id": "self_signed_certificate",
+            "title": "Self-signed signing certificate (expected for Android, noted)",
+            "severity": "info",
+            "affected_versions": "All versions — Android app signing certificates are self-signed by design; this is informational, not a vulnerability on its own.",
+            "attack_scenario": "There is no direct attack from self-signing of the app's own package; the risk only arises if the same self-signed cert is reused as a TLS server/trust anchor, where no CA validates it.",
+            "prerequisites": ["N/A for app signing", "Relevant only if the cert is reused for TLS or custom trust"],
+            "business_impact": "None for app signing; review only if this certificate is also used outside package signing.",
+            "technical_impact": "None inherent to APK signing — the certificate is the publisher's self-asserted identity anchor.",
+            "masvs": "MASVS-RESILIENCE-1",
+            "owasp": "M7: Insufficient Binary Protection",
+            "remediation": "No action needed for app signing. If reused for TLS, replace with a CA-issued certificate.",
+            "developer_fix": "Keep the self-signed cert for package signing; do not embed or trust it as a TLS anchor.",
+        })
+
+    return issues
+
+
 def build_certificate_workspace(results: dict) -> None:
     c = results.get("certificate") or {}
     if not c:
@@ -188,6 +404,7 @@ def build_certificate_workspace(results: dict) -> None:
     self_signed = bool(subj) and subj == iss
     cert_findings = [f.get("title") for f in _findings(results)
                      if "certificate" in f"{f.get('category','')} {f.get('title','')}".lower()]
+    cert_issues = _build_cert_issues(c, schemes, bool(janus), self_signed)
     results["certificate_workspace"] = {
         "subject": ", ".join(f"{k}={v}" for k, v in subj.items()),
         "issuer": ", ".join(f"{k}={v}" for k, v in iss.items()),
@@ -206,6 +423,8 @@ def build_certificate_workspace(results: dict) -> None:
         "valid_to": c.get("valid_to"),
         "expired": bool(c.get("expired")),
         "findings": cert_findings,
+        "issues": cert_issues,
+        "issue_count": len(cert_issues),
     }
 
 

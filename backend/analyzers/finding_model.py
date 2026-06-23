@@ -1363,6 +1363,44 @@ def _locate_line(text: str, tokens: list[str]) -> tuple[int, str]:
     return 0, ""
 
 
+_CLASS_DECL_CACHE: dict[str, "re.Pattern"] = {}
+
+
+def _short_class_name(*candidates: str) -> str:
+    """Best short class name from a component FQN / class-ref / source basename."""
+    for c in candidates:
+        if not c:
+            continue
+        t = str(c).strip().rstrip(";").replace("\\", "/")
+        seg = t.split("/")[-1].split(".")[-1].split("$", 1)[0]
+        if seg and seg[:1].isupper():
+            return seg
+        # source basename like "SendMoney.java" -> strip extension, retry
+        base = os.path.splitext(os.path.basename(t))[0].split("$", 1)[0]
+        if base and base[:1].isupper():
+            return base
+    return ""
+
+
+def _locate_class_decl(text: str, short_name: str) -> tuple[int, str]:
+    """Locate the class/interface/enum/object declaration line for short_name.
+
+    Lets class-level findings (e.g. exported components) that carry no usage line
+    land View Code on the exact declaration instead of the top of the file.
+    """
+    if not text or not short_name:
+        return 0, ""
+    pat = _CLASS_DECL_CACHE.get(short_name)
+    if pat is None:
+        pat = re.compile(r"\b(?:class|interface|enum|object)\s+" + re.escape(short_name) + r"\b")
+        _CLASS_DECL_CACHE[short_name] = pat
+    lines = text.splitlines()
+    for i, ln in enumerate(lines, 1):
+        if pat.search(ln):
+            return i, _snippet_around(lines, i)
+    return 0, ""
+
+
 def _unresolved_reason(finding: dict, claimed: list[str]) -> str:
     fp = finding.get("file_path")
     if _looks_classref(fp):
@@ -1383,7 +1421,7 @@ def _no_source_reason(finding: dict) -> str:
     return "Manifest / configuration finding — no single source line (review AndroidManifest.xml)."
 
 
-def validate_source_resolution(findings: list[dict], scan_id: str) -> dict:
+def validate_source_resolution(findings: list[dict], scan_id: str, manifest_xml: str = "") -> dict:
     """Resolve each finding to a real source file+line or explain why not (P5.1/5.3).
 
     Sets per finding: source_resolved (bool), view_code (bool),
@@ -1440,6 +1478,12 @@ def validate_source_resolution(findings: list[dict], scan_id: str) -> dict:
                 text = ""
             if need_locate and text:
                 ln, snip = _locate_line(text, _taint_tokens(f) or [])
+                if not ln and not line:
+                    # Class-level finding (e.g. exported component) with no usage
+                    # token: land on the class declaration so View Code opens the
+                    # exact component, not line 1.
+                    short = _short_class_name(f.get("component"), f.get("file_path"), resolved_rel)
+                    ln, snip = _locate_class_decl(text, short)
                 if ln:
                     line, snippet = ln, snip
             if (not snippet) and line and text:
@@ -1471,6 +1515,21 @@ def validate_source_resolution(findings: list[dict], scan_id: str) -> dict:
             if mp and mp.is_file():
                 line = f.get("line") if isinstance(f.get("line"), int) and f.get("line") > 0 else 0
                 snippet = f.get("snippet") if isinstance(f.get("snippet"), str) else ""
+                # Component-scoped manifest findings (exported activity/service/
+                # receiver) carry the full class name but no line. Resolve it to
+                # the real `android:name="<component>"` declaration line in the
+                # DECODED manifest (the on-disk copy is often binary AXML, so use
+                # _load_manifest_text which falls back to the decoded string) —
+                # this is a real line lookup, never a fabricated one.
+                comp = f.get("component") or f.get("component_name")
+                if not line and comp:
+                    try:
+                        mtext, _ = _load_manifest_text(scan_id, manifest_xml)
+                        cline, csnip = _find_manifest_line(mtext, {"attr": "name", "value": comp})
+                        if cline:
+                            line, snippet = cline, csnip
+                    except Exception:
+                        pass
                 if not snippet and line:
                     try:
                         snippet = _snippet_around(mp.read_text(errors="replace").splitlines(), line)
@@ -1480,6 +1539,9 @@ def validate_source_resolution(findings: list[dict], scan_id: str) -> dict:
                 f["view_code"] = True
                 f["file_path"] = "AndroidManifest.xml"
                 f["files"] = ["AndroidManifest.xml"]
+                if line:
+                    f["line"] = line
+                    f["line_number"] = line
                 f["file_evidence"] = [{"path": "AndroidManifest.xml",
                                        "lines": [line] if line else [], "snippet": snippet}]
                 f.pop("source_unavailable_reason", None)

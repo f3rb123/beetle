@@ -653,6 +653,30 @@ SECRET_PATTERNS_EVIDENCE = [
         "recommendation":"Remove hardcoded credentials. Use secure storage or server-side auth.",
     },
     {
+        "name":    "Hardcoded Credential Pair",
+        # Catches credentials stored in map/dict entries where the key signals an
+        # identity or secret (e.g. hashMap.put("shopuser", "!ns3csh0p"), Kotlin
+        # mapOf("apiKey" to "…")). The value char-class excludes / : . and the
+        # lookahead requires a digit or symbol, so URLs, user-agents, version
+        # strings and plain display names ("John Doe", "Mozilla/5.0") are skipped.
+        # No entropy gate — short real passwords (e.g. "!ns3csh0p", entropy 2.95)
+        # fall below the 3.0 bar; the key-hint + value-shape constraints are the
+        # filter instead. The key must not contain "/" (excludes error-code paths
+        # like "auth/invalid-provider-id"), and the value must contain a digit or
+        # a true symbol — NOT merely an underscore — so SCREAMING_SNAKE_CASE enum
+        # constants (e.g. "INVALID_PROVIDER_ID") are not mistaken for secrets.
+        "pattern": r'(?:\.put|Pair|mapOf|hashMapOf|\bput)\s*\(?\s*["\'][^"\'/]*?(?:user|login|account|cred|passw|pwd|secret|token|api[_\-]?key|auth)[^"\'/]*["\']\s*(?:,|\sto\s)\s*["\'](?=[^"\']*[0-9!@#$%^&*])([^"\'\s/:.,;]{6,40})["\']',
+        "severity":"high",
+        "category":"Credentials",
+        "cwe":     "CWE-798",
+        "masvs":   "MASVS-STORAGE-2",
+        "owasp":   "M1",
+        "confidence":    75,
+        "exploitability":70,
+        "description":   "Hardcoded credential stored as a map/dictionary value under an identity or secret key.",
+        "recommendation":"Remove the embedded credential. Authenticate server-side or use the Android Keystore / EncryptedSharedPreferences.",
+    },
+    {
         "name":    "Generic API Key",
         "pattern": r'(?i)(?:api[_\-]?key|api[_\-]?secret|client[_\-]?secret)[\'"\s:=]+["\']([a-zA-Z0-9\-_\.]{20,})["\']',
         "severity":"medium",

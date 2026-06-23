@@ -6,10 +6,10 @@
 .ws {
   --ws-bg: #ffffff;
   --ws-bg-soft: #fafafa;
-  --ws-bg-sunken: #f4f5f7;
+  --ws-bg-sunken: #f1f2f5;
   --ws-surface: #ffffff;
-  --ws-line: #ececf0;
-  --ws-line-strong: #e0e1e6;
+  --ws-line: #e4e6ec;
+  --ws-line-strong: #d5d8e0;
   --ws-ink: #18181b;
   --ws-ink-2: #52525b;
   --ws-ink-3: #8a8a93;
@@ -24,10 +24,19 @@
   --sev-low: #3b82f6;
   --sev-info: #6b7280;
 
-  --ws-radius: 12px;
-  --ws-radius-lg: 16px;
-  --ws-shadow: 0 1px 2px rgba(24, 24, 27, 0.04), 0 1px 3px rgba(24, 24, 27, 0.06);
-  --ws-shadow-lg: 0 12px 32px rgba(24, 24, 27, 0.10);
+  --ws-radius: 14px;
+  --ws-radius-lg: 18px;
+  /* Tiered surface system (Phase 11.9868). Grey page canvas; three elevation
+     levels so cards don't all read at one depth. No glow / blue / neumorphism.
+       L1 page cards (.surface-card/.ws-card): upload, risk, recent, chains
+       L2 metric pills (.ws-metric): float a touch less
+       L3 inner elements (.ws-btn/.ws-tag/.ws-chip): a hairline only */
+  --ws-page: #ecedf1;
+  --ws-shadow:   0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.08);
+  --ws-shadow-2: 0 1px 2px rgba(0, 0, 0, 0.03), 0 5px 16px rgba(0, 0, 0, 0.06);
+  --ws-shadow-3: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --ws-shadow-hover: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 30px rgba(0, 0, 0, 0.10);
+  --ws-shadow-lg: 0 16px 40px rgba(24, 24, 27, 0.12);
   --ws-sidebar-w: 232px;
 
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
@@ -73,7 +82,8 @@
 .ws-sidebar__foot { margin-top: auto; padding: 10px 8px 2px; font-size: 11px; color: var(--ws-ink-3); }
 
 /* ── Main + topbar ─────────────────────────────────────────────────────── */
-.ws-main { min-width: 0; display: flex; flex-direction: column; overflow-x: clip; }
+/* Grey canvas behind the content so every white card reads as a raised surface. */
+.ws-main { min-width: 0; display: flex; flex-direction: column; overflow-x: clip; background: var(--ws-page); }
 .ws-topbar {
   position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 14px;
   padding: 12px 28px; border-bottom: 1px solid var(--ws-line);
@@ -94,7 +104,8 @@
 .ws-btn {
   display: inline-flex; align-items: center; gap: 6px; padding: 7px 13px; border-radius: 9px;
   border: 1px solid var(--ws-line-strong); background: #fff; color: var(--ws-ink);
-  font-size: 13px; font-weight: 550; cursor: pointer; transition: background 120ms, border-color 120ms;
+  font-size: 13px; font-weight: 550; cursor: pointer; box-shadow: var(--ws-shadow-3);
+  transition: background 120ms, border-color 120ms, box-shadow 120ms;
 }
 .ws-btn:hover { background: var(--ws-bg-sunken); }
 .ws-btn--primary { background: var(--ws-ink); color: #fff; border-color: var(--ws-ink); }
@@ -105,18 +116,24 @@
 
 /* ── Typography ────────────────────────────────────────────────────────── */
 .ws h1 { font-size: 24px; font-weight: 680; letter-spacing: -0.02em; margin: 0; }
-.ws h2 { font-size: 13px; font-weight: 620; letter-spacing: 0.02em; text-transform: uppercase; color: var(--ws-ink-3); margin: 0 0 12px; }
+.ws h2 { font-size: 13px; font-weight: 620; letter-spacing: 0.02em; text-transform: uppercase; color: var(--ws-ink-3); margin: 0 0 14px; }
 .ws h3 { font-size: 15px; font-weight: 620; letter-spacing: -0.01em; margin: 0; }
 .ws p { margin: 0; line-height: 1.55; color: var(--ws-ink-2); font-size: 14px; }
 .ws-muted { color: var(--ws-ink-3); }
 .ws-mono { font-family: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace; font-size: 12.5px; }
 
 /* ── Cards ─────────────────────────────────────────────────────────────── */
-.ws-card { background: var(--ws-surface); border: 1px solid var(--ws-line); border-radius: var(--ws-radius-lg); box-shadow: var(--ws-shadow); }
+/* .surface-card is the ONE canonical elevated surface. Every card class below
+   (metric, finding, secret, mcard, chain, launch, fcard) shares the same
+   background / border / radius / shadow tokens so the whole app is consistent. */
+.surface-card,
+.ws-card { background: var(--ws-surface); border: 1px solid var(--ws-line); border-radius: var(--ws-radius-lg); box-shadow: var(--ws-shadow); transition: box-shadow 160ms ease, transform 160ms ease; }
+.surface-card--hover:hover,
+.ws-card--hover:hover { box-shadow: var(--ws-shadow-hover); transform: translateY(-2px); }
 .ws-card--pad { padding: 18px 20px; }
 .ws-grid { display: grid; gap: 16px; }
-.ws-section { margin-bottom: 30px; }
-.ws-section__head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+.ws-section { margin-bottom: 38px; }
+.ws-section__head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 16px; }
 
 /* ── Overview ──────────────────────────────────────────────────────────── */
 .ws-ident { display: flex; align-items: center; gap: 16px; margin-bottom: 22px; }
@@ -124,8 +141,9 @@
 .ws-ident__avatar img { width: 100%; height: 100%; object-fit: cover; }
 .ws-ident__pkg { font-size: 13px; color: var(--ws-ink-3); margin-top: 3px; }
 
-.ws-metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 12px; }
-.ws-metric { padding: 14px 16px; border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); }
+.ws-metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 16px; }
+/* L2 metric pills — float a touch less than page cards, more padding, softer corners */
+.ws-metric { padding: 18px 18px; border: 1px solid var(--ws-line); border-radius: 16px; background: var(--ws-surface); box-shadow: var(--ws-shadow-2); }
 .ws-metric__label { font-size: 11.5px; font-weight: 560; color: var(--ws-ink-3); letter-spacing: 0.01em; }
 .ws-metric__value { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; margin-top: 4px; line-height: 1.05; }
 .ws-metric__sub { font-size: 12px; color: var(--ws-ink-3); margin-top: 3px; }
@@ -142,11 +160,11 @@
 .ws-sevlegend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; }
 .ws-sevlegend__item { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ws-ink-2); }
 
-.ws-two { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.ws-two { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 24px; align-items: start; }
 .ws-two > * { min-width: 0; }
 .ws-grid > * { min-width: 0; }
 .ws-list { display: flex; flex-direction: column; }
-.ws-list__row { display: flex; align-items: center; gap: 10px; padding: 11px 0; border-top: 1px solid var(--ws-line); font-size: 13.5px; }
+.ws-list__row { display: flex; align-items: center; gap: 10px; padding: 13px 0; border-top: 1px solid var(--ws-line); font-size: 13.5px; }
 .ws-list__row:first-child { border-top: none; }
 .ws-list__row b { font-weight: 580; }
 .ws-list__grow { flex: 1; min-width: 0; }
@@ -154,7 +172,7 @@
 .ws-list__why { font-size: 12.5px; color: var(--ws-ink-3); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── Tags ──────────────────────────────────────────────────────────────── */
-.ws-tag { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
+.ws-tag { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 6px; white-space: nowrap; box-shadow: var(--ws-shadow-3); }
 .ws-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .ws-sev { color: #fff; }
 .ws-sev--critical { background: var(--sev-critical); }
@@ -168,11 +186,11 @@
 .ws-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
 .ws-input { padding: 8px 12px; border: 1px solid var(--ws-line-strong); border-radius: 9px; font-size: 13px; background: #fff; color: var(--ws-ink); min-width: 220px; }
 .ws-input:focus { outline: 2px solid var(--ws-focus); outline-offset: -1px; border-color: transparent; }
-.ws-chip { padding: 6px 11px; border: 1px solid var(--ws-line-strong); border-radius: 999px; background: #fff; font-size: 12.5px; font-weight: 550; color: var(--ws-ink-2); cursor: pointer; }
+.ws-chip { padding: 6px 11px; border: 1px solid var(--ws-line-strong); border-radius: 999px; background: #fff; font-size: 12.5px; font-weight: 550; color: var(--ws-ink-2); cursor: pointer; box-shadow: var(--ws-shadow-3); }
 .ws-chip.is-active { background: var(--ws-ink); color: #fff; border-color: var(--ws-ink); }
 
-.ws-finding { border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); margin-bottom: 8px; cursor: pointer; transition: border-color 120ms, box-shadow 120ms; }
-.ws-finding:hover { border-color: var(--ws-line-strong); box-shadow: var(--ws-shadow); }
+.ws-finding { border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); margin-bottom: 14px; cursor: pointer; box-shadow: var(--ws-shadow); transition: border-color 120ms, box-shadow 160ms, transform 160ms; }
+.ws-finding:hover { border-color: var(--ws-line-strong); box-shadow: var(--ws-shadow-hover); transform: translateY(-2px); }
 .ws-finding__row { display: flex; align-items: center; gap: 12px; padding: 13px 16px; }
 .ws-finding__sev { width: 4px; align-self: stretch; border-radius: 4px; flex-shrink: 0; }
 .ws-finding__main { flex: 1; min-width: 0; }
@@ -231,11 +249,11 @@
 .ws-step__val { font-size: 12px; color: var(--ws-ink-3); margin-top: 2px; }
 
 /* ── Secrets ───────────────────────────────────────────────────────────── */
-.ws-secret { display: flex; align-items: center; gap: 12px; padding: 13px 16px; border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); margin-bottom: 8px; }
+.ws-secret { display: flex; align-items: center; gap: 12px; padding: 13px 16px; border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); margin-bottom: 8px; box-shadow: var(--ws-shadow); }
 .ws-secret__name { font-weight: 580; font-size: 14px; }
 .ws-secret__val { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 12px; color: var(--ws-ink-2); background: var(--ws-bg-sunken); padding: 2px 8px; border-radius: 6px; margin-top: 4px; display: inline-block; }
 /* Secret evidence cards (Phase 11.96) — full type/confidence/file:line/snippet */
-.ws-seccard { border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); padding: 13px 16px; margin-bottom: 10px; min-width: 0; }
+.ws-seccard { border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); padding: 14px 16px; margin-bottom: 14px; min-width: 0; box-shadow: var(--ws-shadow); }
 .ws-seccard__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ws-seccard__type { font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
 .ws-seccard__val { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 12px; color: var(--ws-ink-2); background: var(--ws-bg-sunken); padding: 4px 8px; border-radius: 6px; margin-top: 8px; overflow-wrap: anywhere; word-break: break-all; }
@@ -251,8 +269,8 @@
 .ws-vstate--skipped { background: #f1f1f3; color: #8a8a93; }
 
 /* ── MASVS ─────────────────────────────────────────────────────────────── */
-.ws-masvs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
-.ws-mcard { padding: 16px 18px; border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); }
+.ws-masvs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
+.ws-mcard { padding: 16px 18px; border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); box-shadow: var(--ws-shadow); }
 .ws-mcard__cat { font-size: 13px; font-weight: 620; }
 .ws-mcard__bar { height: 6px; border-radius: 999px; background: var(--ws-bg-sunken); margin: 10px 0 8px; overflow: hidden; }
 .ws-mcard__bar span { display: block; height: 100%; border-radius: 999px; }
@@ -324,9 +342,9 @@
 .ws-aiform label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 560; color: var(--ws-ink-3); }
 .ws-aiform .ws-input { min-width: 0; width: 100%; }
 
-.ws-launcher { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
-.ws-launch { display: flex; align-items: center; gap: 10px; padding: 13px 15px; border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); cursor: pointer; font-size: 13.5px; font-weight: 550; color: var(--ws-ink); transition: border-color 120ms, box-shadow 120ms; }
-.ws-launch:hover { border-color: var(--ws-line-strong); box-shadow: var(--ws-shadow); }
+.ws-launcher { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
+.ws-launch { display: flex; align-items: center; gap: 10px; padding: 13px 15px; border: 1px solid var(--ws-line); border-radius: var(--ws-radius); background: var(--ws-surface); cursor: pointer; font-size: 13.5px; font-weight: 550; color: var(--ws-ink); box-shadow: var(--ws-shadow); transition: border-color 120ms, box-shadow 160ms, transform 160ms; }
+.ws-launch:hover { border-color: var(--ws-line-strong); box-shadow: var(--ws-shadow-hover); transform: translateY(-2px); }
 
 /* ── Phase 11.8 additions ──────────────────────────────────────────────────── */
 .ws-perm { font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 6px; text-transform: capitalize; }
@@ -366,16 +384,16 @@
    column scrolled underneath. Top Risks now spans full width above this grid,
    and both tracks scroll together. align-self:start keeps cards top-aligned so
    no empty min-height is reserved between rows. */
-.ws-col { display: flex; flex-direction: column; gap: 26px; min-width: 0; }
+.ws-col { display: flex; flex-direction: column; gap: 32px; min-width: 0; }
 /* min-width:0 + overflow-wrap keep long titles/values from forcing a track
    wider than its share (which let rail cards bleed over at non-100% zoom). */
-.ws-rail { align-self: start; display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%; }
+.ws-rail { align-self: start; display: flex; flex-direction: column; gap: 24px; min-width: 0; max-width: 100%; }
 .ws-rail .ws-card { min-width: 0; max-width: 100%; }
 .ws-rail .ws-card * { overflow-wrap: anywhere; }
 
 /* Stacked finding cards (Recent Findings) */
-.ws-fcard { position: relative; display: flex; background: var(--ws-surface); border: 1px solid var(--ws-line); border-radius: var(--ws-radius); padding: 13px 15px 13px 18px; margin-bottom: 10px; cursor: pointer; overflow: hidden; transition: border-color 120ms, box-shadow 120ms; }
-.ws-fcard:hover { border-color: var(--ws-line-strong); box-shadow: var(--ws-shadow); }
+.ws-fcard { position: relative; display: flex; background: var(--ws-surface); border: 1px solid var(--ws-line); border-radius: var(--ws-radius); padding: 14px 16px 14px 18px; margin-bottom: 14px; cursor: pointer; overflow: hidden; box-shadow: var(--ws-shadow); transition: border-color 120ms, box-shadow 160ms, transform 160ms; }
+.ws-fcard:hover { border-color: var(--ws-line-strong); box-shadow: var(--ws-shadow-hover); transform: translateY(-2px); }
 .ws-fcard__sev { position: absolute; left: 0; top: 0; bottom: 0; width: 4px; }
 .ws-fcard__body { display: flex; flex-direction: column; gap: 7px; min-width: 0; flex: 1; }
 .ws-fcard__meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }

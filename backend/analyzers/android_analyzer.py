@@ -839,7 +839,7 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     results["scrub_stats"] = finding_model.scrub_noise(results)
     # ── Phase 5: source resolution validation (before refine so confidence sees it) ──
     results["source_resolution_stats"] = finding_model.validate_source_resolution(
-        results["findings"], scan_id,
+        results["findings"], scan_id, results.get("manifest_xml", ""),
     )
     # ── Phase 3: signal quality — library filtering, confidence, dedup, FP suppression ──
     _kept, _suppressed, _quality_stats = finding_model.refine_findings(

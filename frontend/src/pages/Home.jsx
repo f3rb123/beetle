@@ -4,7 +4,6 @@ import {
   ArrowRight,
   Clock3,
   FileScan,
-  SearchCode,
   Trash2,
   UploadCloud,
 } from 'lucide-react'
@@ -25,6 +24,29 @@ import {
 import { apiFetch, clearAuth, getToken, getUser, isAdmin } from '../lib/auth.js'
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+// Premium scan experience (Phase 11.9866). ONE stable activity line per real
+// backend stage — no rapid cosmetic text shuffling. The line changes only when
+// the pipeline actually advances, so it reads as honest progress.
+const STAGE_ACTIVITY = {
+  queued:      { title: 'Queued for analysis', sub: 'Waiting for an available worker' },
+  preparing:   { title: 'Preparing package', sub: 'Unpacking and validating the archive' },
+  decompiling: { title: 'Decompiling sources', sub: 'Running JADX and apktool' },
+  analyzing:   { title: 'Analyzing application', sub: 'Scanning code, secrets, and attack chains' },
+  finalizing:  { title: 'Finalizing report', sub: 'Scoring findings and building the report' },
+  completed:   { title: 'Analysis complete', sub: 'Opening your workspace' },
+}
+// Real backend stage order (from scan-data.js SCAN_STAGES).
+const REAL_STAGE_ORDER = ['queued', 'preparing', 'decompiling', 'analyzing', 'finalizing', 'completed']
+// Visual timeline → index into REAL_STAGE_ORDER at which the step lights up.
+const SCAN_TIMELINE = [
+  { label: 'Queued', at: 0 },
+  { label: 'Prepare', at: 1 },
+  { label: 'Decompile', at: 2 },
+  { label: 'Analyze', at: 3 },
+  { label: 'Correlate', at: 3 },
+  { label: 'Finalize', at: 4 },
+]
 
 /**
  * Read a fetch Response body as a Server-Sent Events stream.
@@ -344,8 +366,6 @@ export default function Home() {
 
   return (
     <div className="login-page login-page--workspace">
-      <div className="login-page__grid" aria-hidden="true" />
-
       <div className="ws-home">
         <main className="ws-home__main">
           {/* Centered brand header + controls, aligned to the card width */}
@@ -402,69 +422,68 @@ export default function Home() {
               pickFile(event.dataTransfer.files?.[0])
             }}
           >
-            <div className="upload-card__header">
-              <div className="upload-card__icon">
-                <UploadCloud size={22} />
-              </div>
-              <div>
-                <div className="upload-card__title">Upload package</div>
-                <div className="upload-card__copy">Drag and drop an APK or IPA to start a new scan.</div>
-              </div>
+            <div className="upload-intro">
+              <div className="upload-intro__title">Upload package</div>
+              <div className="upload-intro__copy">Drag an APK or IPA to begin analysis</div>
             </div>
 
-            <button type="button" className="upload-zone" onClick={() => inputRef.current?.click()}>
-              <div className={`scan-orbit${loading ? ' is-active' : ''}`}>
-                <div className="scan-orbit__icon">
-                  <SearchCode size={26} />
-                </div>
-              </div>
-              <div className="upload-zone__title">{file ? file.name : 'Drop your package here'}</div>
-              <div className="upload-zone__copy">{selectedFileMeta}</div>
-              <span className="button button--secondary button--small">
-                Browse files
-                <ArrowRight size={14} />
+            <button type="button" className={`upload-zone${file ? ' has-file' : ''}`} onClick={() => inputRef.current?.click()}>
+              <span className="upload-zone__icon">
+                {file ? <FileScan size={26} /> : <UploadCloud size={26} />}
               </span>
+              <span className="upload-zone__title">{file ? file.name : 'Drop your package here'}</span>
+              <span className="upload-zone__copy">{selectedFileMeta}</span>
+              <span className="upload-zone__browse">Browse files <ArrowRight size={13} /></span>
             </button>
 
             <input ref={inputRef} type="file" accept=".apk,.ipa" hidden onChange={event => pickFile(event.target.files?.[0])} />
 
             {loading ? (
-              <div className="scan-progress">
-                <div className="scan-progress__top">
-                  <div>
-                    <div className="scan-progress__title">
-                      Scanning in progress
-                      {streaming && <span className="scan-live-badge">LIVE</span>}
-                    </div>
-                    <div className="scan-progress__copy">{statusMessage}</div>
+              <div className="scan-exp">
+                {/* Calm orbit: a near-invisible highlight sweeps slowly around the mark */}
+                <div className="scan-orbit" aria-hidden="true">
+                  <span className="scan-orbit__ring" />
+                  <span className="scan-orbit__sweep" />
+                  <img src={beetleIcon} alt="" className="scan-orbit__logo" />
+                </div>
+
+                {/* One stable activity per stage */}
+                <div className="scan-exp__activity">
+                  <span className="scan-exp__label">
+                    Current activity{streaming ? <span className="scan-live-dot" /> : null}
+                  </span>
+                  <span className="scan-exp__title">{(STAGE_ACTIVITY[activeStage] || STAGE_ACTIVITY.queued).title}</span>
+                  <span className="scan-exp__sub">{(STAGE_ACTIVITY[activeStage] || STAGE_ACTIVITY.queued).sub}</span>
+                </div>
+
+                <div className="scan-exp__progress">
+                  <div className="scan-progress__bar">
+                    <div className="scan-progress__fill" style={{ width: `${progress}%` }} />
                   </div>
-                  <div className="scan-progress__percent">{Math.round(progress)}%</div>
+                  <span className="scan-exp__pct">{Math.round(progress)}%</span>
                 </div>
 
-                <div className="scan-progress__bar">
-                  <div className="scan-progress__fill" style={{ width: `${progress}%` }} />
-                </div>
-
-                <div className="scan-progress__steps">
-                  {[DEFAULT_STAGE, ...['preparing', 'decompiling', 'analyzing', 'finalizing'].map(getStageMeta)].map(stage => {
-                    const activeIndex = ['queued', 'preparing', 'decompiling', 'analyzing', 'finalizing', 'completed'].indexOf(activeStage)
-                    const currentIndex = ['queued', 'preparing', 'decompiling', 'analyzing', 'finalizing', 'completed'].indexOf(stage.id)
+                <ol className="scan-timeline">
+                  {SCAN_TIMELINE.map((step, i) => {
+                    const realIndex = REAL_STAGE_ORDER.indexOf(activeStage)
+                    const state = realIndex > step.at ? 'is-done' : realIndex === step.at ? 'is-active' : 'is-pending'
                     return (
-                      <div key={stage.id} className={`scan-progress__step${currentIndex <= activeIndex ? ' is-active' : ''}`}>
-                        {stage.label}
-                      </div>
+                      <li key={`${step.label}-${i}`} className={`scan-timeline__item ${state}`}>
+                        <span className="scan-timeline__node"><span className="scan-timeline__dot" /></span>
+                        <span className="scan-timeline__label">{step.label}</span>
+                      </li>
                     )
                   })}
-                </div>
+                </ol>
 
                 {activeScanId ? <div className="upload-helper">Scan ID {activeScanId.slice(0, 8)}</div> : null}
               </div>
             ) : null}
 
-            {error ? <div className="error-callout">{error}</div> : null}
+            {error ? <div className="upload-error">{error}</div> : null}
 
             <div className="button-row">
-              <button type="button" className="button" disabled={!file || loading} onClick={startScan}>
+              <button type="button" className="upload-start" disabled={!file || loading} onClick={startScan}>
                 {loading ? 'Scanning…' : 'Start scan'}
               </button>
             </div>
