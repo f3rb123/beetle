@@ -199,19 +199,19 @@ function ExportModal({ results, onClose }) {
         await doDownload(
           '/api/sbom',
           { results },
-          `cortex_${results.app_name || 'sbom'}_${(results.scan_id || '').slice(0, 8)}.cdx.json`,
+          `beetle_${results.app_name || 'sbom'}_${(results.scan_id || '').slice(0, 8)}.cdx.json`,
         )
       } else if (isCompliance) {
         await doDownload(
           '/api/report/compliance',
           { results, framework: reportType, theme: 'light', prepared_by: preparedBy.trim() },
-          `cortex_${results.app_name || 'report'}_${reportType}.pdf`,
+          `beetle_${results.app_name || 'report'}_${reportType}.pdf`,
         )
       } else {
         await doDownload(
           '/api/report',
           { results, theme: 'light', prepared_by: preparedBy.trim() },
-          `cortex_${results.app_name || 'report'}_light.pdf`,
+          `beetle_${results.app_name || 'report'}_light.pdf`,
         )
       }
       onClose()
@@ -445,11 +445,14 @@ function CiGateModal({ results, onClose }) {
 
   const appName = results?.app_name || 'app'
   const scanId  = results?.scan_id  || ''
-  const apiBase = window.location.origin.replace(/:\d+$/, ':8000')
+  // The API is served on the same origin as the UI (nginx proxies /api → backend
+  // internally). Use the current origin verbatim so the snippet points users at the
+  // real, reachable port (9005) rather than the backend's internal 8000.
+  const apiBase = window.location.origin
 
   const curlCmd = `curl -s -X POST ${apiBase}/api/policy/check \\
   -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer $CORTEX_TOKEN" \\
+  -H "Authorization: Bearer $BEETLE_TOKEN" \\
   -d @scan_results.json | jq .verdict`
 
   const _s = '$'
@@ -457,7 +460,7 @@ function CiGateModal({ results, onClose }) {
 on: [push, pull_request]
 
 jobs:
-  cortex-gate:
+  beetle-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -465,8 +468,8 @@ jobs:
       - name: Upload and scan
         id: scan
         run: |
-          SCAN=$(curl -s -X POST ${_s}CORTEX_URL/api/analyze \\
-            -H "Authorization: Bearer ${_s}{{ secrets.CORTEX_TOKEN }}" \\
+          SCAN=$(curl -s -X POST ${_s}BEETLE_URL/api/analyze \\
+            -H "Authorization: Bearer ${_s}{{ secrets.BEETLE_TOKEN }}" \\
             -F "file=@app.apk")
           SCAN_ID=$(echo ${_s}SCAN | jq -r .scan_id)
           echo "scan_id=${_s}SCAN_ID" >> ${_s}GITHUB_OUTPUT
@@ -474,18 +477,18 @@ jobs:
       - name: Wait for completion
         run: |
           for i in $(seq 1 60); do
-            STATUS=$(curl -s "${_s}CORTEX_URL/api/scans/${_s}{{ steps.scan.outputs.scan_id }}/status" \\
-              -H "Authorization: Bearer ${_s}{{ secrets.CORTEX_TOKEN }}" | jq -r .status)
+            STATUS=$(curl -s "${_s}BEETLE_URL/api/scans/${_s}{{ steps.scan.outputs.scan_id }}/status" \\
+              -H "Authorization: Bearer ${_s}{{ secrets.BEETLE_TOKEN }}" | jq -r .status)
             [ "${_s}STATUS" = "completed" ] && break
             sleep 5
           done
 
       - name: CI Gate check
         run: |
-          RESULTS=$(curl -s "${_s}CORTEX_URL/api/scans/${_s}{{ steps.scan.outputs.scan_id }}" \\
-            -H "Authorization: Bearer ${_s}{{ secrets.CORTEX_TOKEN }}")
-          VERDICT=$(echo ${_s}RESULTS | curl -s -X POST ${_s}CORTEX_URL/api/policy/check \\
-            -H "Authorization: Bearer ${_s}{{ secrets.CORTEX_TOKEN }}" \\
+          RESULTS=$(curl -s "${_s}BEETLE_URL/api/scans/${_s}{{ steps.scan.outputs.scan_id }}" \\
+            -H "Authorization: Bearer ${_s}{{ secrets.BEETLE_TOKEN }}")
+          VERDICT=$(echo ${_s}RESULTS | curl -s -X POST ${_s}BEETLE_URL/api/policy/check \\
+            -H "Authorization: Bearer ${_s}{{ secrets.BEETLE_TOKEN }}" \\
             -H "Content-Type: application/json" \\
             -d "{\\"results\\": ${_s}RESULTS}" | jq -r .verdict)
           echo "Gate verdict: ${_s}VERDICT"
@@ -864,7 +867,7 @@ export default function Results() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `cortex_${appName}_${sid}.cdx.json`
+      a.download = `beetle_${appName}_${sid}.cdx.json`
       a.click()
       URL.revokeObjectURL(url)
     } catch (err) {
@@ -887,7 +890,7 @@ export default function Results() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `cortex_${appName}_${scanId}.sarif.json`
+      a.download = `beetle_${appName}_${scanId}.sarif.json`
       a.click()
       URL.revokeObjectURL(url)
     } catch (err) {

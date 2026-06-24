@@ -12,7 +12,7 @@ Schema (added to the cortex.db managed by auth.py / _conn())
   webhooks(id, label, url, type, events, secret, active, created_at, last_fired, last_status)
 
   events: comma-separated list, currently: 'scan.completed', 'scan.failed'
-  secret: if non-empty, added as X-Cortex-Signature HMAC-SHA256 header
+  secret: if non-empty, added as X-Beetle-Signature HMAC-SHA256 header
 """
 
 from __future__ import annotations
@@ -269,7 +269,7 @@ def _deliver(wh: dict, event: str, summary: dict):
     secret = wh.get("secret", "")
     if secret:
         sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-        headers["X-Cortex-Signature"] = f"sha256={sig}"
+        headers["X-Beetle-Signature"] = f"sha256={sig}"
 
     with httpx.Client(timeout=TIMEOUT_S, follow_redirects=False) as client:
         resp = client.post(url, content=body, headers=headers)

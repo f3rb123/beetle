@@ -367,46 +367,50 @@ export default function Home() {
   return (
     <div className="login-page login-page--workspace">
       <div className="ws-home">
-        <main className="ws-home__main">
-          {/* Centered brand header + controls, aligned to the card width */}
-          <header className="ws-brand">
-            <img src={beetleIcon} alt="Beetle" className="login-card__logo" />
-            <h1 className="login-card__title">Beetle</h1>
-            <p className="login-card__sub">Mobile Static Security Workspace</p>
-            <nav className="ws-brand__actions">
-              {isAdmin() && (
-                <>
-                  <button
-                    type="button"
-                    className="ws-util-btn"
-                    onClick={() => navigate('/settings/webhooks')}
-                    title="Manage webhook notifications"
-                  >
-                    Webhooks
-                  </button>
-                  <button
-                    type="button"
-                    className="ws-util-btn"
-                    onClick={() => navigate('/settings/rules')}
-                    title="Custom SAST rules"
-                  >
-                    SAST Rules
-                  </button>
-                </>
-              )}
-              {getToken() && (
+        {/* Launcher chrome — brand top-left, utility actions top-right */}
+        <header className="ws-topbar">
+          <div className="ws-topbar__brand">
+            <img src={beetleIcon} alt="Beetle" className="ws-topbar__logo" />
+            <div className="ws-topbar__id">
+              <h1 className="ws-topbar__name">Beetle</h1>
+              <p className="ws-topbar__tagline">Mobile Static Security Workspace</p>
+            </div>
+          </div>
+          <nav className="ws-topbar__actions">
+            {isAdmin() && (
+              <>
                 <button
                   type="button"
-                  className="ws-util-btn ws-util-btn--user"
-                  onClick={() => { clearAuth(); window.location.reload() }}
-                  title={`Signed in as ${getUser()?.username ?? '?'} · Click to sign out`}
+                  className="ws-util-btn"
+                  onClick={() => navigate('/settings/webhooks')}
+                  title="Manage webhook notifications"
                 >
-                  {getUser()?.username ?? 'Sign out'}
+                  Webhooks
                 </button>
-              )}
-            </nav>
-          </header>
+                <button
+                  type="button"
+                  className="ws-util-btn"
+                  onClick={() => navigate('/settings/rules')}
+                  title="Custom SAST rules"
+                >
+                  SAST Rules
+                </button>
+              </>
+            )}
+            {getToken() && (
+              <button
+                type="button"
+                className="ws-util-btn ws-util-btn--user"
+                onClick={() => { clearAuth(); window.location.reload() }}
+                title={`Signed in as ${getUser()?.username ?? '?'} · Click to sign out`}
+              >
+                {getUser()?.username ?? 'Sign out'}
+              </button>
+            )}
+          </nav>
+        </header>
 
+        <main className="ws-home__main">
           {/* Upload card — login card visual language; workflow unchanged */}
           <div
             ref={uploadCardRef}
@@ -556,11 +560,11 @@ export default function Home() {
         </main>
 
         <footer className="ws-foot">
-          <span className="ws-foot__copy">Built by Althaf Noushad (f3rb)</span>
           <span className="ws-foot__links">
             <a href="https://www.linkedin.com/in/althaf-noushad-6a096823a" target="_blank" rel="noopener noreferrer">LinkedIn</a>
             <a href="mailto:ferbhacker@gmail.com">Email</a>
           </span>
+          <span className="ws-foot__copy">Built by Althaf Noushad (f3rb)</span>
         </footer>
       </div>
     </div>

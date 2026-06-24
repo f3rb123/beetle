@@ -1854,7 +1854,7 @@ a:focus-visible {
   width: 40px;
   height: 40px;
   border-radius: 12px;
-  background: linear-gradient(135deg, #00c896, #0a3f34);
+  background: #0f172a;
   color: white;
   flex-shrink: 0;
 }
@@ -1913,9 +1913,9 @@ a:focus-visible {
 }
 
 .export-modal__input:focus {
-  border-color: #00c896;
+  border-color: #0f172a;
   background: white;
-  box-shadow: 0 0 0 3px rgba(0, 200, 150, 0.12);
+  box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.1);
 }
 
 .export-modal__footer {
@@ -1955,20 +1955,19 @@ a:focus-visible {
   gap: 7px;
   padding: 9px 20px;
   border-radius: 10px;
-  border: none;
-  background: linear-gradient(135deg, #00c896, #0a6e58);
+  border: 1px solid #0f172a;
+  background: #0f172a;
   color: white;
   font-size: 0.88rem;
   font-weight: 800;
   cursor: pointer;
-  transition: opacity 130ms ease, transform 80ms ease, box-shadow 130ms ease;
-  box-shadow: 0 4px 12px rgba(0, 200, 150, 0.3);
+  transition: background 130ms ease, transform 80ms ease, border-color 130ms ease;
 }
 
 .export-modal__export:hover:not(:disabled) {
-  opacity: 0.9;
+  background: #000;
+  border-color: #000;
   transform: translateY(-1px);
-  box-shadow: 0 6px 18px rgba(0, 200, 150, 0.36);
 }
 
 .export-modal__export:active:not(:disabled) {
@@ -2020,13 +2019,13 @@ a:focus-visible {
 }
 
 .export-type-btn:hover {
-  border-color: #00c896;
-  background: rgba(0, 200, 150, 0.04);
+  border-color: #cbd5e1;
+  background: #f8fafc;
 }
 
 .export-type-btn.is-active {
-  border-color: #00c896;
-  background: rgba(0, 200, 150, 0.08);
+  border-color: #0f172a;
+  background: #f1f5f9;
 }
 
 .export-type-btn__name {
@@ -2036,7 +2035,7 @@ a:focus-visible {
 }
 
 .export-type-btn.is-active .export-type-btn__name {
-  color: #0a6e58;
+  color: #0f172a;
 }
 
 .export-type-btn__desc {
@@ -2061,8 +2060,8 @@ a:focus-visible {
   gap: 12px;
   padding: 12px 14px;
   border-radius: 10px;
-  background: rgba(0, 200, 150, 0.06);
-  border: 1px solid rgba(0, 200, 150, 0.18);
+  background: #f8fafc;
+  border: 1px solid var(--panel-border-strong);
   margin-top: 4px;
 }
 
@@ -2307,8 +2306,8 @@ a:focus-visible {
   transition: transform 0.2s;
 }
 .ci-toggle input:checked + .ci-toggle-track {
-  background: var(--brand-1);
-  border-color: var(--brand-1);
+  background: #0f172a;
+  border-color: #0f172a;
 }
 .ci-toggle input:checked + .ci-toggle-track::after {
   transform: translateX(16px);
@@ -2329,8 +2328,8 @@ a:focus-visible {
   color: var(--text-secondary);
 }
 .ci-save-btn {
-  background: var(--brand-1);
-  border-color: var(--brand-1);
+  background: #0f172a;
+  border-color: #0f172a;
   color: #fff;
 }
 .ci-save-btn:disabled { opacity: 0.6; }

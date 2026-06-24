@@ -177,7 +177,7 @@ function AddWebhookForm({ onAdded }) {
       </div>
 
       <div className="wh-form__field">
-        <label className="wh-form__label">Secret (optional — sent as X-Cortex-Signature HMAC-SHA256)</label>
+        <label className="wh-form__label">Secret (optional — sent as X-Beetle-Signature HMAC-SHA256)</label>
         <input className="wh-form__input" value={secret} onChange={e => setSecret(e.target.value)} type="password" placeholder="Leave blank to skip signing" />
       </div>
 

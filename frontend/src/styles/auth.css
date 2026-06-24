@@ -27,6 +27,11 @@
   --auth-shadow-2: 0 1px 2px rgba(0, 0, 0, 0.03), 0 5px 16px rgba(0, 0, 0, 0.06);
   --auth-shadow-3: 0 1px 2px rgba(0, 0, 0, 0.04);
   --auth-shadow-lg: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 30px rgba(0, 0, 0, 0.10);
+  /* Hero cards (login / upload / current activity) — slightly more lifted so
+     they feel premium against the grey page, without glow or neumorphism. */
+  --auth-shadow-card: 0 2px 8px rgba(0, 0, 0, 0.06), 0 10px 30px rgba(0, 0, 0, 0.08);
+  /* Hover: a touch more lift than rest — subtle, not stronger by default. */
+  --auth-shadow-card-hover: 0 4px 12px rgba(0, 0, 0, 0.08), 0 16px 40px rgba(0, 0, 0, 0.10);
   --auth-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
   --auth-mono: "JetBrains Mono", "SF Mono", "Fira Code", ui-monospace, Menlo, monospace;
 }
@@ -81,8 +86,10 @@
   border: 1px solid var(--auth-border);
   border-radius: var(--auth-radius-lg);
   padding: 60px 40px 34px;
-  box-shadow: var(--auth-shadow);
+  box-shadow: var(--auth-shadow-card);
+  transition: box-shadow 0.18s ease;
 }
+.login-card:hover { box-shadow: var(--auth-shadow-card-hover); }
 .login-card__header { text-align: center; margin-bottom: 44px; }
 .login-card__logo-ring { display: inline-flex; align-items: center; justify-content: center; margin-bottom: 28px; background: none; box-shadow: none; }
 /* The Beetle mark is a WHITE glyph (built for dark UIs). Seat it on a black
@@ -136,26 +143,38 @@
 /* ════════════════════════════════════════════════════════════════════════
    HOME / UPLOAD — spacious, centered, layered
    ════════════════════════════════════════════════════════════════════════ */
+/* Launcher shell — wider page so the top bar spans full width with brand left
+   and utilities right, while the hero content stays comfortably centered. */
 .ws-home {
   position: relative;
   z-index: 1;
   width: 100%;
-  max-width: 620px;
+  max-width: 960px;
   margin: 0 auto;
   min-height: 100vh;
-  padding: 48px 24px 20px;
+  padding: 32px 32px 20px;
   display: flex;
   flex-direction: column;
-  gap: 30px;
+  gap: 34px;
 }
-.ws-home__main { display: flex; flex-direction: column; gap: 38px; flex: 1; }
+.ws-home__main { display: flex; flex-direction: column; gap: 48px; flex: 1; padding-top: 44px; }
 
-/* Brand — larger logo, airy */
-.ws-brand { width: 100%; max-width: 560px; margin: 0 auto; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 4px; }
-.ws-brand .login-card__logo { width: 76px; height: 76px; padding: 15px; margin-bottom: 14px; }
-.ws-brand .login-card__title { margin: 0; font-size: 1.85rem; color: var(--auth-ink); }
-.ws-brand .login-card__sub { margin: 0; color: var(--auth-muted); }
-.ws-brand__actions { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; margin-top: 18px; }
+/* Top bar — brand top-left, utility actions top-right */
+.ws-topbar {
+  width: 100%;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap;
+}
+.ws-topbar__brand { display: flex; align-items: center; gap: 13px; min-width: 0; }
+.ws-topbar__logo {
+  width: 46px; height: 46px; flex-shrink: 0; object-fit: contain; box-sizing: border-box;
+  background: var(--auth-ink); border-radius: 13px; padding: 9px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+}
+.ws-topbar__id { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ws-topbar__name { margin: 0; font-size: 1.2rem; font-weight: 700; letter-spacing: -0.02em; color: var(--auth-ink); line-height: 1.15; }
+.ws-topbar__tagline { margin: 0; font-size: 0.8rem; color: var(--auth-muted); line-height: 1.2; }
+.ws-topbar__actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .ws-util-btn {
   padding: 7px 13px; border-radius: 9px; cursor: pointer;
@@ -168,14 +187,14 @@
 .ws-util-btn--user { color: var(--auth-muted); }
 
 .ws-foot {
-  width: 100%; max-width: 560px; margin: 0 auto; margin-top: auto;
+  width: 100%; margin-top: auto;
   padding: 18px 2px 8px; display: flex; align-items: center; justify-content: space-between;
   gap: 12px; flex-wrap: wrap; border-top: 1px solid var(--auth-border);
   font-size: 0.78rem; color: var(--auth-muted);
 }
-.ws-foot__links { display: flex; gap: 14px; }
-.ws-foot a { color: var(--auth-muted); transition: color 0.15s; }
-.ws-foot a:hover { color: var(--auth-ink); }
+.ws-foot__links { display: flex; gap: 14px; font-size: 0.72rem; }
+.ws-foot a { color: var(--auth-faint); transition: color 0.15s; }
+.ws-foot a:hover { color: var(--auth-muted); }
 
 /* Upload card — the HERO surface. Primary white card raised off the grey page,
    with a sunken drop zone inside (Page → Card → Surface depth hierarchy). */
@@ -184,8 +203,10 @@
   display: flex; flex-direction: column; align-items: stretch; gap: 24px;
   background: var(--auth-card); backdrop-filter: none; -webkit-backdrop-filter: none;
   border: 1px solid var(--auth-border); border-radius: var(--auth-radius-lg);
-  padding: 38px 36px; box-shadow: var(--auth-shadow);
+  padding: 38px 36px; box-shadow: var(--auth-shadow-card);
+  transition: box-shadow 0.18s ease, border-color 0.18s ease;
 }
+.upload-card--ws:hover { box-shadow: var(--auth-shadow-card-hover); }
 .upload-card--ws::before { content: none; }
 .upload-card--ws.is-dragging { border-color: var(--auth-border-strong); box-shadow: var(--auth-shadow-lg); }
 

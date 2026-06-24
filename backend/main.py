@@ -879,6 +879,15 @@ async def startup():
     except Exception as e:
         log.warning(f"Scan cleanup failed: {e}")
 
+    # User-facing access banner. uvicorn's own startup line advertises the
+    # backend's INTERNAL bind (0.0.0.0:8000), which is not reachable from a
+    # browser — all traffic is proxied through nginx. Print the real URL last so
+    # `docker compose logs backend` ends with the address users should open.
+    log.info("=" * 56)
+    log.info("  Beetle is ready  →  open  http://localhost:9005")
+    log.info("  (backend bind :8000 is internal — proxied via nginx)")
+    log.info("=" * 56)
+
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
@@ -909,7 +918,7 @@ async def health():
     return JSONResponse(
         content={
             "status": "ok",
-            "tool": "Cortex",
+            "tool": "Beetle",
             "version": "3.2.0",
             "db": DB_AVAILABLE,
             "tools": tools,
@@ -1358,12 +1367,12 @@ async def generate_report(payload: dict, _user: dict = Depends(_require_auth)):
             raise HTTPException(400, detail="Missing results payload")
 
         scan_id = results.get("scan_id", str(uuid.uuid4()))
-        report_path = REPORT_DIR / f"cortex_{scan_id}.pdf"
+        report_path = REPORT_DIR / f"beetle_{scan_id}.pdf"
         generate_pdf(results, str(report_path), theme=theme, prepared_by=prepared_by,
                      findings_scope=findings_scope)
 
         app_name = results.get("app_name", "report")
-        filename = f"cortex_{app_name}_{theme}.pdf"
+        filename = f"beetle_{app_name}_{theme}.pdf"
         return FileResponse(str(report_path), media_type="application/pdf", filename=filename)
     except HTTPException:
         raise
@@ -1392,12 +1401,12 @@ async def generate_compliance_report(payload: dict, _user: dict = Depends(_requi
             raise HTTPException(400, detail=f"Unknown framework '{framework}'. Valid: {list(COMPLIANCE_FRAMEWORKS)}")
 
         scan_id     = results.get("scan_id", str(uuid.uuid4()))
-        report_path = REPORT_DIR / f"cortex_compliance_{framework}_{scan_id}.pdf"
+        report_path = REPORT_DIR / f"beetle_compliance_{framework}_{scan_id}.pdf"
         generate_compliance_pdf(results, str(report_path), framework=framework, theme=theme, prepared_by=prepared_by)
 
         app_name = results.get("app_name", "report")
         fw_name  = COMPLIANCE_FRAMEWORKS[framework]["name"].replace(" ", "_").replace("/", "-")
-        filename = f"cortex_{app_name}_{fw_name}.pdf"
+        filename = f"beetle_{app_name}_{fw_name}.pdf"
         return FileResponse(str(report_path), media_type="application/pdf", filename=filename)
     except HTTPException:
         raise
@@ -1427,13 +1436,13 @@ async def export_sarif(scan_id: str, _user: dict = Depends(_require_auth)):
     try:
         sarif_json = results_to_sarif_json(results)
         app_name   = results.get("app_name", "scan")
-        filename   = f"cortex_{app_name}_{scan_id[:8]}.sarif.json"
+        filename   = f"beetle_{app_name}_{scan_id[:8]}.sarif.json"
         return Response(
             content=sarif_json,
             media_type="application/json",
             headers={
                 "Content-Disposition": f'attachment; filename="{filename}"',
-                "X-Cortex-Scan-Id":    scan_id,
+                "X-Beetle-Scan-Id":    scan_id,
             },
         )
     except Exception as e:
@@ -1453,7 +1462,7 @@ async def export_sbom(request: Request, _user: dict = Depends(_require_auth)):
         sbom_str = generate_sbom_json(results)
         app_name = results.get("app_name", "scan")
         scan_id  = (results.get("scan_id") or "unknown")[:8]
-        filename = f"cortex_{app_name}_{scan_id}.cdx.json"
+        filename = f"beetle_{app_name}_{scan_id}.cdx.json"
         return Response(
             content=sbom_str,
             media_type="application/vnd.cyclonedx+json",
@@ -1478,7 +1487,7 @@ async def export_sarif_from_payload(request: Request, _user: dict = Depends(_req
         sarif_json = results_to_sarif_json(results)
         app_name   = results.get("app_name", "scan")
         scan_id    = results.get("scan_id", "unknown")
-        filename   = f"cortex_{app_name}_{scan_id[:8]}.sarif.json"
+        filename   = f"beetle_{app_name}_{scan_id[:8]}.sarif.json"
         return Response(
             content=sarif_json,
             media_type="application/json",

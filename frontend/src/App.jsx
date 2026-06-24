@@ -19,7 +19,7 @@ class ErrorBoundary extends Component {
   }
 
   componentDidCatch(error, info) {
-    console.error('Cortex UI error:', error, info)
+    console.error('Beetle UI error:', error, info)
   }
 
   render() {

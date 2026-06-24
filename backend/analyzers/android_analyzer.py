@@ -960,9 +960,13 @@ def _parse_manifest(apk, results):
                     "raw_protection_level": protection or "unknown",
                 })
         results["manifest_permissions"] = manifest_permissions
-        # Store manifest as clean string
+        # Store manifest as clean string. Register the Android namespace first so
+        # attributes serialize with the canonical `android:` prefix instead of the
+        # auto-generated `ns0:` — the latter renders as valid-but-unfamiliar XML that
+        # looks corrupted/"encrypted" to anyone expecting a normal AndroidManifest.
         try:
-            from xml.etree.ElementTree import indent, tostring
+            from xml.etree.ElementTree import indent, tostring, register_namespace
+            register_namespace("android", "http://schemas.android.com/apk/res/android")
             try:
                 indent(manifest)
             except TypeError:
@@ -970,7 +974,8 @@ def _parse_manifest(apk, results):
             results["manifest_xml"] = tostring(manifest, encoding="unicode")
         except Exception:
             try:
-                from xml.etree.ElementTree import tostring
+                from xml.etree.ElementTree import tostring, register_namespace
+                register_namespace("android", "http://schemas.android.com/apk/res/android")
                 results["manifest_xml"] = tostring(manifest, encoding="unicode")
             except Exception:
                 pass

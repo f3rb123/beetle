@@ -164,12 +164,18 @@
 .ws-two > * { min-width: 0; }
 .ws-grid > * { min-width: 0; }
 .ws-list { display: flex; flex-direction: column; }
-.ws-list__row { display: flex; align-items: center; gap: 10px; padding: 13px 0; border-top: 1px solid var(--ws-line); font-size: 13.5px; }
+.ws-list__row { display: flex; align-items: flex-start; gap: 10px; padding: 13px 0; border-top: 1px solid var(--ws-line); font-size: 13.5px; }
 .ws-list__row:first-child { border-top: none; }
 .ws-list__row b { font-weight: 580; }
 .ws-list__grow { flex: 1; min-width: 0; }
-.ws-list__title { font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ws-list__why { font-size: 12.5px; color: var(--ws-ink-3); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Long titles/descriptions must wrap, not run off-screen. These are inline
+   <span>s, so the old overflow/ellipsis/nowrap trio never clipped them — a long
+   title simply overflowed the card (visible at 100% zoom). Wrap naturally with a
+   dynamic height instead; overflow-wrap breaks unbroken tokens (URLs, hashes). */
+.ws-list__title { display: block; font-weight: 560; overflow-wrap: anywhere; }
+.ws-list__why { display: block; font-size: 12.5px; color: var(--ws-ink-3); margin-top: 2px; overflow-wrap: anywhere; }
+/* Keep the severity tag/chevron aligned to the first line of a wrapped title. */
+.ws-list__row > .ws-tag { margin-top: 1px; }
 
 /* ── Tags ──────────────────────────────────────────────────────────────── */
 .ws-tag { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 6px; white-space: nowrap; box-shadow: var(--ws-shadow-3); }
