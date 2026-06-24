@@ -15,6 +15,24 @@ import {
   evidenceUnavailableReason, useEscape,
 } from './ui.jsx'
 import { FINDING_AI_ACTIONS, fetchAiProviders, runFindingAction } from '../../lib/ai-providers.js'
+import {
+  findingKey, FINDING_STATES, STATE_META, PRIORITIES, canWrite, renderMarkdown,
+} from '../../lib/collab.js'
+
+// Small coloured pill showing a finding's triage state / priority / assignee.
+function StateBadge({ meta }) {
+  if (!meta) return null
+  const sm = STATE_META[meta.state]
+  return (
+    <>
+      {sm && meta.state !== 'open'
+        ? <span className="ws-tag" style={{ background: sm.color + '22', color: sm.color, fontWeight: 650 }}>{sm.label}</span>
+        : null}
+      {meta.priority ? <span className="ws-tag" style={{ background: '#1118', color: '#fff', fontWeight: 650 }}>{meta.priority}</span> : null}
+      {meta.assignee ? <SoftTag title="Assignee">@{meta.assignee}</SoftTag> : null}
+    </>
+  )
+}
 
 // ───────────────────────────── Overview ──────────────────────────────────
 export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCode }) {
@@ -202,7 +220,7 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCod
 // ───────────────────────────── Findings ──────────────────────────────────
 // Stacked finding card (Phase 11.86 Task 8): severity + confidence header,
 // title, file:line, and explicit View Code / Open Finding actions.
-function FindingRow({ f, onOpen, onOpenCode }) {
+function FindingRow({ f, onOpen, onOpenCode, meta }) {
   const s = normSev(f.severity)
   const conf = confidenceLabel(f)
   const own = ownershipLabel(f)
@@ -223,6 +241,8 @@ function FindingRow({ f, onOpen, onOpenCode }) {
           {conf ? <SoftTag title="Evidence quality / confidence">{conf} confidence</SoftTag> : null}
           {own ? <SoftTag title="Ownership">{own}</SoftTag> : null}
           {f.category ? <SoftTag>{f.category}</SoftTag> : null}
+          {f.suppressed ? <SoftTag title={f.suppression_reason}>suppressed</SoftTag> : null}
+          <StateBadge meta={meta} />
         </div>
         <div className="ws-fcard__title">{f.title || f.name || 'Finding'}</div>
         {primary
@@ -241,25 +261,37 @@ function FindingRow({ f, onOpen, onOpenCode }) {
   )
 }
 
-export function FindingsPanel({ results, onOpenFinding, onOpenCode }) {
-  const all = results.findings || []
+export function FindingsPanel({ results, onOpenFinding, onOpenCode, collab }) {
+  const meta = collab?.collab?.meta || {}
+  // Suppressed findings live in their own list (moved there at save time); the
+  // "Suppressed" chip surfaces them so analysts can review/undo a suppression.
+  const suppressedAll = results.suppressed_findings || []
+  const active = results.findings || []
   const [q, setQ] = useState('')
   const [sev, setSev] = useState('all')
   const [appOnly, setAppOnly] = useState(false)
+  const [stateFilter, setStateFilter] = useState('all')   // all | <state> | suppressed
   const [limit, setLimit] = useState(60)
+
+  const showSuppressed = stateFilter === 'suppressed'
+  const all = showSuppressed ? suppressedAll : active
 
   const filtered = useMemo(() => {
     const ql = q.trim().toLowerCase()
     return all.filter(f => {
       if (sev !== 'all' && normSev(f.severity) !== sev) return false
       if (appOnly && (f.ownership_label || f.ownership) && (f.ownership_label || f.ownership) !== 'APPLICATION' && (f.ownership_label || f.ownership) !== 'APP') return false
+      if (!showSuppressed && stateFilter !== 'all') {
+        const st = meta[findingKey(f)]?.state || 'open'
+        if (st !== stateFilter) return false
+      }
       if (ql) {
         const blob = `${f.title} ${f.category} ${findingPath(f)} ${f.cwe || ''}`.toLowerCase()
         if (!blob.includes(ql)) return false
       }
       return true
     }).sort((a, b) => SEV_RANK[normSev(a.severity)] - SEV_RANK[normSev(b.severity)])
-  }, [all, q, sev, appOnly])
+  }, [all, q, sev, appOnly, stateFilter, showSuppressed, meta])
 
   return (
     <div>
@@ -273,9 +305,19 @@ export function FindingsPanel({ results, onOpenFinding, onOpenCode }) {
         ))}
         <button type="button" className={`ws-chip${appOnly ? ' is-active' : ''}`} onClick={() => setAppOnly(v => !v)}>App-owned only</button>
       </div>
+      <div className="ws-toolbar">
+        <span className="ws-muted" style={{ fontSize: 12 }}>State</span>
+        <button type="button" className={`ws-chip${stateFilter === 'all' ? ' is-active' : ''}`} onClick={() => { setStateFilter('all'); setLimit(60) }}>All</button>
+        {FINDING_STATES.map(s => (
+          <button key={s.id} type="button" className={`ws-chip${stateFilter === s.id ? ' is-active' : ''}`} onClick={() => { setStateFilter(s.id); setLimit(60) }}>{s.label}</button>
+        ))}
+        {suppressedAll.length ? (
+          <button type="button" className={`ws-chip${showSuppressed ? ' is-active' : ''}`} onClick={() => { setStateFilter('suppressed'); setLimit(60) }}>Suppressed ({suppressedAll.length})</button>
+        ) : null}
+      </div>
       {filtered.length ? (
         <>
-          {filtered.slice(0, limit).map((f, i) => <FindingRow key={i} f={f} onOpen={() => onOpenFinding(f)} onOpenCode={onOpenCode} />)}
+          {filtered.slice(0, limit).map((f, i) => <FindingRow key={i} f={f} meta={meta[findingKey(f)]} onOpen={() => onOpenFinding(f)} onOpenCode={onOpenCode} />)}
           {filtered.length > limit ? (
             <button type="button" className="ws-btn" style={{ marginTop: 12 }} onClick={() => setLimit(l => l + 80)}>
               Show {Math.min(80, filtered.length - limit)} more
@@ -287,8 +329,100 @@ export function FindingsPanel({ results, onOpenFinding, onOpenCode }) {
   )
 }
 
+// ─── Collaboration block (state · assignment · comments · suppression) ────────
+function CollabBlock({ finding, collab }) {
+  const key = findingKey(finding)
+  const meta = collab.collab.meta[key] || {}
+  const comments = collab.collab.comments[key] || []
+  const writable = canWrite()
+  const [comment, setComment] = useState('')
+  const [assignee, setAssignee] = useState(meta.assignee || '')
+  const [supReason, setSupReason] = useState('')
+  const [supOpen, setSupOpen] = useState(false)
+  const [saving, setSaving] = useState(false)
+
+  const submitComment = async () => {
+    if (!comment.trim()) return
+    setSaving(true)
+    const ok = await collab.addComment(finding, comment.trim())
+    setSaving(false)
+    if (ok) setComment('')
+  }
+
+  return (
+    <Block label="Collaboration">
+      {/* State */}
+      <div className="ws-collab-row">
+        <span className="ws-collab-row__label">State</span>
+        <div className="ws-collab-states">
+          {FINDING_STATES.map(s => {
+            const on = (meta.state || 'open') === s.id
+            return (
+              <button key={s.id} type="button" disabled={!writable}
+                className={`ws-chip${on ? ' is-active' : ''}`}
+                style={on ? { borderColor: s.color, color: s.color } : undefined}
+                onClick={() => collab.setState(finding, s.id)}>{s.label}</button>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Assignment + priority */}
+      <div className="ws-collab-row">
+        <span className="ws-collab-row__label">Assignee</span>
+        <input className="ws-input" style={{ flex: 1 }} placeholder="username" value={assignee}
+          disabled={!writable}
+          onChange={e => setAssignee(e.target.value)}
+          onBlur={() => assignee !== (meta.assignee || '') && collab.assign(finding, { assignee, priority: meta.priority || '' })} />
+        <select className="ws-input" style={{ width: 'auto' }} value={meta.priority || ''} disabled={!writable}
+          onChange={e => collab.assign(finding, { assignee, priority: e.target.value })}>
+          <option value="">Priority…</option>
+          {PRIORITIES.map(p => <option key={p} value={p}>{p}</option>)}
+        </select>
+      </div>
+
+      {/* Suppression */}
+      {writable ? (
+        <div style={{ marginTop: 6 }}>
+          {finding.suppressed ? (
+            <p className="ws-muted" style={{ fontSize: 12 }}>Suppressed: {finding.suppression_reason || '—'}</p>
+          ) : !supOpen ? (
+            <button type="button" className="ws-btn ws-btn--sm" onClick={() => setSupOpen(true)}>Suppress this rule…</button>
+          ) : (
+            <div className="ws-collab-row">
+              <input className="ws-input" style={{ flex: 1 }} placeholder="Reason (required)" value={supReason} onChange={e => setSupReason(e.target.value)} />
+              <button type="button" className="ws-btn ws-btn--sm ws-btn--primary" disabled={!supReason.trim()}
+                onClick={async () => { const ok = await collab.suppress({ rule_id: finding.rule_id || '', file_pattern: finding.rule_id ? '' : findingPath(finding), reason: supReason.trim() }); if (ok) { setSupOpen(false); setSupReason('') } }}>Save</button>
+              <button type="button" className="ws-btn ws-btn--sm" onClick={() => setSupOpen(false)}>Cancel</button>
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {/* Comments (markdown) */}
+      <div className="ws-collab-comments">
+        {comments.map(c => (
+          <div key={c.id} className="ws-comment">
+            <div className="ws-comment__head"><b>{c.author || 'anon'}</b> <span className="ws-muted">{c.created_at}</span></div>
+            <div className="ws-comment__body" dangerouslySetInnerHTML={{ __html: renderMarkdown(c.body) }} />
+          </div>
+        ))}
+        {writable ? (
+          <div className="ws-collab-row" style={{ marginTop: 8 }}>
+            <textarea className="ws-input" rows={2} style={{ flex: 1, resize: 'vertical' }}
+              placeholder="Add a comment… (markdown: **bold**, *italic*, `code`, [link](url))"
+              value={comment} onChange={e => setComment(e.target.value)}
+              onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') submitComment() }} />
+            <button type="button" className="ws-btn ws-btn--sm ws-btn--primary" disabled={saving || !comment.trim()} onClick={submitComment}>Comment</button>
+          </div>
+        ) : <p className="ws-muted" style={{ fontSize: 12 }}>Read-only role — viewing only.</p>}
+      </div>
+    </Block>
+  )
+}
+
 // ───────────────────────── Finding details drawer ────────────────────────
-export function FindingDrawer({ finding, onClose, onOpenCode }) {
+export function FindingDrawer({ finding, onClose, onOpenCode, collab }) {
   useEscape(onClose)
   const [providers, setProviders] = useState([])
   const [provider, setProvider] = useState('')
@@ -332,6 +466,9 @@ export function FindingDrawer({ finding, onClose, onOpenCode }) {
           <button type="button" className="ws-drawer__close" onClick={onClose}>×</button>
         </div>
         <div className="ws-drawer__body">
+          {/* Collaboration — triage state, assignment, comments, suppression. */}
+          {collab ? <CollabBlock finding={f} collab={collab} /> : null}
+
           {/* AI analysis (Phase 11.97) — reasons only about the evidence above */}
           <Block label="AI Analysis">
             <div className="ws-ai-bar">

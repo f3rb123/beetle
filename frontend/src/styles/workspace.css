@@ -477,3 +477,15 @@
   .ws-askai { grid-template-columns: 1fr; height: auto; }
   .ws-askai__side { border-right: none; border-bottom: 1px solid var(--ws-line); padding-right: 0; padding-bottom: 12px; }
 }
+
+/* ── Collaboration (finding states · assignment · comments) ───────────────── */
+.ws-collab-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.ws-collab-row__label { font-size: 12px; font-weight: 600; color: var(--ws-ink-3); min-width: 64px; }
+.ws-collab-states { display: flex; gap: 6px; flex-wrap: wrap; }
+.ws-collab-comments { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.ws-comment { border: 1px solid var(--ws-line); border-radius: 10px; padding: 8px 10px; background: var(--ws-bg-soft); }
+.ws-comment__head { font-size: 12px; margin-bottom: 4px; }
+.ws-comment__head .ws-muted { font-weight: 400; }
+.ws-comment__body { font-size: 13px; line-height: 1.55; color: var(--ws-ink); word-break: break-word; }
+.ws-comment__body code { background: var(--ws-bg-sunken); padding: 1px 5px; border-radius: 5px; font-size: 12px; }
+.ws-comment__body a { color: var(--ws-focus); }

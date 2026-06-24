@@ -254,6 +254,16 @@ def save_scan(results: dict):
         if dropped:
             log.info(f"[{scan_id}] dedupe: collapsed {dropped} duplicate finding(s)")
         results["findings"] = findings_list
+        # Respect persistent suppressions (lazy import avoids a circular dep:
+        # collaboration imports database). Suppressed findings are moved out of
+        # results['findings'] into results['suppressed_findings'] so severity
+        # counts, DB rows, exports and the UI all see only the active set.
+        try:
+            from collaboration import apply_suppressions
+            apply_suppressions(results)
+            findings_list = results.get("findings") or []
+        except Exception as _e:
+            log.debug(f"[{scan_id}] apply_suppressions skipped: {_e}")
         ss = compute_severity_summary(findings_list)
         results["severity_summary"] = ss
         info = results.get("app_info", {})

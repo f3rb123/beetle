@@ -173,17 +173,29 @@ def analyze_macho(binary_path: str) -> dict:
     rel = os.path.basename(binary_path)
 
     if not out["has_pie"]:
+        # PIE is only meaningful for the main MH_EXECUTE image. Dynamic libraries
+        # (`.dylib`) and framework binaries are loaded at a relocatable address
+        # regardless, so a missing MH_PIE on them is informational, not a finding
+        # — flagging it produced noisy false positives on every embedded library.
+        _ext = os.path.splitext(rel)[1].lower()
+        _is_lib = _ext == ".dylib" or (not _ext and ".framework" in binary_path.replace("\\", "/"))
         out["findings"].append({
             "title":          "Mach-O Binary Not Position-Independent (PIE)",
-            "severity":       "high",
+            "severity":       "info" if _is_lib else "high",
             "category":       "Binary Hardening",
             "rule_id":        "macho_no_pie",
             "cwe":            "CWE-121",
             "masvs":          "MASVS-CODE-4",
             "owasp":          "M7",
             "file_path":      rel,
-            "description":    "Mach-O header lacks MH_PIE — ASLR is disabled for this binary.",
-            "recommendation": "Rebuild with -Wl,-pie and ensure MACH_O_TYPE is MH_EXECUTE with MH_PIE set.",
+            "description":    (
+                "Mach-O header lacks MH_PIE. ASLR is disabled for the main executable. "
+                "Not applicable to dynamic libraries / frameworks, which relocate regardless."
+                if not _is_lib else
+                "Library/framework Mach-O without MH_PIE — expected and not a hardening gap "
+                "(only the main executable image benefits from MH_PIE / ASLR)."
+            ),
+            "recommendation": "Rebuild the main executable with -Wl,-pie (MH_EXECUTE + MH_PIE).",
             "confidence":     "high",
         })
 

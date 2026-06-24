@@ -2501,6 +2501,54 @@ a:focus-visible {
   overflow: auto;
 }
 
+/* ── Compiled-binary card (Phase 12) — shown instead of decoded garbage ──── */
+.code-viewer__binary {
+  padding: 22px 24px 26px;
+  color: rgba(229, 231, 235, 0.92);
+  max-height: 76vh;
+  overflow: auto;
+}
+.code-viewer__binary-head {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 10px;
+}
+.code-viewer__binary-kind {
+  font: 700 0.7rem/1 'JetBrains Mono', monospace; letter-spacing: 0.06em; text-transform: uppercase;
+  color: #0b0f14; background: #d1d5db; padding: 5px 9px; border-radius: 6px;
+}
+.code-viewer__binary-name {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.82rem;
+  color: rgba(229, 231, 235, 0.8); word-break: break-all;
+}
+.code-viewer__binary-note {
+  margin: 0 0 16px; font-size: 0.86rem; line-height: 1.55; color: rgba(229, 231, 235, 0.66); max-width: 70ch;
+}
+.code-viewer__binary-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 18px; margin: 0 0 18px;
+}
+.code-viewer__binary-grid > div {
+  display: flex; flex-direction: column; gap: 3px;
+  border-left: 2px solid rgba(255, 255, 255, 0.08); padding-left: 10px;
+}
+.code-viewer__binary-grid dt { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; color: rgba(229, 231, 235, 0.45); }
+.code-viewer__binary-grid dd { margin: 0; font-family: 'JetBrains Mono', monospace; font-size: 0.84rem; color: rgba(229, 231, 235, 0.92); }
+.code-viewer__binary-block { margin-top: 16px; }
+.code-viewer__binary-subhead {
+  font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em;
+  color: rgba(229, 231, 235, 0.5); margin-bottom: 8px;
+}
+.code-viewer__binary-chips { display: flex; flex-wrap: wrap; gap: 7px; }
+.code-viewer__binary-chip {
+  font: 500 0.76rem/1 'JetBrains Mono', monospace; padding: 5px 9px; border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: rgba(229, 231, 235, 0.82);
+}
+.code-viewer__binary-chip.is-on  { color: #6ee7b7; border-color: rgba(110, 231, 183, 0.3); background: rgba(16, 185, 129, 0.08); }
+.code-viewer__binary-chip.is-off { color: #fca5a5; border-color: rgba(252, 165, 165, 0.3); background: rgba(239, 68, 68, 0.08); }
+.code-viewer__binary-list {
+  margin: 0; padding-left: 18px; columns: 2; column-gap: 24px;
+  font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: rgba(229, 231, 235, 0.75); line-height: 1.7;
+}
+@media (max-width: 640px) { .code-viewer__binary-list { columns: 1; } }
+
 .code-viewer__layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 18px;

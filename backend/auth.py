@@ -43,6 +43,26 @@ except ImportError:
 
 AUTH_AVAILABLE = JOSE_AVAILABLE and PASSLIB_AVAILABLE
 
+# ── Roles ──────────────────────────────────────────────────────────────────
+# Ordered highest → lowest privilege. Each level inherits the rights of all
+# levels below it.
+#   admin     — full control incl. user management
+#   manager   — manage suppressions, sharing, assignments across the workspace
+#   analyst   — triage findings, comment, assign, create suppressions
+#   readonly  — view only; no mutations
+VALID_ROLES = ("admin", "manager", "analyst", "readonly")
+_ROLE_RANK = {"admin": 3, "manager": 2, "analyst": 1, "readonly": 0}
+
+
+def role_rank(role: str | None) -> int:
+    """Numeric privilege level for a role (unknown → analyst-equivalent 1)."""
+    return _ROLE_RANK.get((role or "analyst").lower(), 1)
+
+
+def role_at_least(role: str | None, minimum: str) -> bool:
+    """True if `role` is at least as privileged as `minimum`."""
+    return role_rank(role) >= role_rank(minimum)
+
 # ── Config ────────────────────────────────────────────────────────────────────
 _SECRET_KEY_ENV = "CORTEX_JWT_SECRET"
 _EXPIRE_HOURS   = int(os.environ.get("CORTEX_JWT_EXPIRE_HOURS", "24"))
@@ -204,8 +224,8 @@ def create_user(username: str, password: str, role: str = "analyst", email: str 
         raise ValueError("Username must be 3-32 chars, letters/digits/_-. only")
     if len(password) < 8:
         raise ValueError("Password must be at least 8 characters")
-    if role not in ("admin", "analyst"):
-        raise ValueError("Role must be admin or analyst")
+    if role not in VALID_ROLES:
+        raise ValueError(f"Role must be one of: {', '.join(VALID_ROLES)}")
 
     hashed = hash_password(password)
     try:

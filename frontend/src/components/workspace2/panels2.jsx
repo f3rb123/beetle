@@ -774,6 +774,102 @@ function compRisk(c, riskByName) {
   return 'low'
 }
 
+// ── Known CVEs in bundled libraries (CVE-MAP / OSV.dev) ───────────────────
+// Reuses the data the backend already computes (results.components +
+// source==='CVE-MAP' findings + results.cve_stats). No new API calls.
+function cveLink(id) {
+  if (!id) return null
+  return id.startsWith('CVE-')
+    ? `https://nvd.nist.gov/vuln/detail/${id}`
+    : `https://osv.dev/vulnerability/${id}`
+}
+
+function KnownCvesBlock({ results }) {
+  const cveFindings = (results.findings || []).filter(f => f.source === 'CVE-MAP')
+  const inventory = results.components || []
+  const stats = results.cve_stats || {}
+
+  // Nothing detected and nothing scanned → don't clutter the page.
+  if (!cveFindings.length && !inventory.length) return null
+
+  // Group CVE findings by their bundled component.
+  const byComp = {}
+  for (const f of cveFindings) {
+    const c = f.component || {}
+    const key = c.product ? `${c.product}@${c.version}` : (f.snippet || f.title || 'unknown')
+    ;(byComp[key] ||= []).push(f)
+  }
+
+  const vulnRows = Object.entries(byComp).map(([key, cves]) => {
+    const c = cves[0].component || {}
+    const maxSev = cves.reduce((acc, f) => Math.min(acc, RISK_RANK[normSev(f.severity)] ?? 4), 4)
+    return {
+      key,
+      product: c.product || key,
+      version: c.version || '',
+      ecosystem: c.ecosystem || '',
+      binary: c.binary || '',
+      cves: [...cves].sort((a, b) => (RISK_RANK[normSev(a.severity)] ?? 4) - (RISK_RANK[normSev(b.severity)] ?? 4)),
+      maxSev,
+    }
+  }).sort((a, b) => a.maxSev - b.maxSev || b.cves.length - a.cves.length)
+
+  const totalCves = cveFindings.length
+  const kevCount = cveFindings.filter(f => f.kev).length
+  const safeCount = Math.max(0, inventory.length - vulnRows.length)
+
+  return (
+    <div style={{ marginTop: 28 }}>
+      <div className="ws-section__head">
+        <h1>Known CVEs</h1>
+        <span className="ws-muted">
+          {inventory.length} bundled librar{inventory.length === 1 ? 'y' : 'ies'} · {totalCves} CVE{totalCves !== 1 ? 's' : ''}
+          {kevCount ? ` · ${kevCount} KEV` : ''}
+        </span>
+      </div>
+
+      {vulnRows.length ? vulnRows.map(row => (
+        <div key={row.key} className="ws-card ws-card--pad" style={{ marginBottom: 8 }}>
+          <div className="ws-permhead">
+            <SeverityTag severity={['critical', 'high', 'medium', 'low', 'info'][row.maxSev] || 'info'} compact />
+            <span className="ws-mono" style={{ fontWeight: 560 }}>{row.product}{row.version ? ` ${row.version}` : ''}</span>
+            {row.ecosystem ? <SoftTag>{row.ecosystem}</SoftTag> : null}
+            {row.binary ? <span className="ws-muted ws-mono" style={{ fontSize: 12 }}>{row.binary}</span> : null}
+            <span className="ws-pill ws-pill--risk" style={{ marginLeft: 'auto', textTransform: 'none' }}>{row.cves.length} CVE{row.cves.length !== 1 ? 's' : ''}</span>
+          </div>
+          <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {row.cves.map((f, i) => {
+              const id = f.cve || f.rule_id
+              const href = cveLink(f.cve)
+              return (
+                <div key={i} style={{ borderTop: i ? '1px solid var(--ws-line)' : 'none', paddingTop: i ? 8 : 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <SeverityTag severity={f.severity} compact />
+                    <code className="ws-mono" style={{ fontWeight: 600 }}>{id}</code>
+                    {f.kev ? <span className="ws-pill ws-pill--risk" style={{ textTransform: 'none' }} title="CISA Known Exploited Vulnerability — actively exploited in the wild">KEV</span> : null}
+                    {f.cvss != null ? <SoftTag>CVSS {f.cvss}</SoftTag> : null}
+                    {f.fix_version ? <SoftTag>Fixed in {f.fix_version}</SoftTag> : null}
+                    {href ? <a style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--ws-focus)', textDecoration: 'none', fontWeight: 600 }} href={href} target="_blank" rel="noopener noreferrer">View on {f.cve && f.cve.startsWith('CVE-') ? 'NVD' : 'OSV'} ↗</a> : null}
+                  </div>
+                  {f.description ? <div className="ws-muted" style={{ fontSize: 12.5, marginTop: 4, whiteSpace: 'pre-wrap' }}>{f.description}</div> : null}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )) : (
+        <EmptyState title="No known CVEs" body={inventory.length ? 'Bundled libraries were scanned against OSV.dev — none matched a known vulnerability.' : 'No bundled native libraries or packages were detected to scan.'} />
+      )}
+
+      <div className="ws-muted" style={{ fontSize: 12, marginTop: 10 }}>
+        {stats.binaries_scanned != null ? `${stats.binaries_scanned} binaries scanned · ` : ''}
+        {inventory.length} versioned component{inventory.length !== 1 ? 's' : ''}
+        {safeCount ? ` · ${safeCount} with no known CVEs` : ''} · data from OSV.dev (cached 24h).
+      </div>
+    </div>
+  )
+}
+
 export function ComponentsPanel({ results }) {
   const surface = results.attack_surface || {}
   const inv = results.exported_component_inventory || {}
@@ -836,6 +932,8 @@ export function ComponentsPanel({ results }) {
           <Pager count={items.length} limit={limit} setLimit={setLimit} />
         </>
       ) : <EmptyState title={`No ${type} match`} body={(surface[type] || []).length ? 'No components match the current search/filter.' : `This package declares no ${type}.`} />}
+
+      <KnownCvesBlock results={results} />
     </div>
   )
 }

@@ -5,6 +5,7 @@ import Results from './pages/Results.jsx'
 import Login from './pages/Login.jsx'
 import Webhooks from './pages/Webhooks.jsx'
 import CustomRules from './pages/CustomRules.jsx'
+import Users from './pages/Users.jsx'
 import History from './pages/History.jsx'
 import { getToken } from './lib/auth.js'
 
@@ -100,6 +101,14 @@ export default function App() {
             element={
               <RequireAuth>
                 <CustomRules />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/settings/users"
+            element={
+              <RequireAuth>
+                <Users />
               </RequireAuth>
             }
           />

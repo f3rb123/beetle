@@ -395,6 +395,14 @@ export default function Home() {
                 >
                   SAST Rules
                 </button>
+                <button
+                  type="button"
+                  className="ws-util-btn"
+                  onClick={() => navigate('/settings/users')}
+                  title="Manage users and roles"
+                >
+                  Users
+                </button>
               </>
             )}
             {getToken() && (

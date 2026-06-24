@@ -150,15 +150,15 @@
   position: relative;
   z-index: 1;
   width: 100%;
-  max-width: 1200px;
+  max-width: 1040px;
   margin: 0 auto;
   min-height: 100vh;
-  padding: 32px 40px 20px;
+  padding: 28px 40px 18px;
   display: flex;
   flex-direction: column;
-  gap: 34px;
+  gap: 22px;
 }
-.ws-home__main { display: flex; flex-direction: column; gap: 48px; flex: 1; padding-top: 44px; }
+.ws-home__main { display: flex; flex-direction: column; gap: 26px; flex: 1; padding-top: 24px; }
 
 /* Top bar — brand top-left, utility actions top-right */
 .ws-topbar {
@@ -200,11 +200,11 @@
 /* Upload card — the HERO surface. Primary white card raised off the grey page,
    with a sunken drop zone inside (Page → Card → Surface depth hierarchy). */
 .upload-card--ws {
-  position: relative; z-index: 1; width: 100%; max-width: 560px; margin: 0 auto;
-  display: flex; flex-direction: column; align-items: stretch; gap: 24px;
+  position: relative; z-index: 1; width: 100%; max-width: 600px; margin: 0 auto;
+  display: flex; flex-direction: column; align-items: stretch; gap: 22px;
   background: var(--auth-card); backdrop-filter: none; -webkit-backdrop-filter: none;
   border: 1px solid var(--auth-border); border-radius: var(--auth-radius-lg);
-  padding: 38px 36px; box-shadow: var(--auth-shadow-card);
+  padding: 32px 36px; box-shadow: var(--auth-shadow-card);
   transition: box-shadow 0.18s ease, border-color 0.18s ease;
 }
 .upload-card--ws:hover { box-shadow: var(--auth-shadow-card-hover); }
@@ -324,7 +324,7 @@
 /* ════════════════════════════════════════════════════════════════════════
    RECENT SCANS — workspace-style cards with hover elevation
    ════════════════════════════════════════════════════════════════════════ */
-.ws-recent { width: 100%; max-width: 560px; margin: 0 auto; }
+.ws-recent { width: 100%; max-width: 600px; margin: 0 auto; }
 .ws-recent__head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; padding: 0 2px; }
 .ws-recent__title { display: inline-flex; align-items: center; gap: 7px; font: 600 0.72rem/1 var(--auth-font); letter-spacing: 0.06em; text-transform: uppercase; color: var(--auth-muted); }
 .ws-recent__count { font: 600 0.68rem/1 var(--auth-font); color: var(--auth-muted); background: var(--auth-sunken); border: 1px solid var(--auth-border); padding: 3px 9px; border-radius: 999px; }
@@ -333,7 +333,7 @@
 .ws-recent__list { display: flex; flex-direction: column; gap: 8px; }
 
 .ws-scan-row {
-  display: flex; align-items: center; gap: 13px; padding: 12px 14px;
+  display: flex; align-items: center; gap: 12px; padding: 10px 14px;
   border-radius: var(--auth-radius); cursor: pointer;
   background: var(--auth-card); border: 1px solid var(--auth-border); box-shadow: var(--auth-shadow-2);
   transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
@@ -353,6 +353,87 @@
 .ws-scan-row__delete:hover { color: #b42318; background: #fef3f2; }
 .ws-recent__empty { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 28px; border-radius: var(--auth-radius); border: 1px dashed var(--auth-border-strong); background: var(--auth-soft); color: var(--auth-muted); font-size: 0.85rem; }
 
+/* ════════════════════════════════════════════════════════════════════════
+   USERS & ROLES — same monochrome language as the launcher (Phase 11.991).
+   Grey page · white cards that lift off it · sunken inputs · ink buttons.
+   ════════════════════════════════════════════════════════════════════════ */
+.up-shell {
+  width: 100%; max-width: 760px; margin: 0 auto; padding: 8px 0 32px;
+  display: flex; flex-direction: column; gap: 20px;
+}
+.up-head { display: flex; flex-direction: column; gap: 4px; }
+.up-back {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: 4px;
+  margin-bottom: 8px; padding: 6px 11px; border-radius: 9px; cursor: pointer;
+  font: 600 12.5px/1 var(--auth-font); color: var(--auth-muted);
+  background: var(--auth-card); border: 1px solid var(--auth-border); box-shadow: var(--auth-shadow-3);
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.up-back:hover { color: var(--auth-ink); border-color: var(--auth-border-strong); background: var(--auth-soft); }
+.up-title { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 1.45rem; font-weight: 700; letter-spacing: -0.02em; color: var(--auth-ink); }
+.up-subtitle { margin: 0; font-size: 0.875rem; color: var(--auth-muted); }
+.up-error { background: #fef3f2; border: 1px solid #fecdca; color: #b42318; border-radius: 10px; padding: 10px 14px; font-size: 0.85rem; }
+.up-loading { color: var(--auth-muted); font-size: 0.9rem; padding: 24px 0; }
+
+/* Shared card surface — subtle, consistent depth (matches recent-scan rows) */
+.up-card {
+  background: var(--auth-card); border: 1px solid var(--auth-border);
+  border-radius: var(--auth-radius); box-shadow: var(--auth-shadow-2);
+}
+
+/* Add-user form — 2-column responsive grid, ink primary button bottom-right */
+.up-form { padding: 22px 24px; }
+.up-form__title { display: flex; align-items: center; gap: 7px; margin: 0 0 18px; font-size: 1rem; font-weight: 650; color: var(--auth-ink); }
+.up-form__grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px 18px; }
+.up-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.up-field__label { font-size: 0.8rem; font-weight: 600; color: var(--auth-text); }
+.up-input {
+  width: 100%; box-sizing: border-box; padding: 9px 12px;
+  font: 400 0.9rem/1.3 var(--auth-font); color: var(--auth-ink);
+  background: var(--auth-soft); border: 1px solid var(--auth-border); border-radius: 10px;
+  outline: none; transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+.up-input:hover { border-color: var(--auth-border-strong); }
+.up-input:focus { background: #fff; border-color: var(--auth-border-strong); box-shadow: 0 0 0 3px rgba(17, 17, 17, 0.06); }
+select.up-input { cursor: pointer; }
+.up-form__footer { display: flex; justify-content: flex-end; margin-top: 20px; }
+.up-btn-primary {
+  min-height: 42px; padding: 0 20px; border: none; border-radius: 11px; cursor: pointer;
+  font: 600 0.88rem/1 var(--auth-font); color: #fff; background: var(--auth-ink);
+  transition: background 0.15s, transform 0.1s, box-shadow 0.15s;
+}
+.up-btn-primary:hover:not(:disabled) { background: #000; transform: translateY(-1px); box-shadow: var(--auth-shadow-lg); }
+.up-btn-primary:disabled { background: var(--auth-border); color: var(--auth-faint); cursor: default; }
+
+/* User cards — responsive grid of equal-depth cards */
+.up-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.up-user-card {
+  display: flex; flex-direction: column; gap: 12px; padding: 16px 18px;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+.up-user-card:hover { border-color: var(--auth-border-strong); box-shadow: var(--auth-shadow-lg); transform: translateY(-2px); }
+.up-user-card.is-disabled { opacity: 0.72; }
+.up-user-card__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.up-user-card__name { font-size: 0.98rem; font-weight: 650; color: var(--auth-ink); min-width: 0; overflow-wrap: anywhere; }
+.up-badge {
+  font: 600 0.64rem/1 var(--auth-font); letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 4px 8px; border-radius: 999px; background: var(--auth-sunken);
+  border: 1px solid var(--auth-border); color: var(--auth-muted);
+}
+.up-badge--off { background: #fef3f2; border-color: #fecdca; color: #b42318; }
+.up-user-card__meta { margin: 0; display: flex; flex-direction: column; gap: 7px; }
+.up-user-card__meta > div { display: flex; justify-content: space-between; gap: 12px; font-size: 0.8rem; }
+.up-user-card__meta dt { color: var(--auth-faint); font-weight: 500; flex: none; }
+.up-user-card__meta dd { margin: 0; color: var(--auth-text); text-align: right; min-width: 0; overflow-wrap: anywhere; }
+.up-user-card__foot { margin-top: auto; display: flex; justify-content: flex-end; padding-top: 12px; border-top: 1px solid var(--auth-border); }
+.up-action {
+  padding: 7px 13px; border-radius: 9px; cursor: pointer;
+  font: 600 0.78rem/1 var(--auth-font); color: var(--auth-text);
+  background: var(--auth-card); border: 1px solid var(--auth-border);
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.up-action:hover { border-color: var(--auth-border-strong); background: var(--auth-soft); color: var(--auth-ink); }
+
 /* ── Responsive ─────────────────────────────────────────────────────────── */
 @media (max-width: 600px) {
   .ws-home { padding: 32px 16px 16px; }
@@ -363,4 +444,6 @@
   .ws-scan-row__platform,
   .ws-scan-row__time,
   .ws-scan-row__grade { display: none; }
+  .up-form__grid { grid-template-columns: 1fr; }
+  .up-form { padding: 18px 16px; }
 }

@@ -89,6 +89,7 @@ try:
         list_api_keys,
         list_users,
         revoke_api_key,
+        role_at_least,
         set_user_active,
     )
     if AUTH_AVAILABLE:
@@ -96,6 +97,7 @@ try:
 except Exception as _auth_err:
     AUTH_AVAILABLE = False
     print(f"[main] Auth unavailable: {_auth_err}")
+    def role_at_least(role, minimum): return True  # fail-open only when auth itself is down
 
 try:
     from database import (
@@ -126,7 +128,14 @@ except Exception as db_error:
     def set_triage(scan_id, finding_key, state, note="", triaged_by=""): return {}
 
 try:
-    from decompiler import decompile_apk, get_file_content, list_source_files
+    import collaboration as collab
+    COLLAB_AVAILABLE = DB_AVAILABLE
+except Exception as _collab_err:
+    COLLAB_AVAILABLE = False
+    print(f"[main] Collaboration layer unavailable: {_collab_err}")
+
+try:
+    from decompiler import decompile_apk, get_file_content, inspect_file, list_source_files
 
     DECOMPILER_AVAILABLE = True
 except Exception as decompiler_error:
@@ -293,6 +302,25 @@ def _require_admin(user: dict = Depends(_require_auth)) -> dict:
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin role required")
     return user
+
+
+def _require_writer(user: dict = Depends(_require_auth)) -> dict:
+    """Any role except read-only may mutate collaboration data
+    (triage, comments, assignments)."""
+    if not role_at_least(user.get("role"), "analyst"):
+        raise HTTPException(status_code=403, detail="Read-only role cannot modify findings")
+    return user
+
+
+def _require_manager(user: dict = Depends(_require_auth)) -> dict:
+    """Manager+ for workspace-wide controls (suppressions, sharing)."""
+    if not role_at_least(user.get("role"), "manager"):
+        raise HTTPException(status_code=403, detail="Manager or admin role required")
+    return user
+
+
+def _collab_unavailable():
+    raise HTTPException(status_code=503, detail="Collaboration layer unavailable")
 
 
 def _auth_unavailable():
@@ -870,6 +898,12 @@ async def startup():
                      f"({summary['broken']} broken)")
         except Exception as e:
             log.warning(f"Scan restore failed: {e}")
+        if COLLAB_AVAILABLE:
+            try:
+                collab.init_collab_db()
+                log.info("Collaboration layer initialized")
+            except Exception as e:
+                log.warning(f"Collab init failed: {e}")
     # Best-effort cleanup of stale scan extractions at startup. This also runs
     # after each scan completes (see _run_scan_job's finally clause).
     try:
@@ -1159,6 +1193,12 @@ async def get_scan(scan_id: str, _user: dict = Depends(_require_auth)):
             return JSONResponse(content=payload["result"])
         raise HTTPException(503, detail="Database not available")
 
+    # Workspace sharing (point 6): a 'private' scan is visible only to its owner
+    # or a manager/admin. 'shared'/'team' stay visible to all authenticated users
+    # (preserving prior single-tenant behaviour).
+    if COLLAB_AVAILABLE and not collab.can_view(scan_id, _user):
+        raise HTTPException(403, detail="This workspace is private")
+
     results = get_scan_results(scan_id)
     if not results:
         payload = _scan_status_response(scan_id)
@@ -1252,6 +1292,141 @@ async def delete_note(scan_id: str, note_id: int, _user: dict = Depends(_require
     return JSONResponse(content={"deleted": note_id})
 
 
+# ─── Collaboration: finding states, assignment, comments ─────────────────────
+# Everything below is keyed by the scan's app_id (package/bundle id) inside the
+# collaboration layer, so states/comments/assignments survive a rescan of the
+# same app (a new scan_id inherits them automatically).
+def _app_id_for_scan(scan_id: str) -> str:
+    res = get_scan_results(scan_id) or {}
+    return collab.app_id_for(res) if res else "unknown-app"
+
+
+@app.get("/api/scans/{scan_id}/collab")
+async def get_collab(scan_id: str, _user: dict = Depends(_require_auth)):
+    """One-shot snapshot: states, comments, suppressions, sharing + vocab."""
+    if not COLLAB_AVAILABLE:
+        return JSONResponse(content={"meta": {}, "comments": {}, "suppressions": [],
+                                     "states": list(getattr(collab, "FINDING_STATES", [])),
+                                     "priorities": [], "share": {"share_mode": "team"}})
+    return JSONResponse(content=collab.collab_for_scan(scan_id))
+
+
+@app.put("/api/scans/{scan_id}/findings/{finding_key:path}/state")
+async def set_finding_state(scan_id: str, finding_key: str, request: Request,
+                            user: dict = Depends(_require_writer)):
+    if not COLLAB_AVAILABLE:
+        _collab_unavailable()
+    body = await request.json()
+    try:
+        result = collab.set_finding_state(
+            _app_id_for_scan(scan_id), finding_key, body.get("state", "open"),
+            by=user.get("username", ""))
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    _audit("finding.state", actor=user.get("username", ""), scan_id=scan_id,
+           detail={"finding_key": finding_key, "state": body.get("state")})
+    return JSONResponse(content=result)
+
+
+@app.put("/api/scans/{scan_id}/findings/{finding_key:path}/assign")
+async def assign_finding(scan_id: str, finding_key: str, request: Request,
+                         user: dict = Depends(_require_writer)):
+    if not COLLAB_AVAILABLE:
+        _collab_unavailable()
+    body = await request.json()
+    try:
+        result = collab.assign_finding(
+            _app_id_for_scan(scan_id), finding_key,
+            assignee=body.get("assignee", ""), priority=body.get("priority", ""),
+            by=user.get("username", ""))
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    _audit("finding.assign", actor=user.get("username", ""), scan_id=scan_id,
+           detail={"finding_key": finding_key, "assignee": body.get("assignee"),
+                   "priority": body.get("priority")})
+    return JSONResponse(content=result)
+
+
+@app.get("/api/scans/{scan_id}/findings/{finding_key:path}/comments")
+async def list_finding_comments(scan_id: str, finding_key: str, _user: dict = Depends(_require_auth)):
+    if not COLLAB_AVAILABLE:
+        return JSONResponse(content=[])
+    return JSONResponse(content=collab.list_comments(_app_id_for_scan(scan_id), finding_key))
+
+
+@app.post("/api/scans/{scan_id}/findings/{finding_key:path}/comments")
+async def add_finding_comment(scan_id: str, finding_key: str, request: Request,
+                              user: dict = Depends(_require_writer)):
+    if not COLLAB_AVAILABLE:
+        _collab_unavailable()
+    body = await request.json()
+    try:
+        result = collab.add_comment(
+            _app_id_for_scan(scan_id), finding_key, body.get("body", ""),
+            author=user.get("username", ""))
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    return JSONResponse(content=result)
+
+
+@app.delete("/api/comments/{comment_id}")
+async def delete_finding_comment(comment_id: int, _user: dict = Depends(_require_writer)):
+    if COLLAB_AVAILABLE:
+        collab.delete_comment(comment_id)
+    return JSONResponse(content={"deleted": comment_id})
+
+
+# ─── Persistent suppressions (manager+) ──────────────────────────────────────
+@app.get("/api/suppressions")
+async def list_suppressions(scan_id: str = Query(None), _user: dict = Depends(_require_auth)):
+    """Active suppressions. With ?scan_id=, scopes to that app + globals."""
+    if not COLLAB_AVAILABLE:
+        return JSONResponse(content=[])
+    app_id = _app_id_for_scan(scan_id) if scan_id else None
+    return JSONResponse(content=collab.list_suppressions(app_id))
+
+
+@app.post("/api/suppressions")
+async def create_suppression(request: Request, user: dict = Depends(_require_manager)):
+    if not COLLAB_AVAILABLE:
+        _collab_unavailable()
+    body = await request.json()
+    app_id = _app_id_for_scan(body["scan_id"]) if body.get("scan_id") else (body.get("app_id") or "")
+    try:
+        result = collab.add_suppression(
+            rule_id=body.get("rule_id", ""), file_pattern=body.get("file_pattern", ""),
+            reason=body.get("reason", ""), app_id=app_id,
+            created_by=user.get("username", ""))
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    _audit("suppression.create", actor=user.get("username", ""),
+           detail={"rule_id": body.get("rule_id"), "file_pattern": body.get("file_pattern")})
+    return JSONResponse(content=result)
+
+
+@app.delete("/api/suppressions/{supp_id}")
+async def remove_suppression(supp_id: int, user: dict = Depends(_require_manager)):
+    if COLLAB_AVAILABLE:
+        collab.delete_suppression(supp_id)
+    _audit("suppression.delete", actor=user.get("username", ""), detail={"id": supp_id})
+    return JSONResponse(content={"deleted": supp_id})
+
+
+# ─── Workspace sharing (manager+) ────────────────────────────────────────────
+@app.put("/api/scans/{scan_id}/share")
+async def set_scan_share(scan_id: str, request: Request, user: dict = Depends(_require_manager)):
+    if not COLLAB_AVAILABLE:
+        _collab_unavailable()
+    body = await request.json()
+    try:
+        result = collab.set_share_mode(scan_id, body.get("share_mode", "team"))
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    _audit("scan.share", actor=user.get("username", ""), scan_id=scan_id,
+           detail={"share_mode": body.get("share_mode")})
+    return JSONResponse(content=result)
+
+
 @app.delete("/api/scans/{scan_id}")
 async def remove_scan(scan_id: str, _user: dict = Depends(_require_auth)):
     if DB_AVAILABLE:
@@ -1320,11 +1495,16 @@ async def get_file(
     if not DECOMPILER_AVAILABLE:
         raise HTTPException(503, detail="Decompiler not available")
 
-    content = get_file_content(scan_id, normalized)
-    if content is None:
+    # Classify first: compiled artifacts are returned as a structured JSON
+    # envelope (rendered as a "binary" card) instead of decoded-to-garbage text.
+    payload = inspect_file(scan_id, normalized)
+    if payload is None:
         raise HTTPException(404, detail="File not found")
 
-    return PlainTextResponse(content=content)
+    if payload.get("kind") == "binary":
+        return JSONResponse(content={"binary": True, "info": payload["info"]})
+
+    return PlainTextResponse(content=payload.get("content", ""))
 
 
 @app.get("/api/scans/{scan_id}/manifest")

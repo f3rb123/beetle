@@ -19,6 +19,22 @@ import {
   CisoSummaryPanel, DeveloperGuidePanel, AskAiPanel,
 } from './panels2.jsx'
 import { severityCounts, findingPath, useEscape } from './ui.jsx'
+import { useCollab, canManage, SHARE_MODES } from '../../lib/collab.js'
+
+// Workspace-level sharing control (point 6). Managers/admins can change the
+// mode; everyone else sees the current mode read-only.
+function ShareControl({ collab }) {
+  const mode = collab.collab.share?.share_mode || 'team'
+  if (!canManage()) {
+    return <span className="ws-pill ws-pill--ok" title="Workspace visibility" style={{ textTransform: 'none' }}>● {mode}</span>
+  }
+  return (
+    <select className="ws-input" style={{ width: 'auto', padding: '4px 8px' }} value={mode}
+      title="Workspace visibility" onChange={e => collab.setShare(e.target.value)}>
+      {SHARE_MODES.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+    </select>
+  )
+}
 
 const NAV_GROUPS = [
   {
@@ -103,6 +119,7 @@ export default function Workspace({ results, scanId, onOpenCode, actions }) {
   const [drawer, setDrawer] = useState(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const scrollRef = useRef(null)
+  const collab = useCollab(scanId)
 
   // Cmd/Ctrl+K opens search
   useEffect(() => {
@@ -192,13 +209,14 @@ export default function Workspace({ results, scanId, onOpenCode, actions }) {
               <Search size={14} /> Search workspace
               <kbd><Command size={10} style={{ verticalAlign: '-1px' }} />K</kbd>
             </button>
+            <ShareControl collab={collab} />
             <button type="button" className="ws-btn ws-btn--primary" onClick={actions.onExport}><Download size={14} /> Export</button>
             {actions.user ? <button type="button" className="ws-btn" onClick={actions.onSignOut} title="Sign out">{actions.user}</button> : null}
           </header>
 
           <div className="ws-content" ref={scrollRef}>
             {section === 'overview' && <OverviewPanel results={results} onOpenSection={setSection} onOpenFinding={openFinding} onOpenCode={onOpenCode} />}
-            {section === 'findings' && <FindingsPanel results={results} onOpenFinding={openFinding} onOpenCode={onOpenCode} />}
+            {section === 'findings' && <FindingsPanel results={results} onOpenFinding={openFinding} onOpenCode={onOpenCode} collab={collab} />}
             {section === 'chains' && <ChainsPanel results={results} />}
             {section === 'secrets' && <SecretsPanel results={results} onOpenCode={onOpenCode} />}
             {section === 'masvs' && <MasvsPanel results={results} />}
@@ -223,7 +241,7 @@ export default function Workspace({ results, scanId, onOpenCode, actions }) {
         </div>
       </div>
 
-      {drawer ? <FindingDrawer finding={drawer} onClose={() => setDrawer(null)} onOpenCode={onOpenCode} /> : null}
+      {drawer ? <FindingDrawer finding={drawer} onClose={() => setDrawer(null)} onOpenCode={onOpenCode} collab={collab} /> : null}
       {searchOpen ? <SearchPalette index={searchIndex} onClose={() => setSearchOpen(false)} onPick={onPick} /> : null}
     </div>
   )

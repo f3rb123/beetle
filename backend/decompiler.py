@@ -257,16 +257,14 @@ def cleanup_decompiled(scan_id: str):
         shutil.rmtree(scan_work, ignore_errors=True)
 
 
-def get_file_content(scan_id: str, rel_path: str) -> str | None:
-    """Read a source file for the code viewer.
+def resolve_source_path(scan_id: str, rel_path: str) -> Path | None:
+    """Resolve a viewer-relative path to a real file under the scan tree.
 
-    Resolution is delegated to `analyzers.scan_storage.resolve_source_file`,
-    which knows about every subdir we persist (`jadx`, `apktool`, `apk_extract`,
-    `ipa_extract`) and tolerates paths recorded with tmpdir prefixes by older
-    analyzer code.
+    Delegates to `analyzers.scan_storage.resolve_source_file` (which knows every
+    subdir we persist: `jadx`, `apktool`, `apk_extract`, `ipa_extract`, and
+    tolerates tmpdir-prefixed paths from older analyzer code) and falls back to
+    a self-contained resolver when that module is unavailable.
     """
-    # Reject absolute & traversal paths defensively — the API layer also checks,
-    # but this function is called directly from tests and other code paths.
     if not rel_path:
         return None
     if rel_path.startswith(("/", "\\")) or "\x00" in rel_path:
@@ -304,12 +302,67 @@ def get_file_content(scan_id: str, rel_path: str) -> str | None:
 
     if candidate is None or not candidate.is_file():
         return None
+    return candidate
+
+
+def get_file_content(scan_id: str, rel_path: str) -> str | None:
+    """Read a source file for the code viewer, as text.
+
+    Binary artifacts (Mach-O, ELF, DEX, archives, …) are NEVER decoded to text
+    here — that produced the `@##c#h###` garbage. Callers that want rich binary
+    metadata should use `inspect_file`; this function returns a short human
+    notice for binaries so legacy text-only call sites still degrade gracefully.
+    """
+    candidate = resolve_source_path(scan_id, rel_path)
+    if candidate is None:
+        return None
+
+    # Never render compiled bytes as source.
+    try:
+        from analyzers import binary_inspector
+        if binary_inspector.is_binary(candidate, rel_path):
+            info = binary_inspector.describe(candidate, rel_path)
+            return (
+                f"// {info['label']} — source not available\n"
+                f"// File: {info['name']}  ({info['size']})\n"
+                f"// {info.get('note', '')}"
+            )
+    except Exception:
+        pass
 
     try:
         size = candidate.stat().st_size
         if size > 3_000_000:
             return f"// File too large to display inline ({size // 1024} KB)\n// Path: {rel_path}"
         return candidate.read_text(errors="replace")
+    except Exception:
+        return None
+
+
+def inspect_file(scan_id: str, rel_path: str) -> dict | None:
+    """Resolve + classify a file for the source viewer.
+
+    Returns one of:
+      * {"kind": "text", "content": "<text>"}                 — render as source
+      * {"kind": "binary", "info": {...}}                     — render binary card
+      * None                                                   — not found
+    """
+    candidate = resolve_source_path(scan_id, rel_path)
+    if candidate is None:
+        return None
+    try:
+        from analyzers import binary_inspector
+        if binary_inspector.is_binary(candidate, rel_path):
+            return {"kind": "binary", "info": binary_inspector.describe(candidate, rel_path)}
+    except Exception:
+        pass
+
+    try:
+        size = candidate.stat().st_size
+        if size > 3_000_000:
+            return {"kind": "text",
+                    "content": f"// File too large to display inline ({size // 1024} KB)\n// Path: {rel_path}"}
+        return {"kind": "text", "content": candidate.read_text(errors="replace")}
     except Exception:
         return None
 

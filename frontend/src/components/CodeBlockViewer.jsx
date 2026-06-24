@@ -71,6 +71,7 @@ export function inferLanguage(filePath = '', fallback = 'txt') {
 export default function CodeBlockViewer({
   title,
   content = '',
+  binaryInfo = null,
   language = 'txt',
   highlightedLines = [],
   focusLine = null,
@@ -223,6 +224,59 @@ export default function CodeBlockViewer({
         </div>
       ) : null}
 
+      {binaryInfo ? (
+        <div className="code-viewer__binary">
+          <div className="code-viewer__binary-head">
+            <span className="code-viewer__binary-kind">{binaryInfo.label || 'Compiled binary'}</span>
+            <span className="code-viewer__binary-name" title={binaryInfo.name}>{binaryInfo.name}</span>
+          </div>
+          {binaryInfo.note ? <p className="code-viewer__binary-note">{binaryInfo.note}</p> : null}
+
+          {(binaryInfo.details || []).length || binaryInfo.size ? (
+            <dl className="code-viewer__binary-grid">
+              {binaryInfo.size ? (<div><dt>Size</dt><dd>{binaryInfo.size}</dd></div>) : null}
+              {(binaryInfo.details || []).map((d, i) => (
+                <div key={i}><dt>{d.label}</dt><dd>{d.value}</dd></div>
+              ))}
+            </dl>
+          ) : null}
+
+          {(binaryInfo.protections || []).length ? (
+            <div className="code-viewer__binary-block">
+              <div className="code-viewer__binary-subhead">Binary protections</div>
+              <div className="code-viewer__binary-chips">
+                {binaryInfo.protections.map((p, i) => (
+                  <span key={i} className={`code-viewer__binary-chip${p.present ? ' is-on' : ' is-off'}`}>
+                    {p.present ? '✓' : '✕'} {p.label}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {(binaryInfo.recoverable || []).length ? (
+            <div className="code-viewer__binary-block">
+              <div className="code-viewer__binary-subhead">Recoverable metadata</div>
+              <div className="code-viewer__binary-chips">
+                {binaryInfo.recoverable.map((r, i) => (
+                  <span key={i} className="code-viewer__binary-chip">{r}</span>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {(binaryInfo.linked_libraries || []).length ? (
+            <div className="code-viewer__binary-block">
+              <div className="code-viewer__binary-subhead">Linked libraries ({binaryInfo.linked_libraries.length})</div>
+              <ul className="code-viewer__binary-list">
+                {binaryInfo.linked_libraries.slice(0, 24).map((l, i) => <li key={i}>{l}</li>)}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {!binaryInfo ? (<>
       <div className="code-viewer__toolbar">
         <label className="code-viewer__search">
           <input
@@ -317,6 +371,7 @@ export default function CodeBlockViewer({
           </div>
         ) : null}
       </div>
+      </>) : null}
     </div>
   )
 }

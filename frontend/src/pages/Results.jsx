@@ -138,6 +138,7 @@ function WorkspaceCodeModal({ state, onClose, onNavigate }) {
           title={state.path}
           meta={state.meta}
           content={state.content}
+          binaryInfo={state.binaryInfo}
           language={state.language}
           highlightedLines={state.lines}
           focusLine={state.focus}
@@ -1024,12 +1025,28 @@ export default function Results() {
       source: opts.source || '',
       evidence: opts.evidence || [],
       evidenceIndex: opts.index || 0,
+      binaryInfo: null,
     }
-    setCodeState({ ...base, content: '', loading: true, error: '', meta: 'Loading source…' })
+    setCodeState({ ...base, content: '', binaryInfo: null, loading: true, error: '', meta: 'Loading source…' })
 
     try {
       const response = await apiFetch(`/api/scans/${scanId}/file?path=${encodeURIComponent(path)}`)
       if (!response.ok) throw new Error(response.status === 404 ? 'Source file not available for this scan.' : 'Unable to open source file.')
+
+      // Compiled artifacts come back as a JSON envelope — render a binary card,
+      // never decoded bytes. Text source comes back as plain text.
+      const contentType = response.headers.get('content-type') || ''
+      if (contentType.includes('application/json')) {
+        const payload = await response.json().catch(() => null)
+        if (payload && payload.binary) {
+          setCodeState({
+            ...base, content: '', binaryInfo: payload.info || {}, lines: [], focus: null,
+            approximate: false, loading: false, error: '',
+            meta: `${payload.info?.label || 'Binary file'}${payload.info?.size ? ` · ${payload.info.size}` : ''}`,
+          })
+          return
+        }
+      }
       const content = await response.text()
 
       // Deterministic resolution chain (declared → snippet → class → method →
