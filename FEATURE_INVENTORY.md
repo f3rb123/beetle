@@ -1,4 +1,4 @@
-# Cortex — Feature Inventory
+# Beetle — Feature Inventory
 
 Every subsystem is documented with: Purpose, Dependencies, Strengths, Weaknesses, Confidence.
 
@@ -597,7 +597,7 @@ Every subsystem is documented with: Purpose, Dependencies, Strengths, Weaknesses
 **Dependencies:** `webhooks.py`, `httpx`, HMAC-SHA256
 
 **Strengths:**
-- HMAC-SHA256 payload signature (`X-Cortex-Signature`)
+- HMAC-SHA256 payload signature (`X-Beetle-Signature`)
 - SSRF protection: DNS resolution + RFC-1918 + loopback + link-local blocklist
 - DNS-rebinding defense: re-resolves hostname in blocklist check
 - Per-event filtering (webhook can subscribe to specific event types)
@@ -652,7 +652,7 @@ Every subsystem is documented with: Purpose, Dependencies, Strengths, Weaknesses
 **Weaknesses:**
 - No rule testing sandbox — analysts can't test a rule against a sample before saving
 - No rule versioning or changelog
-- No import/export of rule sets (no JSON import for sharing across Cortex instances)
+- No import/export of rule sets (no JSON import for sharing across Beetle instances)
 - Regex engine is Python `re` — no PCRE features, no lookahead performance limiting
 
 **Confidence:** High.

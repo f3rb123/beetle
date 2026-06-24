@@ -1,4 +1,4 @@
-# Cortex — Project Overview
+# Beetle — Project Overview
 
 **Version:** 3.2.0  
 **Type:** Mobile Application Security Testing (MAST) platform  
@@ -8,9 +8,9 @@
 
 ---
 
-## What Cortex Does
+## What Beetle Does
 
-Cortex is a self-contained web application that accepts mobile app binaries (`.apk` / `.ipa`) and produces structured security analysis. A user uploads a file, a backend scan pipeline processes it across ~20 specialized sub-analyzers, and the results are stored in SQLite. The frontend presents findings across ~30 categorized sections covering static analysis, binary hardening, supply chain CVEs, secret detection, network security, compliance mapping, and attack chain synthesis.
+Beetle is a self-contained web application that accepts mobile app binaries (`.apk` / `.ipa`) and produces structured security analysis. A user uploads a file, a backend scan pipeline processes it across ~20 specialized sub-analyzers, and the results are stored in SQLite. The frontend presents findings across ~30 categorized sections covering static analysis, binary hardening, supply chain CVEs, secret detection, network security, compliance mapping, and attack chain synthesis.
 
 The system is designed for security analysts and penetration testers who need a reproducible, auditable toolchain for mobile app assessments without depending on cloud services (except for optional live-check integrations).
 

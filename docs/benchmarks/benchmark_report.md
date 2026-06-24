@@ -1,6 +1,6 @@
-# Cortex Benchmark Report
+# Beetle Benchmark Report
 
-_Generated 2026-06-20T19:35:12.965395Z · tool: Cortex / Beetle_
+_Generated 2026-06-20T19:35:12.965395Z · tool: Beetle_
 
 **Merge gate (regression + PDF): PASS ✅**
 **Absolute quality targets (Task 7): 3/3 apps meet all targets**
@@ -54,18 +54,18 @@ _Generated 2026-06-20T19:35:12.965395Z · tool: Cortex / Beetle_
 - **Banking App (template)** (template) — template profile — supply an APK to run
 - **Enterprise App (template)** (template) — template profile — supply an APK to run
 
-## Cortex vs MobSF (capability matrix)
+## Beetle vs MobSF (capability matrix)
 
 > MobSF column reflects documented capabilities, not a live run.
 
-| Dimension | Cortex | MobSF | Notes |
+| Dimension | Beetle | MobSF | Notes |
 |---|---|---|---|
 | detection_coverage | 3/3 | 3/3 | Both cover manifest/code/cert/secrets/deps broadly. |
-| evidence_quality | 3/3 | 2/3 | Cortex: exact file+line+snippet per finding. |
-| view_code_quality | 3/3 | 1/3 | Cortex resolves findings to decompiled source + jump-to-line. |
-| false_positive_rate | 3/3 | 1/3 | Cortex suppresses library/framework noise by ownership. |
-| ownership_awareness | 3/3 | 0/3 | Cortex classifies app vs library/SDK/framework. |
-| attack_chain_detection | 3/3 | 0/3 | Cortex correlates findings into exploit chains. |
-| analyst_usability | 3/3 | 1/3 | Cortex adds reachability, exploitability, prioritization. |
-| report_quality | 3/3 | 2/3 | Cortex: robust PDF + executive/trust summaries. |
+| evidence_quality | 3/3 | 2/3 | Beetle: exact file+line+snippet per finding. |
+| view_code_quality | 3/3 | 1/3 | Beetle resolves findings to decompiled source + jump-to-line. |
+| false_positive_rate | 3/3 | 1/3 | Beetle suppresses library/framework noise by ownership. |
+| ownership_awareness | 3/3 | 0/3 | Beetle classifies app vs library/SDK/framework. |
+| attack_chain_detection | 3/3 | 0/3 | Beetle correlates findings into exploit chains. |
+| analyst_usability | 3/3 | 1/3 | Beetle adds reachability, exploitability, prioritization. |
+| report_quality | 3/3 | 2/3 | Beetle: robust PDF + executive/trust summaries. |
 | **TOTAL** | **24** | **10** | |

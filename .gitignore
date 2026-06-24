@@ -25,3 +25,8 @@ coverage/
 .uireview/
 frontend/preview-live/
 frontend/public/render-ws.html
+*.apk
+*.ipa
+uploads/
+reports/
+tmp/

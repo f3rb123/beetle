@@ -1,19 +1,19 @@
-# Beetle 2.0 — Cortex Evolution Roadmap
+# Beetle 2.0 — Beetle Evolution Roadmap
 
-**Document purpose:** Opinionated roadmap for evolving Cortex from a capable prototype into a production-grade mobile security platform.  
+**Document purpose:** Opinionated roadmap for evolving Beetle from a capable prototype into a production-grade mobile security platform.  
 **Reviewer:** Principal AppSec Architect  
-**Naming note:** "Beetle 2.0" is used as a codename for the next major version; the product name "Cortex" is retained.
+**Naming note:** "Beetle 2.0" is used as a codename for the next major version; the product name "Beetle" is retained.
 
 ---
 
 ## North Star
 
-**Cortex 2.0 goal:** The most capable self-hosted mobile AppSec platform for security teams that need full CI/CD integration, dynamic analysis, enterprise-grade reliability, and supply chain intelligence — without sending data to a third-party SaaS.
+**Beetle 2.0 goal:** The most capable self-hosted mobile AppSec platform for security teams that need full CI/CD integration, dynamic analysis, enterprise-grade reliability, and supply chain intelligence — without sending data to a third-party SaaS.
 
 **Success criteria:**
 1. Analysts can assess any Android/iOS app in < 15 minutes with confidence that all major attack surfaces are covered.
-2. CI/CD pipelines can block on Cortex policy without false positives degrading developer trust.
-3. A 5-person security team can run Cortex at scale (500+ scans/month) without operational issues.
+2. CI/CD pipelines can block on Beetle policy without false positives degrading developer trust.
+3. A 5-person security team can run Beetle at scale (500+ scans/month) without operational issues.
 4. The platform's own security posture is defensible to a CISO.
 
 ---
@@ -87,7 +87,7 @@ Add pytest with a minimal fixture APK and IPA. Tests must verify:
 ---
 
 ## Phase 1 — Platform Reliability (Weeks 4–12)
-*Goal: Make Cortex reliable for a team running 50–100 scans/month.*
+*Goal: Make Beetle reliable for a team running 50–100 scans/month.*
 
 ### P1-01: Migrate to PostgreSQL
 
@@ -243,7 +243,7 @@ Integrate with Android emulator for runtime behavior capture.
 
 **Architecture:**
 ```
-Cortex backend
+Beetle backend
   └─ dynamic_analyzer.py
       └─ adb_client.py  — ADB wrapper (push APK, start activity, collect logs)
       └─ frida_client.py — Frida RPC (inject hooks, capture API calls)
@@ -317,7 +317,7 @@ CORTEX_OIDC_CLIENT_ID=xxx
 CORTEX_OIDC_CLIENT_SECRET=xxx
 ```
 
-Auto-provision user on first OIDC login. Map group membership to Cortex roles.
+Auto-provision user on first OIDC login. Map group membership to Beetle roles.
 
 **Estimated effort:** 1 week.
 
@@ -340,7 +340,7 @@ Expand from 2 roles to 5:
 
 Add `integrations` table. Admin-configured per-org. Allow analysts to create a JIRA ticket or GitHub issue from a finding with one click:
 - Finding title, description, severity, CWE, MASVS mapping pre-filled
-- Link back to Cortex finding
+- Link back to Beetle finding
 - Bidirectional: ticket ID stored in the finding, status synced
 
 **Estimated effort:** 2 weeks.
@@ -395,7 +395,7 @@ Subscribe to threat intelligence feeds (AlienVault OTX, MISP) to correlate disco
 
 ### P4-05: Frida Script Library
 
-Build a curated library of Frida scripts for mobile security testing, accessible from the Cortex UI. Scripts can be launched against a connected device or emulator directly from the Cortex findings workspace.
+Build a curated library of Frida scripts for mobile security testing, accessible from the Beetle UI. Scripts can be launched against a connected device or emulator directly from the Beetle findings workspace.
 
 ---
 

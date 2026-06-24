@@ -1,8 +1,8 @@
-# Cortex (Beetle) vs MobSF — Benchmark & Quality-Gate Plan
+# Beetle vs MobSF — Benchmark & Quality-Gate Plan
 
 > Phase 8 deliverable. This document defines the **objective, repeatable**
-> measurement framework used to (a) gate every future Cortex/Beetle release and
-> (b) compare Cortex against MobSF and against prior Cortex releases.
+> measurement framework used to (a) gate every future Beetle release and
+> (b) compare Beetle against MobSF and against prior Beetle releases.
 >
 > Scope guard: this phase adds **no new detections and no UI**. It only measures,
 > validates, compares, and reports on what already exists.
@@ -11,19 +11,19 @@
 
 ## 1. Purpose
 
-Cortex has shipped a large amount of analyst-workflow machinery (ownership
+Beetle has shipped a large amount of analyst-workflow machinery (ownership
 classification, trust score, evidence quality, reachability, attack chains,
 exploitability, source/view-code resolution, robust PDF export). Before more
 features are added we need an **objective quality bar** so that:
 
 1. A regression in evidence quality, source resolution, view-code coverage,
    trust, or PDF export is caught automatically — *before merge*.
-2. Cortex's analyst-grade output can be compared, capability-by-capability,
+2. Beetle's analyst-grade output can be compared, capability-by-capability,
    against MobSF (the de-facto open-source baseline).
 3. Each release produces a durable, diffable artifact (`benchmark_report.json`)
    that future releases are measured against.
 
-The framework is the **quality gate every future Cortex release must pass**.
+The framework is the **quality gate every future Beetle release must pass**.
 
 ---
 
@@ -34,7 +34,7 @@ The framework is the **quality gate every future Cortex release must pass**.
         │
         ├── for each AVAILABLE benchmark app
         │       ├── decompile_apk()        (jadx + apktool, real pipeline)
-        │       ├── analyze_apk()           (full Cortex analysis)
+        │       ├── analyze_apk()           (full Beetle analysis)
         │       ├── generate_pdf()          (export robustness check)
         │       └── collect_metrics()       (read result keys, derive metrics)
         │
@@ -188,7 +188,7 @@ The comparison is therefore a **capability matrix**, scored per dimension:
 | Report Quality | export robustness + executive/trust summaries |
 
 Each dimension is scored `0–3` for both tools; the report renders them
-side-by-side. (Cortex's MobSF baseline is documented, not measured — flagged in
+side-by-side. (Beetle's MobSF baseline is documented, not measured — flagged in
 the output so it is never mistaken for a live run.)
 
 ---
@@ -235,6 +235,6 @@ the rest as `missing`.
 
 ## 8. Deliverables produced by this phase
 
-* `docs/CORTEX_VS_MOBSF_BENCHMARK_PLAN.md` — this document.
+* `docs/BEETLE_VS_MOBSF_BENCHMARK_PLAN.md` — this document.
 * `backend/benchmark.py` — runner (dataset, metrics, comparison, report, regression, gate).
 * `benchmark_report.json` / `benchmark_report.md` — generated per run (sample committed under `docs/benchmarks/`).
