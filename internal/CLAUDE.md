@@ -57,7 +57,7 @@ cd backend
 pip install -r requirements.txt
 
 # Run dev server (reload on change)
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 9005
 ```
 
 The backend expects JADX at `/opt/jadx/bin/jadx` and apktool at `/usr/local/bin/apktool`. These are installed in the Dockerfile; bare-metal dev without them means Android decompilation silently degrades.
@@ -67,7 +67,7 @@ The backend expects JADX at `/opt/jadx/bin/jadx` and apktool at `/usr/local/bin/
 ```bash
 cd frontend
 npm install
-npm run dev      # Vite dev server, proxies /api to localhost:8000
+npm run dev      # Vite dev server, proxies /api to localhost:9005
 npm run build    # Produces dist/ for the nginx container
 npm run preview  # Preview the production build locally
 ```
@@ -83,7 +83,7 @@ There is currently no test runner, no `tests/` directory, and `pytest` is not in
 ### Request path
 
 ```
-Browser → nginx:9005 → FastAPI (uvicorn:8000) → SQLite /data/cortex.db
+Browser → nginx:9005 → FastAPI (uvicorn:9005) → SQLite /data/cortex.db
                             ↓
                  ThreadPoolExecutor (max 3 concurrent scans)
                             ↓

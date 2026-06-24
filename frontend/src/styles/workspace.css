@@ -137,15 +137,19 @@
 
 /* ── Overview ──────────────────────────────────────────────────────────── */
 .ws-ident { display: flex; align-items: center; gap: 16px; margin-bottom: 22px; }
+/* Let the identity text column shrink so long app names / package IDs / versions
+   wrap inside the card instead of overflowing past its edge. */
+.ws-ident > div { min-width: 0; }
+.ws-ident h1 { overflow-wrap: anywhere; word-break: break-word; }
 .ws-ident__avatar { width: 52px; height: 52px; border-radius: 13px; overflow: hidden; background: var(--ws-bg-sunken); display: grid; place-items: center; font-weight: 700; font-size: 20px; color: var(--ws-ink-2); flex-shrink: 0; }
 .ws-ident__avatar img { width: 100%; height: 100%; object-fit: cover; }
-.ws-ident__pkg { font-size: 13px; color: var(--ws-ink-3); margin-top: 3px; }
+.ws-ident__pkg { font-size: 13px; color: var(--ws-ink-3); margin-top: 3px; overflow-wrap: anywhere; word-break: break-word; }
 
 .ws-metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 16px; }
 /* L2 metric pills — float a touch less than page cards, more padding, softer corners */
-.ws-metric { padding: 18px 18px; border: 1px solid var(--ws-line); border-radius: 16px; background: var(--ws-surface); box-shadow: var(--ws-shadow-2); }
-.ws-metric__label { font-size: 11.5px; font-weight: 560; color: var(--ws-ink-3); letter-spacing: 0.01em; }
-.ws-metric__value { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; margin-top: 4px; line-height: 1.05; }
+.ws-metric { padding: 18px 18px; border: 1px solid var(--ws-line); border-radius: 16px; background: var(--ws-surface); box-shadow: var(--ws-shadow-2); min-width: 0; }
+.ws-metric__label { font-size: 11.5px; font-weight: 560; color: var(--ws-ink-3); letter-spacing: 0.01em; overflow-wrap: anywhere; }
+.ws-metric__value { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; margin-top: 4px; line-height: 1.05; overflow-wrap: anywhere; word-break: break-word; }
 .ws-metric__sub { font-size: 12px; color: var(--ws-ink-3); margin-top: 3px; }
 .ws-metric__value small { font-size: 14px; font-weight: 600; color: var(--ws-ink-3); }
 

@@ -879,13 +879,11 @@ async def startup():
     except Exception as e:
         log.warning(f"Scan cleanup failed: {e}")
 
-    # User-facing access banner. uvicorn's own startup line advertises the
-    # backend's INTERNAL bind (0.0.0.0:8000), which is not reachable from a
-    # browser — all traffic is proxied through nginx. Print the real URL last so
-    # `docker compose logs backend` ends with the address users should open.
+    # User-facing access banner. The backend binds 0.0.0.0:9005; nginx serves the
+    # SPA on the same port and reverse-proxies /api to it. Print the real URL last
+    # so `docker compose logs backend` ends with the address users should open.
     log.info("=" * 56)
     log.info("  Beetle is ready  →  open  http://localhost:9005")
-    log.info("  (backend bind :8000 is internal — proxied via nginx)")
     log.info("=" * 56)
 
 

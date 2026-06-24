@@ -143,16 +143,17 @@
 /* ════════════════════════════════════════════════════════════════════════
    HOME / UPLOAD — spacious, centered, layered
    ════════════════════════════════════════════════════════════════════════ */
-/* Launcher shell — wider page so the top bar spans full width with brand left
-   and utilities right, while the hero content stays comfortably centered. */
+/* Launcher shell — a centered container (NOT edge-to-edge): capped width with
+   margin auto, while the grey page background still spans the full viewport.
+   The top bar (brand left / utilities right) and footer span this container. */
 .ws-home {
   position: relative;
   z-index: 1;
   width: 100%;
-  max-width: 960px;
+  max-width: 1200px;
   margin: 0 auto;
   min-height: 100vh;
-  padding: 32px 32px 20px;
+  padding: 32px 40px 20px;
   display: flex;
   flex-direction: column;
   gap: 34px;

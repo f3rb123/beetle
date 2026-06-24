@@ -106,7 +106,7 @@ The system is designed for security analysts and penetration testers who need a 
 ## Deployment Model
 
 ```
-Browser → Nginx (port 9005) → FastAPI backend (port 8000, internal)
+Browser → Nginx (port 9005) → FastAPI backend (port 9005, internal)
                                        ↓
                                SQLite /data/cortex.db     (named volume: cortex-data)
                                /tmp/cortex/uploads        (tmpfs 2GB)

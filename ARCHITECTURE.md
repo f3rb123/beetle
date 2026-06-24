@@ -11,7 +11,7 @@
 │  ┌──────────────────┐        ┌────────────────────────────┐ │
 │  │  frontend        │        │  backend                   │ │
 │  │  nginx:alpine    │──/api/→│  python:3.11-slim          │ │
-│  │  port 9005:80    │        │  uvicorn port 8000         │ │
+│  │  port 9005:80    │        │  uvicorn port 9005         │ │
 │  │  mem: 256MB      │        │  mem: 6GB, cpus: 4         │ │
 │  └──────────────────┘        │  read_only=true            │ │
 │                              │  cap_drop: ALL             │ │
@@ -299,7 +299,7 @@ The `Results.jsx` page is the main workspace. `scan-data.js` defines the full se
 ## Nginx Configuration
 
 ```nginx
-# /api/ → backend:8000
+# /api/ → backend:9005
 proxy_read_timeout 600s;
 proxy_send_timeout 600s;
 client_max_body_size 250M;

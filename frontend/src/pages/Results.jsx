@@ -446,8 +446,8 @@ function CiGateModal({ results, onClose }) {
   const appName = results?.app_name || 'app'
   const scanId  = results?.scan_id  || ''
   // The API is served on the same origin as the UI (nginx proxies /api → backend
-  // internally). Use the current origin verbatim so the snippet points users at the
-  // real, reachable port (9005) rather than the backend's internal 8000.
+  // internally). Use the current origin verbatim so the snippet always points users
+  // at the real, reachable address (http://localhost:9005).
   const apiBase = window.location.origin
 
   const curlCmd = `curl -s -X POST ${apiBase}/api/policy/check \\
