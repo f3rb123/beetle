@@ -285,6 +285,11 @@ def resolve_source_path(scan_id: str, rel_path: str) -> Path | None:
         is_binary = ext in (".dex", ".so", ".dylib", ".aar", ".jar", ".class")
         fname = os.path.basename(clean)
         tries = []
+        # Prefer the decoded AndroidManifest.xml (apktool / jadx resources) over
+        # the compiled AXML extracted from the APK, mirroring scan_storage.
+        if fname.lower() == "androidmanifest.xml":
+            tries.append(scan_work / "apktool" / "AndroidManifest.xml")
+            tries.append(scan_work / "jadx" / "resources" / "AndroidManifest.xml")
         for sub in ("jadx", "apktool", "apk_extract", "ipa_extract", "."):
             base = scan_work / sub
             tries.append(base / clean)
@@ -305,6 +310,31 @@ def resolve_source_path(scan_id: str, rel_path: str) -> Path | None:
     return candidate
 
 
+def _maybe_decode_plist(candidate: Path, rel_path: str) -> str | None:
+    """Render a plist (binary `bplist` or XML) as readable XML, or None.
+
+    iOS `Info.plist` (and many other .plist files) ship as a binary plist that
+    would otherwise hit the binary-card path and show as a "compiled binary".
+    We decode it to canonical XML so the source viewer shows readable, line-
+    numbered text. XML plists are round-tripped for consistent formatting.
+    """
+    try:
+        with open(candidate, "rb") as fh:
+            head = fh.read(8)
+    except Exception:
+        return None
+    is_bplist = head[:6] == b"bplist"
+    if not is_bplist and os.path.splitext(rel_path or candidate.name)[1].lower() != ".plist":
+        return None
+    try:
+        import plistlib
+        with open(candidate, "rb") as fh:
+            data = plistlib.load(fh)
+        return plistlib.dumps(data, fmt=plistlib.FMT_XML).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
 def get_file_content(scan_id: str, rel_path: str) -> str | None:
     """Read a source file for the code viewer, as text.
 
@@ -316,6 +346,12 @@ def get_file_content(scan_id: str, rel_path: str) -> str | None:
     candidate = resolve_source_path(scan_id, rel_path)
     if candidate is None:
         return None
+
+    # Decode binary plists (e.g. iOS Info.plist) to readable XML rather than
+    # treating them as opaque binaries.
+    decoded_plist = _maybe_decode_plist(candidate, rel_path)
+    if decoded_plist is not None:
+        return decoded_plist
 
     # Never render compiled bytes as source.
     try:
@@ -350,6 +386,13 @@ def inspect_file(scan_id: str, rel_path: str) -> dict | None:
     candidate = resolve_source_path(scan_id, rel_path)
     if candidate is None:
         return None
+
+    # Decode binary plists (e.g. iOS Info.plist) to readable XML before the
+    # binary classification, so they render as line-numbered source.
+    decoded_plist = _maybe_decode_plist(candidate, rel_path)
+    if decoded_plist is not None:
+        return {"kind": "text", "content": decoded_plist}
+
     try:
         from analyzers import binary_inspector
         if binary_inspector.is_binary(candidate, rel_path):

@@ -50,6 +50,22 @@ BINARY_STRING_EXTS = frozenset({
     ".jar", ".aar", ".class", ".bin", ".dat", ".pak", ".bundle",
 })
 
+# Files shipped inside a package as a compiled / binary blob that ALSO have a
+# high-quality decoded representation elsewhere in the scan tree. The decoded
+# form must ALWAYS win over the raw copy so the source viewer renders readable
+# text instead of a "compiled binary" card. Keys are lowercased basenames;
+# values are decoded locations to probe (in priority order) relative to the
+# scan root.
+PREFERRED_DECODED_SOURCES = {
+    # AndroidManifest.xml ships as compiled AXML in apk_extract/; apktool (or,
+    # as a fallback, the androguard-reconstructed manifest persisted by the
+    # Android analyzer) writes the readable XML under apktool/.
+    "androidmanifest.xml": (
+        "apktool/AndroidManifest.xml",
+        "jadx/resources/AndroidManifest.xml",
+    ),
+}
+
 # Heavy / useless subtrees to skip when persisting.
 # NOTE: we do NOT skip "test"/"tests" anymore — real app code often lives
 # under those names (e.g. tests that ship in release builds), and the string
@@ -172,8 +188,33 @@ def _printable_strings(data: bytes, min_len: int = 6, max_chars: int = 1_500_000
     return "\n".join(out)
 
 
+def _file_is_binary(path: Path, rel: str = "") -> bool:
+    """Best-effort: does this resolved file hold compiled / binary bytes?
+
+    Used so the resolver never hands back a binary copy (e.g. the compiled AXML
+    AndroidManifest.xml, a Mach-O, an .arsc) when a decoded, human-readable
+    representation exists. Delegates to the shared binary_inspector and degrades
+    to a NUL-byte sniff if that module is unavailable.
+    """
+    try:
+        from analyzers import binary_inspector
+        return binary_inspector.is_binary(path, rel or path.name)
+    except Exception:
+        try:
+            with open(path, "rb") as fh:
+                return b"\x00" in fh.read(4096)
+        except Exception:
+            return False
+
+
 def resolve_source_file(scan_id: str, rel_path: str) -> Path | None:
-    """Given a finding's relative file_path, find it under any known subdir."""
+    """Given a finding's relative file_path, find it under any known subdir.
+
+    Resolution always prefers the highest-quality human-readable representation
+    and only falls back to a compiled/binary copy when no decoded version exists
+    anywhere — so e.g. AndroidManifest.xml opens as readable XML (apktool output)
+    rather than the compiled AXML extracted straight from the APK.
+    """
     if not rel_path:
         return None
     root = scan_root(scan_id)
@@ -199,6 +240,21 @@ def resolve_source_file(scan_id: str, rel_path: str) -> Path | None:
     # binary, so we always also probe for a .txt strings-dump sibling.
     is_binary = ext not in TEXT_EXTS
 
+    # 0) Special files: a compiled/binary copy ships in the package but a decoded
+    #    representation exists under apktool/ (or jadx resources). ALWAYS prefer
+    #    the decoded form. Matched by basename so a prefixed finding path
+    #    (e.g. apk_extract/AndroidManifest.xml) still resolves to the decoded
+    #    file and never to the binary AXML.
+    for preferred in PREFERRED_DECODED_SOURCES.get(basename.lower(), ()):
+        cand = root / preferred
+        if cand.is_file() and not _file_is_binary(cand, preferred):
+            return cand
+
+    # We may encounter a binary copy before a decoded one (or only a binary copy
+    # exists). Remember the first binary match and keep looking for readable
+    # source; only return the binary as a last resort.
+    binary_fallback: Path | None = None
+
     # 1) Try direct path under each subdir (both exact and .txt sidecar).
     for sub in subdirs:
         base = root / sub
@@ -206,10 +262,15 @@ def resolve_source_file(scan_id: str, rel_path: str) -> Path | None:
         if is_binary:
             cands.append(base / (clean + ".txt"))
         for candidate in cands:
-            if candidate.is_file():
+            if not candidate.is_file():
+                continue
+            # `.txt` strings-dump siblings are always plain text.
+            if str(candidate).endswith(".txt") or not _file_is_binary(candidate, clean):
                 return candidate
+            if binary_fallback is None:
+                binary_fallback = candidate
 
-    # 2) Fallback: walk for basename match, bounded
+    # 2) Fallback: walk for basename match, bounded. Still prefer non-binary.
     checked = 0
     for sub in subdirs:
         base = root / sub
@@ -219,10 +280,14 @@ def resolve_source_file(scan_id: str, rel_path: str) -> Path | None:
             for name in files:
                 checked += 1
                 if checked > 50000:
-                    return None
+                    return binary_fallback
                 if name == basename or name == basename + ".txt":
-                    return Path(r) / name
-    return None
+                    p = Path(r) / name
+                    if name.endswith(".txt") or not _file_is_binary(p, name):
+                        return p
+                    if binary_fallback is None:
+                        binary_fallback = p
+    return binary_fallback
 
 
 def cleanup_scan(scan_id: str) -> bool:

@@ -413,6 +413,11 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         else:
             results["findings"].append(_meta_finding("androguard not available — manifest analysis skipped"))
 
+        # ── Persist a decoded manifest for the source viewer ──────────────────
+        # Guarantees View Code shows readable XML (never the compiled binary
+        # AXML in apk_extract) even when apktool failed or timed out.
+        _persist_decoded_manifest(scan_id, results)
+
         # ── Framework detection ───────────────────────────────────────────────
         _record_module_metric(results, "manifest_analysis", manifest_started, components=sum(len(results["attack_surface"].get(key, [])) for key in ("activities", "services", "receivers", "providers")))
         _stage(scan_id, "manifest_analysis", manifest_started)
@@ -2373,6 +2378,30 @@ def _persist_extraction(tmpdir: str, scan_id: str):
         tmpdir, scan_id, "apk_extract",
         extra_binary_dump=True,   # also dump .dex / .so printable strings
     )
+
+
+def _persist_decoded_manifest(scan_id: str, results: dict):
+    """Persist a decoded, human-readable AndroidManifest.xml for the viewer.
+
+    The manifest extracted straight from the APK (apk_extract/AndroidManifest.xml)
+    is compiled AXML — it renders as a "compiled binary" card in the source
+    viewer. apktool decodes a readable manifest under apktool/, but it can fail
+    or time out. When it does, we fall back to the androguard-reconstructed
+    manifest captured during parsing and write it to apktool/AndroidManifest.xml
+    (the canonical decoded location the resolver prefers). A real apktool decode
+    is higher fidelity, so we never overwrite one.
+    """
+    manifest_xml = (results.get("manifest_xml") or "").strip()
+    if not manifest_xml:
+        return
+    try:
+        dest = scan_storage.scan_root(scan_id) / "apktool" / "AndroidManifest.xml"
+        if dest.exists():
+            return  # apktool already produced a decoded manifest — keep it.
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(manifest_xml, encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 
 def _extract_strings_for_viewer(data: bytes, min_len: int = 6) -> str:
