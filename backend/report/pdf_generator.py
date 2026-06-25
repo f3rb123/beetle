@@ -136,8 +136,8 @@ def _cover_page(story, results, T, styles, report_author):
     # Dark cover band
     story.append(Spacer(1, 30 * mm))
 
-    # CORTEX wordmark
-    story.append(Paragraph("CORTEX", styles["cover_title"]))
+    # BEETLE wordmark
+    story.append(Paragraph("BEETLE", styles["cover_title"]))
     story.append(Spacer(1, 2 * mm))
     story.append(Paragraph("Mobile Recon Framework", styles["cover_sub"]))
     story.append(Spacer(1, 15 * mm))

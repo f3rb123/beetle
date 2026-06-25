@@ -1,5 +1,5 @@
 """
-Cortex Compliance Report Generator
+Beetle Compliance Report Generator
 ====================================
 Produces a structured compliance PDF mapped to a chosen framework.
 
@@ -382,7 +382,7 @@ def _map_findings(results: dict, controls: list[dict]) -> dict[str, dict]:
 
 def _compliance_cover(story, results, T, styles, fw, author):
     story.append(Spacer(1, 30 * mm))
-    story.append(Paragraph("CORTEX", styles["cover_title"]))
+    story.append(Paragraph("BEETLE", styles["cover_title"]))
     story.append(Spacer(1, 2 * mm))
     story.append(Paragraph("Mobile Security Platform", styles["cover_sub"]))
     story.append(Spacer(1, 15 * mm))
