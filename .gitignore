@@ -32,4 +32,5 @@ reports/
 tmp/
 *.zip 
  
- 
+*.pdf
+internal/MISSING_FEATURES.md
