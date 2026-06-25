@@ -1,5 +1,5 @@
 """
-CycloneDX 1.5 JSON SBOM generator for Cortex scan results.
+CycloneDX 1.5 JSON SBOM generator for Beetle scan results.
 
 Assembles a Software Bill of Materials from the data already collected
 during a scan:
@@ -247,9 +247,9 @@ def _finding_to_cdx_vuln(finding: dict, app_bom_ref: str) -> dict | None:
     return {
         "bom-ref":    f"vuln:{vid}",
         "id":         vid,
-        "source":     {"name": "Cortex Static Analysis"},
+        "source":     {"name": "Beetle Static Analysis"},
         "ratings":    [{
-            "source":   {"name": "Cortex"},
+            "source":   {"name": "Beetle"},
             "score":    _SEVERITY_SCORE.get(severity, 5.0),
             "severity": severity,
             "method":   "other",
@@ -264,7 +264,7 @@ def _finding_to_cdx_vuln(finding: dict, app_bom_ref: str) -> dict | None:
 
 def generate_sbom(results: dict) -> dict:
     """
-    Generate a CycloneDX 1.5 JSON SBOM dict from a Cortex scan results dict.
+    Generate a CycloneDX 1.5 JSON SBOM dict from a Beetle scan results dict.
     Returns a Python dict — caller serialises to JSON.
     """
     app_info  = results.get("app_info") or {}
@@ -380,11 +380,11 @@ def generate_sbom(results: dict) -> dict:
         "metadata": {
             "timestamp": scan_time,
             "tools": [{
-                "vendor":  "Cortex",
-                "name":    "Cortex Mobile Security Scanner",
+                "vendor":  "Beetle",
+                "name":    "Beetle Mobile Security Scanner",
                 "version": "3.2.0",
                 "externalReferences": [
-                    {"type": "website", "url": "https://github.com/cortex-security/cortex"}
+                    {"type": "website", "url": "https://github.com/f3rb123/beetle"}
                 ],
             }],
             "component":  app_component,

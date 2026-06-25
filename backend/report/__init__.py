@@ -1,1 +1,1 @@
-# Cortex Report Generator
+# Beetle Report Generator
