@@ -1,119 +1,269 @@
-# Beetle
+# 🪲 Beetle
 
-### Attack-Chain Driven Mobile Security Workspace
+# Attack-Chain Driven Mobile Application Security Platform
 
-Beetle is an offline-first mobile application security platform. Drop in an
-Android **APK** or iOS **IPA** and Beetle decompiles it, runs ~20 static
-analyzers, and presents the result as an *explainable* security workspace — every
-finding traced to a real file·line, mapped to MASVS/OWASP, and synthesized into
-concrete attack chains the way an analyst would.
+<p align="center">
+  <img src="docs/screenshots/home.png" width="1000">
+</p>
 
-**No cloud upload. No telemetry. The package never leaves your machine.**
+<p align="center">
 
----
+**Android • iOS • MASVS • AI-Assisted Analysis • Attack Chains • SARIF • CycloneDX SBOM • Docker**
 
-## Features
-
-- **Android APK support** — JADX + apktool decompilation, smali, resources, and native ELF analysis
-- **iOS IPA support** — Mach-O, plist, and embedded framework analysis
-- **Attack Chain Intelligence** — co-occurring weaknesses synthesized into end-to-end exploit narratives
-- **MASVS posture scoring** — findings aligned to the OWASP Mobile Application Security Verification Standard
-- **Secrets detection** — 36+ credential patterns with masking, entropy gating, and live key validation
-- **AI-assisted triage** — optional, provider-agnostic LLM enrichment; fully functional offline via deterministic analyst intelligence
-- **Evidence-driven findings** — every finding resolves to a real file and line with a code snippet; no fabricated locations
-- **View Code navigation** — jump from any finding to the decompiled source, step through every location it touches
-- **PDF export** — technical and compliance (MASVS / PCI-DSS / OWASP Mobile) reports
+</p>
 
 ---
 
-## Screenshots
+## Overview
 
-> _Screenshots coming soon._
+Beetle is an offline-first mobile application security platform designed to help security engineers, penetration testers, developers, and auditors analyze Android APKs and iOS IPAs.
 
-<!-- Drop images into docs/screenshots/ and uncomment:
+Rather than presenting isolated findings, Beetle correlates weaknesses into realistic attack paths, links every finding to source evidence, and provides explainable security analysis.
+
+Applications are analyzed entirely on your own infrastructure. No application binaries or source code are uploaded to external services.
+
+---
+
+## Why Beetle?
+
+Modern mobile assessments generate hundreds of findings.
+
+Beetle focuses on helping analysts answer three questions:
+
+* What is vulnerable?
+* Why does it matter?
+* How can an attacker combine these weaknesses?
+
+Instead of only listing issues, Beetle provides:
+
+* Evidence-driven findings
+* Attack chain generation
+* Source-code navigation
+* AI-assisted security explanations
+* Standards mapping
+* Professional reporting
+
+---
+
+# Features
+
+### Android Static Analysis
+
+* APK decompilation
+* JADX integration
+* apktool integration
+* Manifest analysis
+* Smali analysis
+* Resource analysis
+* Native library inspection
+
+### iOS Static Analysis
+
+* IPA extraction
+* Mach-O analysis
+* Framework analysis
+* Info.plist analysis
+* Entitlements inspection
+* Binary security checks
+
+### Security Analysis
+
+* OWASP MASVS mapping
+* Permission analysis
+* Secrets detection
+* Cryptography analysis
+* Certificate inspection
+* Exported component analysis
+* WebView analysis
+* Network security analysis
+
+### Analyst Workspace
+
+* Evidence-driven findings
+* View Code
+* Attack Chains
+* Trust Score
+* Security Score
+* Finding correlation
+* Rich code snippets
+
+### AI-Assisted Analysis
+
+* Optional AI enrichment
+* Offline deterministic explanations
+* Attack path reasoning
+* Remediation guidance
+
+### Reports & Integrations
+
+* PDF Reports
+* Compliance Reports
+* SARIF Export
+* CycloneDX SBOM
+* JSON Export
+
+---
+
+# Screenshots
+
+## Home
+
+![Home](docs/screenshots/home.png)
+
+## Scan Overview
+
 ![Overview](docs/screenshots/overview.png)
-![Findings & Evidence](docs/screenshots/findings.png)
-![Attack Chains](docs/screenshots/attack-chains.png)
-![View Code](docs/screenshots/view-code.png)
--->
 
-| View | Description |
-|------|-------------|
-| Overview | Security score, trust score, risk summary, top risks |
-| Findings | Evidence-driven findings with severity and source location |
-| Attack Chains | Synthesized end-to-end exploit narratives |
-| View Code | Finding-to-source navigation over decompiled output |
+## Findings
+
+![Findings](docs/screenshots/findings.png)
+
+## Permission Analysis
+
+![Permissions](docs/screenshots/permissions.png)
+
+## Secrets Detection
+
+![Secrets](docs/screenshots/secrets.png)
+
+## AI Security Assistant
+
+![Ask AI](docs/screenshots/ask-ai.png)
+
+## AI Analysis
+
+![AI Response](docs/screenshots/ai-response.png)
 
 ---
 
-## Quick Start
+# Quick Start
 
 ```bash
 git clone https://github.com/f3rb123/beetle.git
+
 cd beetle
+
 docker compose up -d
 ```
 
-Then open **http://localhost:9005**.
-
-Set these before first run (shell or `.env`):
+Open:
 
 ```
-SECRET_KEY=<at-least-32-chars>
+http://localhost:9005
+```
+
+Configure:
+
+```
+SECRET_KEY=<minimum-32-character-secret>
+
 CORTEX_ADMIN_PASS=<initial-admin-password>
 ```
-
-On first run an `admin` account is created. The backend startup banner
-(`docker compose logs backend`) confirms the access URL.
 
 Optional integrations:
 
 ```
-ANTHROPIC_API_KEY=...        # AI enrichment
-VIRUSTOTAL_API_KEY=...       # VirusTotal hash lookups
+ANTHROPIC_API_KEY=...
+
+VIRUSTOTAL_API_KEY=...
 ```
 
 ---
 
-## Supported Formats
+# Supported Formats
 
-| Format | Platform | Tooling |
-|--------|----------|---------|
-| **APK** | Android  | JADX + apktool |
-| **IPA** | iOS      | Mach-O / plist analysis |
-
----
-
-## Architecture
-
-```
-Frontend (React / Vite)
-        │
-      Nginx          ← serves the SPA, reverse-proxies /api
-        │
-     FastAPI         ← routes, auth, scan queue (ThreadPoolExecutor)
-        │
-    Analyzers        ← ~20 sub-analyzers (orchestrated per platform)
-        │
-  JADX / apktool     ← decompilation + resource decoding
-        │
-     Results         ← single JSON blob per scan, persisted in SQLite
-```
-
-The backend is a single FastAPI service. Uploaded packages are decompiled into a
-per-scan workspace, analyzed sequentially, and serialized to a SQLite database.
-The frontend is a static SPA served by nginx, which also proxies API traffic — the
-backend is never exposed directly.
-
-See [`ARCHITECTURE.md`](ARCHITECTURE.md), [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md),
-and [`FEATURE_INVENTORY.md`](FEATURE_INVENTORY.md) for detail.
+| Platform | Format |
+| -------- | ------ |
+| Android  | APK    |
+| iOS      | IPA    |
 
 ---
 
-## Philosophy
+# Architecture
 
-> _"See the app the way an attacker does."_
+Frontend (React + Vite)
 
-A scanner that only lists findings forces the analyst to rebuild context by hand.
-Beetle does the opposite: it shows the evidence, the chain, and the impact, so the
-question is never *"is this real?"* but *"how bad is it, and how do I fix it?"*
+↓
+
+FastAPI Backend
+
+↓
+
+Decompiler (JADX + apktool)
+
+↓
+
+Static Analysis Engine
+
+↓
+
+Evidence Engine
+
+↓
+
+Attack Chain Generator
+
+↓
+
+Reports (PDF • SARIF • SBOM)
+
+See:
+
+* ARCHITECTURE.md
+* PROJECT_OVERVIEW.md
+* FEATURE_INVENTORY.md
+
+---
+
+# Design Principles
+
+* Offline-first
+* Explainable findings
+* Evidence over assumptions
+* Standards-based analysis
+* Analyst-centric workflow
+* Docker-native deployment
+
+---
+
+# Current Capabilities
+
+* Android static analysis
+* iOS static analysis
+* Attack chain generation
+* MASVS mapping
+* AI-assisted explanations
+* Trust scoring
+* Evidence viewer
+* Source navigation
+* PDF reports
+* SARIF export
+* CycloneDX SBOM
+
+---
+
+# Roadmap
+
+Upcoming development includes:
+
+* Native APKLeaks integration
+* Full source explorer
+* Enterprise collaboration
+* CI/CD CLI
+* Docker Hub images
+* GitHub Action
+* Plugin SDK
+* Enhanced binary analysis
+* Advanced iOS inspection
+
+---
+
+# License
+
+See the LICENSE file.
+
+---
+
+# Acknowledgements
+
+Beetle builds upon the open-source mobile security ecosystem and benefits from projects such as JADX, apktool, LIEF, and the OWASP Mobile Security Testing Guide.
