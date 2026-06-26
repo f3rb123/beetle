@@ -244,6 +244,8 @@ The initial administrator account is created automatically during the first star
 
 Stop Beetle at any time with:
 
+> **Note:** Scan duration depends on the application size and the complexity of its resources. Small applications typically complete within a few minutes, while larger applications (approximately 50 MB or more) may require 10–20 minutes or longer to analyze, depending on the host system's CPU, memory, and storage performance.
+
 ```
 Ctrl + C
 ```
