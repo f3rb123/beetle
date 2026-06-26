@@ -240,7 +240,7 @@ Then open:
 http://localhost:9005
 ```
 
-The initial administrator account is automatically created using the password specified in CORTEX_ADMIN_PASS. During the first startup, the generated administrator username and login information are also displayed in the container logs for convenience. 
+The initial administrator account is created automatically during the first startup. You may optionally specify the administrator password using `CORTEX_ADMIN_PASS`; otherwise, Beetle generates a secure random password automatically. In both cases, the administrator username and password are printed in the container logs during initialization for easy reference.
 
 Stop Beetle at any time with:
 
