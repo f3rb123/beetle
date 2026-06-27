@@ -394,6 +394,15 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     results["findings"] = sort_findings(results["findings"])
     results["severity_summary"] = compute_severity_summary(results["findings"])
 
+    # ── Phase 1.2: Ownership Engine — enrich every finding with ownership
+    # metadata (owner_type/name/confidence/reason/…). Additive only: it writes
+    # new owner_* keys and never touches existing finding data, so reports/UI are
+    # unaffected. Deterministic, no network. ──
+    try:
+        from . import ownership
+        ownership.annotate(results)
+    except Exception:
+        log.exception("[ownership] failed; findings left without ownership metadata")
     # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
     try:
         from . import analyst_intel

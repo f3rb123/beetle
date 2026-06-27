@@ -173,7 +173,8 @@ def test_every_finding_type_represented():
 def test_placeholders_default_but_carry_existing():
     """Future-phase placeholders default safely and are not computed here."""
     cf = from_legacy(ANDROID_FINDINGS[0], platform="android")
-    _check(cf.owner_type == "unknown", "owner_type should default to 'unknown'")
+    # Phase 1.2: default owner_type aligns with OwnerType.UNKNOWN ("Unknown").
+    _check(cf.owner_type == "Unknown", "owner_type should default to 'Unknown'")
     _check(cf.ownership_label is None, "ownership_label should default to None")
     _check(cf.sdk_name is None and cf.package_prefix is None, "sdk/prefix placeholders should be None")
     # exploitability is carried when present (50 in fixture #1), not invented.

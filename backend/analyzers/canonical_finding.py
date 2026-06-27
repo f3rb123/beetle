@@ -78,8 +78,9 @@ _CONFIDENCE_WORDS = {
     "informational": 20, "info": 20, "none": 0, "": 0,
 }
 
-# Default placeholder for ownership classification (filled by a later phase).
-OWNER_UNKNOWN = "unknown"
+# Default ownership classification. Filled by the Ownership Engine (Phase 1.2);
+# value matches ownership.OwnerType.UNKNOWN by string (no import coupling).
+OWNER_UNKNOWN = "Unknown"
 
 
 # ── Normalization helpers (reusable, dependency-free) ────────────────────────
@@ -222,13 +223,27 @@ class CanonicalFinding:
     false_positive: bool | None = None   # tri-state: None=unknown, True/False=analyst/engine verdict
     false_positive_reason: str = ""      # rationale for the FP verdict
 
-    # ── Future-phase placeholders (carried, never computed here) ──────────────
-    owner_type: str = OWNER_UNKNOWN      # APPLICATION/LIBRARY/SDK/FRAMEWORK/… — Ownership Engine
-    ownership_label: str | None = None   # fine-grained ownership label — Ownership Engine
+    # ── Ownership metadata (Phase 1.2 — Ownership Engine) ─────────────────────
+    # Who owns the code this finding points at. Populated by the Ownership Engine
+    # (analyzers.ownership); defaults are safe so a finding that never passes
+    # through the engine is simply "Unknown" with zero confidence. These fields
+    # are the substrate the Confidence Engine, SDK suppression, Bug Bounty Mode,
+    # attack chains, the AI reviewer and the report engine will all read.
+    owner_type: str = OWNER_UNKNOWN          # OwnerType value (Application/ThirdPartySDK/…)
+    owner_name: str = ""                     # human SDK/framework name, e.g. "AndroidX WorkManager"
+    owner_confidence: int = 0                # 0-100 explainable ownership confidence
+    owner_reason: str = ""                   # human-readable why, e.g. "Matched SDK fingerprint"
+    matched_package_prefix: str | None = None  # the prefix that matched, e.g. "androidx.work"
+    matched_rule: str = ""                   # id of the fingerprint/rule that fired
+    matched_signature: str = ""              # the concrete signal matched (prefix/class-prefix/path token)
+    classification_stage: str = ""           # which stage decided, e.g. "Exact Fingerprint"
+
+    # ── Other future-phase placeholders (carried, never computed here) ────────
+    ownership_label: str | None = None   # legacy fine-grained label (finding_model); preserved
     exploitability: int | None = None    # 0-100 exploitability — Exploitability/Reachability phase
     validation_status: str = ""          # "detected"|"valid"|"invalid"|"skipped" — Validation phase
-    sdk_name: str | None = None          # detected third-party SDK — Ownership Engine
-    package_prefix: str | None = None    # owning package prefix — Ownership Engine
+    sdk_name: str | None = None          # detected third-party SDK name (Ownership Engine convenience)
+    package_prefix: str | None = None    # owning package prefix (Ownership Engine convenience)
     framework_name: str | None = None    # RN/Flutter/Xamarin/… — Framework detection phase
 
     # ── Raw / debug preservation ─────────────────────────────────────────────
@@ -245,6 +260,9 @@ class CanonicalFinding:
         "discovery_method", "owner_type", "suppressed", "suppressed_reason",
         "is_attack_chain", "in_attack_chain", "attack_chain_eligible",
         "validation_status",
+        # Ownership metadata (Phase 1.2)
+        "owner_name", "owner_confidence", "owner_reason", "matched_package_prefix",
+        "matched_rule", "matched_signature", "classification_stage",
     )
 
     # ── Validation / normalization ───────────────────────────────────────────
@@ -255,6 +273,7 @@ class CanonicalFinding:
         self.line = _as_int_or_none(self.line)
         self.column = _as_int_or_none(self.column)
         self.exploitability = _as_int_or_none(self.exploitability)
+        self.owner_confidence = normalize_confidence(self.owner_confidence)
         self.references = _as_str_list(self.references)
         self.tags = _as_str_list(self.tags)
         self.masvs = _as_str_list(self.masvs)
@@ -384,8 +403,16 @@ class CanonicalFinding:
             in_attack_chain=bool(d.get("in_attack_chain", False)),
             false_positive=d.get("false_positive"),
             false_positive_reason=str(d.get("false_positive_reason") or ""),
-            # Placeholders: carried only if the legacy finding already had them.
+            # Ownership metadata: carried only if the legacy finding already had it
+            # (the Ownership Engine populates it; from_legacy never computes it).
             owner_type=str(d.get("owner_type") or OWNER_UNKNOWN),
+            owner_name=str(d.get("owner_name") or ""),
+            owner_confidence=d.get("owner_confidence") or 0,
+            owner_reason=str(d.get("owner_reason") or ""),
+            matched_package_prefix=_opt_str(d.get("matched_package_prefix")),
+            matched_rule=str(d.get("matched_rule") or ""),
+            matched_signature=str(d.get("matched_signature") or ""),
+            classification_stage=str(d.get("classification_stage") or ""),
             ownership_label=_opt_str(d.get("ownership_label")),
             exploitability=d.get("exploitability"),
             validation_status=str(d.get("validation_status") or ""),
