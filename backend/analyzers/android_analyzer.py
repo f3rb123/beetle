@@ -935,6 +935,15 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         attack_chains.annotate(results)
     except Exception:
         log.exception("[attack_chains_v2] failed; no v2 chains emitted")
+    # ── Phase 1.8: Bug Bounty Intelligence — reportability guidance for every
+    # finding AND attack chain (score/state/research-value/effort/impact/next-step)
+    # from all prior engines. Additive guidance only; nothing is modified or
+    # removed. The final intelligence layer. Deterministic. ──
+    try:
+        from . import bug_bounty
+        bug_bounty.annotate(results)
+    except Exception:
+        log.exception("[bug_bounty] failed; no reportability guidance emitted")
     # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
     try:
         from . import analyst_intel

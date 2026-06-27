@@ -279,6 +279,14 @@ class CanonicalFinding:
     # and the UI decide what to display from this. Populated by analyzers.triage.
     triage: dict = field(default_factory=dict)
 
+    # ── Bug Bounty intelligence (Phase 1.8 — Reportability Engine) ────────────
+    # Whether an experienced researcher/triager would likely consider this finding
+    # actionable & reportable: reportability score/state, research value,
+    # verification effort, business impact, the positive/negative signals and the
+    # recommended next step. Guidance only — never modifies/removes the finding.
+    # Populated by analyzers.bug_bounty.
+    bug_bounty: dict = field(default_factory=dict)
+
     # ── Other future-phase placeholders (carried, never computed here) ────────
     ownership_label: str | None = None   # legacy fine-grained label (finding_model); preserved
     exploitability: int | None = None    # 0-100 exploitability — Exploitability/Reachability phase
@@ -315,6 +323,8 @@ class CanonicalFinding:
         "evidence_bundle",
         # Triage decision (Phase 1.6)
         "triage",
+        # Bug Bounty intelligence (Phase 1.8)
+        "bug_bounty",
     )
 
     # ── Validation / normalization ───────────────────────────────────────────
@@ -341,6 +351,8 @@ class CanonicalFinding:
             self.evidence_bundle = {}
         if not isinstance(self.triage, dict):
             self.triage = {}
+        if not isinstance(self.bug_bounty, dict):
+            self.bug_bounty = {}
         self.references = _as_str_list(self.references)
         self.tags = _as_str_list(self.tags)
         self.masvs = _as_str_list(self.masvs)
@@ -495,6 +507,7 @@ class CanonicalFinding:
             secret_intelligence=d.get("secret_intelligence") if isinstance(d.get("secret_intelligence"), dict) else {},
             evidence_bundle=d.get("evidence_bundle") if isinstance(d.get("evidence_bundle"), dict) else {},
             triage=d.get("triage") if isinstance(d.get("triage"), dict) else {},
+            bug_bounty=d.get("bug_bounty") if isinstance(d.get("bug_bounty"), dict) else {},
             ownership_label=_opt_str(d.get("ownership_label")),
             exploitability=d.get("exploitability"),
             validation_status=str(d.get("validation_status") or ""),
