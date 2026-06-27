@@ -403,6 +403,15 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         ownership.annotate(results)
     except Exception:
         log.exception("[ownership] failed; findings left without ownership metadata")
+    # ── Phase 1.3: Confidence Engine — explainable per-finding confidence
+    # (detection/ownership/evidence/context/exploitability/overall). Additive
+    # only; reads owner_* from the Ownership Engine above. Never changes severity,
+    # the legacy confidence/confidence_score, suppression, reports or UI. ──
+    try:
+        from . import confidence
+        confidence.annotate(results)
+    except Exception:
+        log.exception("[confidence] failed; findings left without confidence metadata")
     # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
     try:
         from . import analyst_intel

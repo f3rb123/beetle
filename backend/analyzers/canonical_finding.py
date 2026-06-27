@@ -238,6 +238,24 @@ class CanonicalFinding:
     matched_signature: str = ""              # the concrete signal matched (prefix/class-prefix/path token)
     classification_stage: str = ""           # which stage decided, e.g. "Exact Fingerprint"
 
+    # ── Confidence metadata (Phase 1.3 — Confidence Engine) ───────────────────
+    # How much Beetle trusts this finding, broken into independent, explainable
+    # dimensions (each 0-100). Populated by analyzers.confidence. These NEVER
+    # touch severity/exploitability scoring or suppression — they are a separate,
+    # additive trust signal future engines (Bug Bounty Mode, AI Reviewer, SDK
+    # suppression, report engine, dashboard) read. The legacy `confidence` /
+    # `confidence_score` fields are left untouched for backward compatibility.
+    detection_confidence: int = 0        # detector identified the right issue
+    ownership_confidence: int = 0        # read directly from the Ownership Engine
+    evidence_confidence: int = 0         # quality/quantity of verifiable evidence
+    context_confidence: int = 0          # finding sits in meaningful application context
+    exploitability_confidence: int = 0   # conservative likelihood-of-exploitation (NOT severity)
+    overall_confidence: int = 0          # explainable weighted roll-up of the above
+    confidence_reason: str = ""          # human-readable why
+    confidence_breakdown: dict = field(default_factory=dict)  # full per-dimension detail (never hidden)
+    confidence_stage: str = ""           # decision path: "Weighted"|"Validated"|"Import-Only"|…
+    confidence_version: str = ""         # engine config version that produced these scores
+
     # ── Other future-phase placeholders (carried, never computed here) ────────
     ownership_label: str | None = None   # legacy fine-grained label (finding_model); preserved
     exploitability: int | None = None    # 0-100 exploitability — Exploitability/Reachability phase
@@ -263,6 +281,11 @@ class CanonicalFinding:
         # Ownership metadata (Phase 1.2)
         "owner_name", "owner_confidence", "owner_reason", "matched_package_prefix",
         "matched_rule", "matched_signature", "classification_stage",
+        # Confidence metadata (Phase 1.3)
+        "detection_confidence", "ownership_confidence", "evidence_confidence",
+        "context_confidence", "exploitability_confidence", "overall_confidence",
+        "confidence_reason", "confidence_breakdown", "confidence_stage",
+        "confidence_version",
     )
 
     # ── Validation / normalization ───────────────────────────────────────────
@@ -274,6 +297,15 @@ class CanonicalFinding:
         self.column = _as_int_or_none(self.column)
         self.exploitability = _as_int_or_none(self.exploitability)
         self.owner_confidence = normalize_confidence(self.owner_confidence)
+        # Confidence dimensions are each clamped 0-100 (Phase 1.3).
+        self.detection_confidence = normalize_confidence(self.detection_confidence)
+        self.ownership_confidence = normalize_confidence(self.ownership_confidence)
+        self.evidence_confidence = normalize_confidence(self.evidence_confidence)
+        self.context_confidence = normalize_confidence(self.context_confidence)
+        self.exploitability_confidence = normalize_confidence(self.exploitability_confidence)
+        self.overall_confidence = normalize_confidence(self.overall_confidence)
+        if not isinstance(self.confidence_breakdown, dict):
+            self.confidence_breakdown = {}
         self.references = _as_str_list(self.references)
         self.tags = _as_str_list(self.tags)
         self.masvs = _as_str_list(self.masvs)
@@ -413,6 +445,18 @@ class CanonicalFinding:
             matched_rule=str(d.get("matched_rule") or ""),
             matched_signature=str(d.get("matched_signature") or ""),
             classification_stage=str(d.get("classification_stage") or ""),
+            # Confidence metadata: carried only if already present (the
+            # Confidence Engine populates it; from_legacy never computes it).
+            detection_confidence=d.get("detection_confidence") or 0,
+            ownership_confidence=d.get("ownership_confidence") or 0,
+            evidence_confidence=d.get("evidence_confidence") or 0,
+            context_confidence=d.get("context_confidence") or 0,
+            exploitability_confidence=d.get("exploitability_confidence") or 0,
+            overall_confidence=d.get("overall_confidence") or 0,
+            confidence_reason=str(d.get("confidence_reason") or ""),
+            confidence_breakdown=d.get("confidence_breakdown") if isinstance(d.get("confidence_breakdown"), dict) else {},
+            confidence_stage=str(d.get("confidence_stage") or ""),
+            confidence_version=str(d.get("confidence_version") or ""),
             ownership_label=_opt_str(d.get("ownership_label")),
             exploitability=d.get("exploitability"),
             validation_status=str(d.get("validation_status") or ""),
