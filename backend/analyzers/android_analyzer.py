@@ -431,11 +431,20 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         secrets_started = time.perf_counter()
         log.info(f"[{scan_id}] stage=secrets start")
         if preferred_source_dirs:
-            results["secrets"] = _scan_precise_source_secrets(preferred_source_dirs)
+            # Phase 1.9: single combined walk (Beetle Native + APKLeaks) sets
+            # results["secrets"] (native) and fuses APKLeaks secrets/findings/endpoints.
+            _scan_precise_source_secrets(results, preferred_source_dirs)
         else:
             results["secrets"] = scan_files_for_secrets(tmpdir)
             # Only fall back to raw DEX strings when JADX source is unavailable.
             _scan_dex_strings(tmpdir, results)
+            # No-JADX fallback: native uses the legacy text scanner above, so run
+            # the APKLeaks slice as one additional ev walk over the extract dir.
+            try:
+                from . import detection_sources
+                detection_sources.run_detection_sources(results, [tmpdir], platform="android")
+            except Exception:
+                log.exception("[detection_sources] APKLeaks fallback scan failed")
         if results.get("sdk_secrets"):
             results["secrets"].extend(results["sdk_secrets"])
         _record_module_metric(results, "secret_detection", secrets_started, findings=len(results.get("secrets", [])))
@@ -888,6 +897,18 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         results["findings"] = _ac + [f for f in results["findings"] if not f.get("is_attack_chain")]
     # Severity influence (reachability) changed severities — recompute summary.
     results["severity_summary"] = compute_severity_summary(results["findings"])
+    # ── Phase 1.9: secret→finding intelligence bridge — mirror MASKED APKLeaks
+    # secrets into results["findings"] so they traverse ownership → confidence →
+    # evidence → triage → attack chains → bug-bounty. Placed AFTER severity_summary
+    # so the bridged copies are never double-counted in the user-facing severity
+    # counts, and AFTER masking so no raw value can enter the findings stream.
+    # reconcile_bridged_findings() (after bug-bounty) copies the enrichment back
+    # onto the secret and REMOVES these copies, so they never display twice. ──
+    try:
+        from .detection_sources import fusion as _ds_fusion
+        _ds_fusion.bridge_secrets_to_findings(results, platform="android")
+    except Exception:
+        log.exception("[detection_sources] secret->finding bridge failed")
     # ── Phase 1.2: Ownership Engine — enrich every finding with ownership
     # metadata (owner_type/name/confidence/reason/…). Additive only: it writes
     # new owner_* keys and never touches existing finding data, so reports/UI are
@@ -944,6 +965,18 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         bug_bounty.annotate(results)
     except Exception:
         log.exception("[bug_bounty] failed; no reportability guidance emitted")
+    # ── Phase 1.9: reconcile the secret→finding bridge — copy the intelligence the
+    # engines computed (ownership/confidence/evidence/triage/bug-bounty/chain
+    # membership) back onto the linked secret, then REMOVE the bridged copies from
+    # results["findings"]. After this the same secret is shown once (Secrets view),
+    # carries its full intelligence, and never appears as a duplicate finding in the
+    # UI / PDF / HTML / JSON / dashboard. Runs before analyst/MASVS/workspaces/
+    # quick-summary/score so none of them see the bridged copies. ──
+    try:
+        from .detection_sources import fusion as _ds_fusion
+        _ds_fusion.reconcile_bridged_findings(results)
+    except Exception:
+        log.exception("[detection_sources] bridge reconcile failed")
     # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
     try:
         from . import analyst_intel
@@ -2394,18 +2427,16 @@ def _read_android_icon_candidate(apk, path: str):
     return {"data": f"data:{mime};base64,{encoded}"}
 
 
-def _scan_precise_source_secrets(source_dirs: list[str]) -> list:
-    """Prefer source-backed evidence from JADX/apktool over raw APK extraction.
+def _reshape_native_secrets(hits: list) -> list:
+    """Reshape raw evidence-scanner hits into native secret dicts.
 
     Dedup key is (name, value[:80]) so two different rules matching the same
     string value are NOT collapsed — they surface as distinct findings with
     different names and recommendations.
     """
-    from .evidence_scanner import scan_directory_for_secrets as ev_secrets
-
     findings = []
     seen: set[tuple[str, str]] = set()
-    for finding in ev_secrets("", source_dirs):
+    for finding in hits or []:
         name = finding.get("name") or finding.get("title", "")
         val  = finding.get("value", "")
         key  = (name, val[:80])
@@ -2430,6 +2461,27 @@ def _scan_precise_source_secrets(source_dirs: list[str]) -> list:
             "owasp":          finding.get("owasp", ""),
         })
     return findings
+
+
+def _scan_precise_source_secrets(results: dict, source_dirs: list[str]) -> None:
+    """Single combined walk (Beetle Native + APKLeaks) over JADX/apktool dirs.
+
+    Phase 1.9: ONE filesystem traversal applies the unified catalog
+    (``secret_catalog.combined()``). Native hits become ``results["secrets"]``
+    exactly as before (same reshape + dedup); APKLeaks hits are fused into
+    secrets / findings / endpoints with source attribution + cross-source merge.
+    Eliminates the separate APKLeaks walk that previously re-traversed the tree.
+    """
+    from .evidence_scanner import scan_directory_for_secrets as ev_secrets
+    from . import secret_catalog
+    from .detection_sources import routing, fusion
+
+    hits = ev_secrets("", source_dirs, patterns=secret_catalog.combined())
+    native_hits, apk = routing.extract_apkleaks(hits)
+    results["secrets"] = _reshape_native_secrets(native_hits)
+    fusion.merge_secret_streams(results, apk.secrets)
+    fusion.merge_finding_streams(results, apk.findings, platform="android")
+    fusion.merge_endpoint_streams(results, apk.endpoints)
 
 
 def _persist_extraction(tmpdir: str, scan_id: str):

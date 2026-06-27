@@ -203,6 +203,17 @@ class CanonicalFinding:
     source_module: str = ""         # producing analyzer/source (``source`` legacy alias)
     discovery_method: str = ""      # how it was found (regex/taint/live-probe/…); later phases enrich
 
+    # ── Source attribution (Phase 1.9 — multi-source / Finding Fusion prep) ────
+    # WHICH detection engine(s) surfaced this finding. ``source_module`` records the
+    # single producing analyzer (legacy); ``detected_by`` is the multi-source list
+    # ("Beetle Native", "APKLeaks", … ) and ``sources`` carries per-engine detail
+    # ([{engine, rule_id, confidence, …}]). When two engines detect the same issue
+    # the merge unions these instead of creating a duplicate — the seam the upcoming
+    # Finding Fusion Engine builds on. Empty defaults: a finding that never went
+    # through a registered source simply has no attribution and behaves as before.
+    detected_by: list[str] = field(default_factory=list)  # engine display names
+    sources: list[dict] = field(default_factory=list)     # [{engine, rule_id, confidence, evidence_ref}]
+
     # ── Knowledge / standards mapping ─────────────────────────────────────────
     references: list[str] = field(default_factory=list)  # external URLs / advisory links
     tags: list[str] = field(default_factory=list)        # free-form labels for filtering
@@ -325,6 +336,8 @@ class CanonicalFinding:
         "triage",
         # Bug Bounty intelligence (Phase 1.8)
         "bug_bounty",
+        # Source attribution (Phase 1.9)
+        "detected_by", "sources",
     )
 
     # ── Validation / normalization ───────────────────────────────────────────
@@ -353,6 +366,11 @@ class CanonicalFinding:
             self.triage = {}
         if not isinstance(self.bug_bounty, dict):
             self.bug_bounty = {}
+        self.detected_by = _as_str_list(self.detected_by)
+        if not isinstance(self.sources, list):
+            self.sources = []
+        else:
+            self.sources = [s for s in self.sources if isinstance(s, dict)]
         self.references = _as_str_list(self.references)
         self.tags = _as_str_list(self.tags)
         self.masvs = _as_str_list(self.masvs)
@@ -508,6 +526,8 @@ class CanonicalFinding:
             evidence_bundle=d.get("evidence_bundle") if isinstance(d.get("evidence_bundle"), dict) else {},
             triage=d.get("triage") if isinstance(d.get("triage"), dict) else {},
             bug_bounty=d.get("bug_bounty") if isinstance(d.get("bug_bounty"), dict) else {},
+            detected_by=_first(d, "detected_by") or [],
+            sources=d.get("sources") if isinstance(d.get("sources"), list) else [],
             ownership_label=_opt_str(d.get("ownership_label")),
             exploitability=d.get("exploitability"),
             validation_status=str(d.get("validation_status") or ""),
@@ -615,6 +635,13 @@ class CanonicalFinding:
         merged.owasp = _union(self.owasp, other.owasp)
         merged.file_evidence = _union_evidence(self.file_evidence, other.file_evidence)
 
+        # Source attribution (Phase 1.9): union the engines that found this issue
+        # and concatenate their per-source detail. Two engines detecting the same
+        # finding therefore collapse to ONE finding "Detected By" both — the
+        # behavior the Finding Fusion Engine relies on.
+        merged.detected_by = _union(self.detected_by, other.detected_by)
+        merged.sources = _union_sources(self.sources, other.sources)
+
         # Boolean linkage flags are OR-ed; suppression is sticky.
         merged.is_attack_chain = self.is_attack_chain or other.is_attack_chain
         merged.in_attack_chain = self.in_attack_chain or other.in_attack_chain
@@ -675,6 +702,22 @@ def _union(*lists: Iterable[str]) -> list[str]:
         for v in _as_str_list(lst):
             if v not in out:
                 out.append(v)
+    return out
+
+
+def _union_sources(*lists: Iterable[dict]) -> list[dict]:
+    """Union per-source attribution dicts, de-duplicated on (engine, rule_id)."""
+    out: list[dict] = []
+    seen: set = set()
+    for lst in lists:
+        for s in lst or []:
+            if not isinstance(s, dict):
+                continue
+            key = (str(s.get("engine", "")), str(s.get("rule_id", "")))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(s)
     return out
 
 

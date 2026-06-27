@@ -179,8 +179,11 @@ def scan_file_for_patterns(
             if isinstance(match.groups(), tuple) and match.groups():
                 value = match.group(1) if match.group(1) else value
 
-            # Dedup
-            key = f"{pat['name']}:{value[:40]}"
+            # Dedup — provenance-aware so the same value matched by two different
+            # sources (e.g. Beetle Native + APKLeaks "AWS Access Key ID") both
+            # survive this walk; the fusion layer merges them into one attributed
+            # finding. For native-only callers provenance is "" → unchanged behavior.
+            key = f"{pat.get('provenance','')}:{pat['name']}:{value[:40]}"
             if key in seen:
                 continue
             seen.add(key)
@@ -208,6 +211,13 @@ def scan_file_for_patterns(
             ctx_end   = min(len(lines), start + 3)
             code_ctx  = "\n".join(lines[ctx_start:ctx_end])
 
+            # Private-key / cert rules: the windowed context can contain raw key
+            # body that masking (which only scrubs the matched value) would miss.
+            # Drop the context entirely so no key-body fragment can reach a sink.
+            # The single header line (snippet) stays as evidence; it is not sensitive.
+            if pat.get("redact_context"):
+                code_ctx = ""
+
             results.append(make_finding(
                 title             = pat["name"],
                 severity          = pat["severity"],
@@ -227,6 +237,11 @@ def scan_file_for_patterns(
                 cwe               = pat.get("cwe", ""),
                 masvs             = pat.get("masvs", ""),
                 owasp             = pat.get("owasp", ""),
+                # Routing/provenance metadata (Phase 1.9). Defaults keep
+                # native-only callers' output identical (provenance "", kind secret).
+                provenance        = pat.get("provenance", ""),
+                kind              = pat.get("kind", "secret"),
+                redact_context    = pat.get("redact_context", False),
             ))
 
     return results
@@ -236,11 +251,19 @@ def scan_directory_for_secrets(
     base_dir: str,
     extra_dirs: list = None,
     extensions: list = None,
+    patterns: list = None,
 ) -> list:
     """
     Walk base_dir (and extra_dirs) scanning text files for secrets.
     Returns deduplicated list of findings with full evidence.
+
+    ``patterns`` defaults to ``SECRET_PATTERNS_EVIDENCE`` (so every existing caller
+    is unchanged). Callers may pass a combined catalog (native + APKLeaks via
+    ``secret_catalog.combined()``) to scan ALL sources in this SINGLE walk; each
+    returned finding then carries ``provenance`` / ``kind`` for the routing layer.
     """
+    if patterns is None:
+        patterns = SECRET_PATTERNS_EVIDENCE
     if extensions is None:
         extensions = [
             ".java", ".kt", ".xml", ".json", ".properties", ".txt",
@@ -291,9 +314,9 @@ def scan_directory_for_secrets(
                         content = f.read()
                     files_scanned += 1
                     rel_path = relativize_path(fpath, scan_dir)
-                    file_findings = scan_file_for_patterns(rel_path, content, SECRET_PATTERNS_EVIDENCE)
+                    file_findings = scan_file_for_patterns(rel_path, content, patterns)
                     for finding in file_findings:
-                        key = f"{finding['name']}:{finding.get('value','')[:30]}"
+                        key = f"{finding.get('provenance','')}:{finding['name']}:{finding.get('value','')[:30]}"
                         if key not in seen_global:
                             seen_global.add(key)
                             all_findings.append(finding)
@@ -636,6 +659,7 @@ SECRET_PATTERNS_EVIDENCE = [
         "cwe":     "CWE-321",
         "confidence":    99,
         "exploitability":90,
+        "redact_context": True,  # drop windowed context — it holds raw key body
         "description":   "PEM-encoded private key embedded in the app.",
         "recommendation":"Remove immediately. Revoke and reissue any associated certificates.",
     },
@@ -1115,6 +1139,8 @@ SECRET_PATTERNS_EVIDENCE = [
         "owasp":   "M10",
         "confidence":    92,
         "exploitability":85,
+        "max_len":       8000,   # full PEM block is the value → masked in full
+        "redact_context": True,  # and its windowed context is dropped
         "description":   "PKCS#8 private key embedded. If an APNs p8 key, allows sending push notifications to all app users.",
         "recommendation":"Remove immediately. Revoke key in Apple Developer portal.",
     },

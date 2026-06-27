@@ -148,8 +148,12 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         with _TPE(max_workers=7) as _pool:
             # Use evidence_scanner (richer, full CWE/MASVS/OWASP metadata)
             # in addition to the legacy common.py scanner so iOS gets the same
-            # quality secret detection as Android.
-            _fut_secrets_ev = _pool.submit(ev_scan_secrets, tmpdir)
+            # quality secret detection as Android. Phase 1.9: the evidence walk
+            # applies the UNIFIED catalog (native + APKLeaks) so APKLeaks adds NO
+            # extra filesystem traversal — its hits are split out below and fused.
+            from . import secret_catalog as _secret_catalog
+            _fut_secrets_ev = _pool.submit(ev_scan_secrets, tmpdir, None, None,
+                                           _secret_catalog.combined())
             _fut_secrets_lg = _pool.submit(scan_files_for_secrets, tmpdir, [
                 ".plist", ".json", ".xml", ".strings", ".js", ".swift",
                 ".m", ".h", ".txt", ".yml", ".yaml", ".cfg",
@@ -161,8 +165,12 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
             _fut_sast = _pool.submit(run_ios_sast, tmpdir, results)
             _fut_framework = _pool.submit(_detect_framework, app_bundle or tmpdir, results)
 
-            # Merge evidence_scanner secrets (richer) with legacy scan (broader)
-            ev_secrets_out = _fut_secrets_ev.result() or []
+            # Split the combined evidence walk into native vs APKLeaks hits BEFORE
+            # the native merge, so APKLeaks hits are routed/attributed (and endpoints
+            # don't get misfiled as secrets) rather than collapsed by name+value.
+            from .detection_sources import routing as _routing, fusion as _fusion
+            ev_all = _fut_secrets_ev.result() or []
+            ev_secrets_out, _apk_result = _routing.extract_apkleaks(ev_all)
             lg_secrets_out = _fut_secrets_lg.result() or []
             # Dedup: evidence_scanner results take priority (better metadata)
             _seen_secrets: set[tuple] = set()
@@ -178,6 +186,10 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                     _seen_secrets.add(k)
                     merged_secrets.append(s)
             results["secrets"] = merged_secrets
+            # Fuse the APKLeaks slice into the native streams (attribution + dedup).
+            _fusion.merge_secret_streams(results, _apk_result.secrets)
+            _fusion.merge_finding_streams(results, _apk_result.findings, platform="ios")
+            _fusion.merge_endpoint_streams(results, _apk_result.endpoints)
 
             results["jwts"] = _fut_jwts.result() or []
             results["ips"]  = _fut_ips.result() or []
@@ -360,6 +372,14 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     results["findings"] = dedupe_findings(results["findings"])
     # ── Phase 0/1: canonical normalization + ownership (additive, non-destructive) ──
     _app_pkg = results.get("app_info", {}).get("bundle_id", "")
+    # ── Phase 1.9: APKLeaks Detection Source — already applied. The APKLeaks
+    # pattern catalog (platform-agnostic: PEM keys, cloud creds, JWTs, URLs all
+    # appear in iOS bundles too) was folded into the SINGLE combined secret walk
+    # near the top of this function (``secret_catalog.combined()`` →
+    # ``routing.extract_apkleaks`` → fusion), so its secrets/findings/endpoints are
+    # already in the native streams with attribution + de-dup. We deliberately do
+    # NOT call the registry orchestrator here — that would re-walk the bundle a
+    # second time. ──
     # ── Phase 1.4: Secret Intelligence Engine — multi-stage validation of every
     # detected secret. MUST run BEFORE secret_intel masking so it sees raw values;
     # it stores only derived, non-sensitive signals. Additive only; never
@@ -403,6 +423,19 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     results["findings"] = sort_findings(results["findings"])
     results["severity_summary"] = compute_severity_summary(results["findings"])
 
+    # ── Phase 1.9: secret→finding intelligence bridge — mirror MASKED APKLeaks
+    # secrets into results["findings"] so they traverse ownership → confidence →
+    # evidence → triage → attack chains → bug-bounty. Placed AFTER severity_summary
+    # (so the bridged copies are never double-counted in the user-facing severity
+    # counts) and AFTER masking (so no raw value can enter the findings stream).
+    # reconcile_bridged_findings() (after bug-bounty) copies the enrichment back
+    # onto the secret and REMOVES these copies, so they never display twice. Mirror
+    # of the Android placement — Android/iOS stay consistent. ──
+    try:
+        from .detection_sources import fusion as _ds_fusion
+        _ds_fusion.bridge_secrets_to_findings(results, platform="ios")
+    except Exception:
+        log.exception("[detection_sources] secret->finding bridge failed")
     # ── Phase 1.2: Ownership Engine — enrich every finding with ownership
     # metadata (owner_type/name/confidence/reason/…). Additive only: it writes
     # new owner_* keys and never touches existing finding data, so reports/UI are
@@ -459,6 +492,19 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         bug_bounty.annotate(results)
     except Exception:
         log.exception("[bug_bounty] failed; no reportability guidance emitted")
+    # ── Phase 1.9: reconcile the secret→finding bridge — copy the intelligence the
+    # engines computed (ownership/confidence/evidence/triage/bug-bounty/chain
+    # membership) back onto the linked secret, then REMOVE the bridged copies from
+    # results["findings"]. After this the same secret is shown once (Secrets view),
+    # carries its full intelligence, and never appears as a duplicate finding in the
+    # UI / PDF / HTML / JSON / SARIF / dashboard. Runs before analyst/MASVS/
+    # workspaces/quick-summary/score so none of them see the bridged copies. Mirror
+    # of the Android placement. ──
+    try:
+        from .detection_sources import fusion as _ds_fusion
+        _ds_fusion.reconcile_bridged_findings(results)
+    except Exception:
+        log.exception("[detection_sources] bridge reconcile failed")
     # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
     try:
         from . import analyst_intel
