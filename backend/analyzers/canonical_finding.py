@@ -272,6 +272,13 @@ class CanonicalFinding:
     # Populated by analyzers.evidence; empty {} until then.
     evidence_bundle: dict = field(default_factory=dict)
 
+    # ── Triage decision (Phase 1.6 — Intelligent Finding Triage Engine) ────────
+    # The explainable visibility recommendation for this finding: decision state
+    # (Show/Highlight/Review/HiddenByDefault/FrameworkNoise/…), visibility, the
+    # rule that fired, and the inputs that drove it. NOTHING is deleted — reports
+    # and the UI decide what to display from this. Populated by analyzers.triage.
+    triage: dict = field(default_factory=dict)
+
     # ── Other future-phase placeholders (carried, never computed here) ────────
     ownership_label: str | None = None   # legacy fine-grained label (finding_model); preserved
     exploitability: int | None = None    # 0-100 exploitability — Exploitability/Reachability phase
@@ -306,6 +313,8 @@ class CanonicalFinding:
         "secret_intelligence",
         # Evidence bundle (Phase 1.5)
         "evidence_bundle",
+        # Triage decision (Phase 1.6)
+        "triage",
     )
 
     # ── Validation / normalization ───────────────────────────────────────────
@@ -330,6 +339,8 @@ class CanonicalFinding:
             self.secret_intelligence = {}
         if not isinstance(self.evidence_bundle, dict):
             self.evidence_bundle = {}
+        if not isinstance(self.triage, dict):
+            self.triage = {}
         self.references = _as_str_list(self.references)
         self.tags = _as_str_list(self.tags)
         self.masvs = _as_str_list(self.masvs)
@@ -483,6 +494,7 @@ class CanonicalFinding:
             confidence_version=str(d.get("confidence_version") or ""),
             secret_intelligence=d.get("secret_intelligence") if isinstance(d.get("secret_intelligence"), dict) else {},
             evidence_bundle=d.get("evidence_bundle") if isinstance(d.get("evidence_bundle"), dict) else {},
+            triage=d.get("triage") if isinstance(d.get("triage"), dict) else {},
             ownership_label=_opt_str(d.get("ownership_label")),
             exploitability=d.get("exploitability"),
             validation_status=str(d.get("validation_status") or ""),

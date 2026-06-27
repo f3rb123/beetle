@@ -915,6 +915,16 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         evidence.annotate(results)
     except Exception:
         log.exception("[evidence] failed; findings left without structured evidence")
+    # ── Phase 1.6: Intelligent Finding Triage — assign every finding an
+    # explainable triage decision + visibility recommendation by reasoning over
+    # ownership/confidence/evidence/secret intelligence. Additive and
+    # NON-DESTRUCTIVE: nothing is deleted or hidden here (reports/UI act on
+    # triage.visibility). The final quality gate before Attack Chain v2. ──
+    try:
+        from . import triage
+        triage.annotate(results)
+    except Exception:
+        log.exception("[triage] failed; findings left without triage decisions")
     # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
     try:
         from . import analyst_intel
