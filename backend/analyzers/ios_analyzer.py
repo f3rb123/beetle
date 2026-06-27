@@ -360,6 +360,15 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     results["findings"] = dedupe_findings(results["findings"])
     # ── Phase 0/1: canonical normalization + ownership (additive, non-destructive) ──
     _app_pkg = results.get("app_info", {}).get("bundle_id", "")
+    # ── Phase 1.4: Secret Intelligence Engine — multi-stage validation of every
+    # detected secret. MUST run BEFORE secret_intel masking so it sees raw values;
+    # it stores only derived, non-sensitive signals. Additive only; never
+    # suppresses or re-severities. Deterministic, network-free. ──
+    try:
+        from . import secret_intelligence
+        secret_intelligence.annotate(results)
+    except Exception:
+        log.exception("[secret_intelligence] failed; secrets left without intelligence metadata")
     # ── Phase 9.1: secret intelligence foundation (canonical model + masking) ──
     try:
         from . import secret_intel

@@ -803,6 +803,16 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
             if s.get("value", "") not in jwt_values_final
         ]
 
+    # ── Phase 1.4: Secret Intelligence Engine — multi-stage validation of every
+    # detected secret (type/provider, format/checksum/entropy, false-positive
+    # detection, status). MUST run BEFORE secret_intel masking so it sees raw
+    # values; it stores only derived, non-sensitive signals. Additive only;
+    # never suppresses or re-severities. Deterministic, network-free. ──
+    try:
+        from . import secret_intelligence
+        secret_intelligence.annotate(results)
+    except Exception:
+        log.exception("[secret_intelligence] failed; secrets left without intelligence metadata")
     # ── Phase 9.1: secret intelligence foundation (canonical model + masking) ──
     # Runs AFTER all secret producers + legacy validation + JWT/JS dedup so it is
     # the single choke point that masks raw values before serialization. Additive

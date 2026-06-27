@@ -256,6 +256,13 @@ class CanonicalFinding:
     confidence_stage: str = ""           # decision path: "Weighted"|"Validated"|"Import-Only"|…
     confidence_version: str = ""         # engine config version that produced these scores
 
+    # ── Secret intelligence (Phase 1.4 — Secret Intelligence Engine) ──────────
+    # For secret-bearing findings: the full multi-stage secret assessment (type,
+    # provider, status, per-dimension confidence, validation results, reasons).
+    # Empty {} for non-secret findings. Nested (not ~15 flat fields) to keep the
+    # canonical schema clean. Populated by analyzers.secret_intelligence.
+    secret_intelligence: dict = field(default_factory=dict)
+
     # ── Other future-phase placeholders (carried, never computed here) ────────
     ownership_label: str | None = None   # legacy fine-grained label (finding_model); preserved
     exploitability: int | None = None    # 0-100 exploitability — Exploitability/Reachability phase
@@ -286,6 +293,8 @@ class CanonicalFinding:
         "context_confidence", "exploitability_confidence", "overall_confidence",
         "confidence_reason", "confidence_breakdown", "confidence_stage",
         "confidence_version",
+        # Secret intelligence (Phase 1.4)
+        "secret_intelligence",
     )
 
     # ── Validation / normalization ───────────────────────────────────────────
@@ -306,6 +315,8 @@ class CanonicalFinding:
         self.overall_confidence = normalize_confidence(self.overall_confidence)
         if not isinstance(self.confidence_breakdown, dict):
             self.confidence_breakdown = {}
+        if not isinstance(self.secret_intelligence, dict):
+            self.secret_intelligence = {}
         self.references = _as_str_list(self.references)
         self.tags = _as_str_list(self.tags)
         self.masvs = _as_str_list(self.masvs)
@@ -457,6 +468,7 @@ class CanonicalFinding:
             confidence_breakdown=d.get("confidence_breakdown") if isinstance(d.get("confidence_breakdown"), dict) else {},
             confidence_stage=str(d.get("confidence_stage") or ""),
             confidence_version=str(d.get("confidence_version") or ""),
+            secret_intelligence=d.get("secret_intelligence") if isinstance(d.get("secret_intelligence"), dict) else {},
             ownership_label=_opt_str(d.get("ownership_label")),
             exploitability=d.get("exploitability"),
             validation_status=str(d.get("validation_status") or ""),
