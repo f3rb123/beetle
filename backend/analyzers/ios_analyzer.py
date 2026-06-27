@@ -360,6 +360,15 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     results["findings"] = dedupe_findings(results["findings"])
     # ── Phase 0/1: canonical normalization + ownership (additive, non-destructive) ──
     _app_pkg = results.get("app_info", {}).get("bundle_id", "")
+    # ── Phase 1.4: Secret Intelligence Engine — multi-stage validation of every
+    # detected secret. MUST run BEFORE secret_intel masking so it sees raw values;
+    # it stores only derived, non-sensitive signals. Additive only; never
+    # suppresses or re-severities. Deterministic, network-free. ──
+    try:
+        from . import secret_intelligence
+        secret_intelligence.annotate(results)
+    except Exception:
+        log.exception("[secret_intelligence] failed; secrets left without intelligence metadata")
     # ── Phase 9.1: secret intelligence foundation (canonical model + masking) ──
     try:
         from . import secret_intel
@@ -394,6 +403,62 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     results["findings"] = sort_findings(results["findings"])
     results["severity_summary"] = compute_severity_summary(results["findings"])
 
+    # ── Phase 1.2: Ownership Engine — enrich every finding with ownership
+    # metadata (owner_type/name/confidence/reason/…). Additive only: it writes
+    # new owner_* keys and never touches existing finding data, so reports/UI are
+    # unaffected. Deterministic, no network. ──
+    try:
+        from . import ownership
+        ownership.annotate(results)
+    except Exception:
+        log.exception("[ownership] failed; findings left without ownership metadata")
+    # ── Phase 1.3: Confidence Engine — explainable per-finding confidence
+    # (detection/ownership/evidence/context/exploitability/overall). Additive
+    # only; reads owner_* from the Ownership Engine above. Never changes severity,
+    # the legacy confidence/confidence_score, suppression, reports or UI. ──
+    try:
+        from . import confidence
+        confidence.annotate(results)
+    except Exception:
+        log.exception("[confidence] failed; findings left without confidence metadata")
+    # ── Phase 1.5: Unified Evidence Intelligence Engine — attach a structured
+    # evidence_bundle (typed items, quality, verification, reproduction,
+    # correlation, data-flow, hash) to every finding. Additive only; summarizes
+    # ownership/confidence metadata so it runs after them. Deterministic. ──
+    try:
+        from . import evidence
+        evidence.annotate(results)
+    except Exception:
+        log.exception("[evidence] failed; findings left without structured evidence")
+    # ── Phase 1.6: Intelligent Finding Triage — assign every finding an
+    # explainable triage decision + visibility recommendation by reasoning over
+    # ownership/confidence/evidence/secret intelligence. Additive and
+    # NON-DESTRUCTIVE: nothing is deleted or hidden here (reports/UI act on
+    # triage.visibility). The final quality gate before Attack Chain v2. ──
+    try:
+        from . import triage
+        triage.annotate(results)
+    except Exception:
+        log.exception("[triage] failed; findings left without triage decisions")
+    # ── Phase 1.7: Attack Chain Engine v2 — build realistic, evidence-backed,
+    # explainable attacker journeys from the triaged findings + attack surface
+    # (SAFE CHAINING: framework noise / suppressed / FP secrets / generated code
+    # are never required links). Additive: writes results['attack_chains_v2'];
+    # the legacy chain output, findings, severity, reports and UI are untouched. ──
+    try:
+        from . import attack_chains
+        attack_chains.annotate(results)
+    except Exception:
+        log.exception("[attack_chains_v2] failed; no v2 chains emitted")
+    # ── Phase 1.8: Bug Bounty Intelligence — reportability guidance for every
+    # finding AND attack chain (score/state/research-value/effort/impact/next-step)
+    # from all prior engines. Additive guidance only; nothing is modified or
+    # removed. The final intelligence layer. Deterministic. ──
+    try:
+        from . import bug_bounty
+        bug_bounty.annotate(results)
+    except Exception:
+        log.exception("[bug_bounty] failed; no reportability guidance emitted")
     # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
     try:
         from . import analyst_intel

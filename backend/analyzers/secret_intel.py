@@ -140,11 +140,11 @@ def _looks_like_connection_string(v: str) -> bool:
 def mask_value(value, provider: str = "") -> str:
     """Mask a secret value so a recognizable shape survives but the secret does not.
 
-    Examples:
-      AKIAIOSFODNN7EXAMPLE -> AKIA************MPLE
-      ghp_aBc...xyz        -> ghp_****************...****
-      sk_live_4eC39H...    -> sk_l****************...XaBc
-      <short token>        -> prefix preserved, rest masked
+    Examples (placeholders — not real credentials):
+      EXAMPLE_AWS_ACCESS_KEY -> EXAM***************_KEY
+      EXAMPLE_GITHUB_TOKEN   -> EXAM***************KEN
+      EXAMPLE_STRIPE_SECRET  -> EXAM***************RET
+      <short token>          -> prefix preserved, rest masked
       PEM / private key    -> <REDACTED PRIVATE KEY>
       connection string    -> <REDACTED CONNECTION STRING>
     """

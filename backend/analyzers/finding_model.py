@@ -744,11 +744,24 @@ def compute_confidence(finding: dict, text: str | None = None) -> int:
 
 
 def normalize_severity_label(sev) -> str:
-    """Local, dependency-free severity normalizer (mirrors common.normalize)."""
-    if sev is None:
-        return "info"
-    s = str(sev).strip().lower()
-    return s if s in ("critical", "high", "medium", "low", "info") else "info"
+    """Severity normalizer — delegates to the single authority (Phase 1.15).
+
+    `analyzers.common.normalize_severity` is the one authoritative severity
+    normalizer for the whole backend (it is also alias-tolerant: ``warn`` →
+    ``medium`` etc.). For the canonical severities every producer actually emits
+    (critical/high/medium/low/info) this returns exactly what the previous local
+    implementation did, so behavior is unchanged; the local table below is only a
+    resilience fallback for the (theoretical) case where ``common`` cannot be
+    imported, keeping this module importable in isolation.
+    """
+    try:
+        from .common import normalize_severity as _common_norm
+        return _common_norm(sev)
+    except Exception:
+        if sev is None:
+            return "info"
+        s = str(sev).strip().lower()
+        return s if s in ("critical", "high", "medium", "low", "info") else "info"
 
 
 def confidence_band(score: int) -> str:
@@ -1820,4 +1833,23 @@ def log_quality_stats(stats: dict, *, platform: str = "android") -> None:
         "====================================",
     ]
     log.info("\n".join(lines))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Beetle 2.0 Phase 1.1 — Canonical Finding Model (re-export)
+# ═════════════════════════════════════════════════════════════════════════════
+# The typed source-of-truth finding lives in `canonical_finding.py`. It is
+# re-exported here so existing importers of this module can reach it and so it is
+# unambiguously THE finding model, not a competing one. The phase-based functions
+# above continue to operate on plain dicts; `CanonicalFinding` standardizes that
+# shape and is the substrate later phases (ownership, confidence, evidence,
+# report) will migrate onto. Importing it here is additive and does not alter any
+# pipeline behavior.
+from .canonical_finding import (  # noqa: E402,F401  (re-export, end-of-module by design)
+    CanonicalFinding,
+    from_legacy as canonical_from_legacy,
+    to_legacy as canonical_to_legacy,
+    from_legacy_list as canonical_from_legacy_list,
+    canonicalize_dict,
+)
 

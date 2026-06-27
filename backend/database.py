@@ -264,6 +264,19 @@ def save_scan(results: dict):
             findings_list = results.get("findings") or []
         except Exception as _e:
             log.debug(f"[{scan_id}] apply_suppressions skipped: {_e}")
+        # Phase 1.15: first live exercise of the canonical finding model. This
+        # runs CanonicalFinding over the final active finding set on every scan
+        # (both platforms) to prove representability and surface data-quality
+        # warnings. It is read-only: no finding value changes and nothing is
+        # spliced into serialized output — log line only — so it cannot regress
+        # behavior. Guarded like every other optional step.
+        try:
+            from analyzers import finding_pipeline
+            finding_pipeline.log_canonical_diagnostics(
+                findings_list, platform=str(results.get("platform") or "unknown"),
+            )
+        except Exception as _e:
+            log.debug(f"[{scan_id}] canonical diagnostics skipped: {_e}")
         ss = compute_severity_summary(findings_list)
         results["severity_summary"] = ss
         info = results.get("app_info", {})
