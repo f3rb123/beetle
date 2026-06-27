@@ -263,6 +263,15 @@ class CanonicalFinding:
     # canonical schema clean. Populated by analyzers.secret_intelligence.
     secret_intelligence: dict = field(default_factory=dict)
 
+    # ── Evidence bundle (Phase 1.5 — Unified Evidence Intelligence Engine) ─────
+    # The structured, aggregated, multi-source Evidence object for this finding:
+    # normalized evidence items (code/manifest/binary/taint/…), quality,
+    # verification status, reproduction steps, correlation and a content hash.
+    # Named `evidence_bundle` so it never collides with the legacy string
+    # `evidence` snippet key or the `file_evidence` list (both preserved).
+    # Populated by analyzers.evidence; empty {} until then.
+    evidence_bundle: dict = field(default_factory=dict)
+
     # ── Other future-phase placeholders (carried, never computed here) ────────
     ownership_label: str | None = None   # legacy fine-grained label (finding_model); preserved
     exploitability: int | None = None    # 0-100 exploitability — Exploitability/Reachability phase
@@ -295,6 +304,8 @@ class CanonicalFinding:
         "confidence_version",
         # Secret intelligence (Phase 1.4)
         "secret_intelligence",
+        # Evidence bundle (Phase 1.5)
+        "evidence_bundle",
     )
 
     # ── Validation / normalization ───────────────────────────────────────────
@@ -317,6 +328,8 @@ class CanonicalFinding:
             self.confidence_breakdown = {}
         if not isinstance(self.secret_intelligence, dict):
             self.secret_intelligence = {}
+        if not isinstance(self.evidence_bundle, dict):
+            self.evidence_bundle = {}
         self.references = _as_str_list(self.references)
         self.tags = _as_str_list(self.tags)
         self.masvs = _as_str_list(self.masvs)
@@ -469,6 +482,7 @@ class CanonicalFinding:
             confidence_stage=str(d.get("confidence_stage") or ""),
             confidence_version=str(d.get("confidence_version") or ""),
             secret_intelligence=d.get("secret_intelligence") if isinstance(d.get("secret_intelligence"), dict) else {},
+            evidence_bundle=d.get("evidence_bundle") if isinstance(d.get("evidence_bundle"), dict) else {},
             ownership_label=_opt_str(d.get("ownership_label")),
             exploitability=d.get("exploitability"),
             validation_status=str(d.get("validation_status") or ""),

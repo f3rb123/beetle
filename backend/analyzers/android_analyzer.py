@@ -906,6 +906,15 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         confidence.annotate(results)
     except Exception:
         log.exception("[confidence] failed; findings left without confidence metadata")
+    # ── Phase 1.5: Unified Evidence Intelligence Engine — attach a structured
+    # evidence_bundle (typed items, quality, verification, reproduction,
+    # correlation, data-flow, hash) to every finding. Additive only; summarizes
+    # ownership/confidence metadata so it runs after them. Deterministic. ──
+    try:
+        from . import evidence
+        evidence.annotate(results)
+    except Exception:
+        log.exception("[evidence] failed; findings left without structured evidence")
     # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
     try:
         from . import analyst_intel
