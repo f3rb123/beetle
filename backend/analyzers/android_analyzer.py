@@ -925,6 +925,16 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         triage.annotate(results)
     except Exception:
         log.exception("[triage] failed; findings left without triage decisions")
+    # ── Phase 1.7: Attack Chain Engine v2 — build realistic, evidence-backed,
+    # explainable attacker journeys from the triaged findings + attack surface
+    # (SAFE CHAINING: framework noise / suppressed / FP secrets / generated code
+    # are never required links). Additive: writes results['attack_chains_v2'];
+    # the legacy chain output, findings, severity, reports and UI are untouched. ──
+    try:
+        from . import attack_chains
+        attack_chains.annotate(results)
+    except Exception:
+        log.exception("[attack_chains_v2] failed; no v2 chains emitted")
     # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
     try:
         from . import analyst_intel
