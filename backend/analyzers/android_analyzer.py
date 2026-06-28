@@ -1060,6 +1060,14 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         workspaces.annotate(results)
     except Exception:
         log.exception("[workspaces] failed; workspace structures not emitted")
+    # ── Phase 2.3: Source / Security Explorer overlay — projects the finalized
+    # findings/secrets/IPs into file_index + security_index for the explorer UI.
+    # Reuses existing metadata only (no extraction). Additive. ──
+    try:
+        from . import source_explorer
+        source_explorer.annotate(results)
+    except Exception:
+        log.exception("[source_explorer] overlay failed; explorer metadata not emitted")
     _build_quick_summary(results)
     _record_module_metric(results, "finalize_results", finalize_started, finding_count=len(results.get("findings", [])))
 

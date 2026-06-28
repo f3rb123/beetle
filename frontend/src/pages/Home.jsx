@@ -141,6 +141,17 @@ export default function Home() {
   // workflow: it scrolls to + highlights the upload card and pre-filters the file
   // dialog to the module's package type. startScan / SSE / navigation are unchanged.
   const launchModule = module => {
+    // Investigation modules (Source / Security Explorer) navigate into a scan rather
+    // than uploading. Open the most recent scan's section; if there is no history,
+    // guide the user to run a scan first.
+    if (module.nav) {
+      const latest = history[0]?.scan_id
+      if (latest) { navigate(`/scans/${latest}/${module.nav}`); return }
+      setSelectedModule(null)
+      setError('Upload or open a scan first — the Explorer investigates a scan’s source.')
+      requestAnimationFrame(() => uploadCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }))
+      return
+    }
     setSelectedModule(module)
     setError('')
     requestAnimationFrame(() => {

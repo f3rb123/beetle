@@ -22,7 +22,7 @@
  */
 import {
   Smartphone, Apple, Layers, Atom, ScanSearch, GitBranch,
-  BrainCircuit, Puzzle, Building2,
+  BrainCircuit, Puzzle, Building2, FolderTree, ShieldAlert,
 } from 'lucide-react'
 
 export const MODULE_STATUS = Object.freeze({
@@ -77,6 +77,28 @@ export const ENGINEERING_MODULES = [
     // it, and react_native_analyzer runs when the framework is detected.
     accept: '.apk,.ipa',
     platform: 'react_native',
+  },
+
+  // ── Available investigation workspaces — navigate into a scan (no upload) ──────
+  {
+    id: 'source-explorer',
+    name: 'Source Explorer',
+    icon: FolderTree,
+    status: MODULE_STATUS.AVAILABLE,
+    description: 'Professional file tree + code viewer with intelligence badges across every platform.',
+    capability: 'Lazy tree, syntax-highlighted viewer, finding-to-source navigation.',
+    // Investigation view inside a scan — the launcher routes to the scan section
+    // instead of uploading. `nav` is the workspace section id to open.
+    nav: 'codebrowser',
+  },
+  {
+    id: 'security-explorer',
+    name: 'Security Explorer',
+    icon: ShieldAlert,
+    status: MODULE_STATUS.AVAILABLE,
+    description: 'Investigate by security category — Secrets, Crypto, Network, Storage, IPC and more.',
+    capability: 'Category filters that drive the Source Explorer tree.',
+    nav: 'codebrowser',
   },
   {
     id: 'semgrep',

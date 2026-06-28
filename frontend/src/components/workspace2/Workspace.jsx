@@ -21,10 +21,11 @@ import {
 } from './panels.jsx'
 import {
   CertificatePanel, NetworkPanel, ManifestPanel, ComponentsPanel, AndroidApiPanel,
-  MalwarePanel, ComparePanel, AiAssistantPanel, CodeBrowserPanel,
+  MalwarePanel, ComparePanel, AiAssistantPanel,
   PermissionsPanel, AndroidPosturePanel, TaintFlowPanel,
   CisoSummaryPanel, DeveloperGuidePanel, AskAiPanel,
 } from './panels2.jsx'
+import { SourceExplorerPanel } from './SourceExplorer.jsx'
 import { findingPath, useEscape } from './ui.jsx'
 import { useCollab, canManage, SHARE_MODES } from '../../lib/collab.js'
 import { navGroups, getPanel, isReady } from './workspace-registry.js'
@@ -51,7 +52,7 @@ const DEEP_ANALYSIS = [
   { id: 'androidapis', label: 'Android APIs', icon: Cpu },
   { id: 'taint', label: 'Taint Flows', icon: Workflow },
   { id: 'malware', label: 'Malware Analysis', icon: Bug },
-  { id: 'codebrowser', label: 'Code Browser', icon: FolderTree },
+  { id: 'codebrowser', label: 'Source Explorer', icon: FolderTree },
   { id: 'compare', label: 'Compare', icon: GitCompare },
   { id: 'ai', label: 'AI Assistant', icon: Sparkles },
 ]
@@ -218,7 +219,7 @@ function WorkspaceShell({ results, scanId, actions }) {
       case 'androidapis': return <AndroidApiPanel results={results} onOpenCode={onOpenCode} />
       case 'taint': return <TaintFlowPanel results={results} onOpenCode={onOpenCode} />
       case 'malware': return <MalwarePanel results={results} />
-      case 'codebrowser': return <CodeBrowserPanel results={results} scanId={scanId} onOpenCode={onOpenCode} />
+      case 'codebrowser': return <SourceExplorerPanel results={results} scanId={scanId} onOpenCode={onOpenCode} />
       case 'compare': return <ComparePanel results={results} />
       case 'ai': return <AiAssistantPanel results={results} />
       default: return <ComingSoonPanel panelId={section} />

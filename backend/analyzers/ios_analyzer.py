@@ -570,6 +570,12 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         workspaces.annotate(results)
     except Exception:
         log.exception("[workspaces] failed; workspace structures not emitted")
+    # ── Phase 2.3: Source / Security Explorer overlay (reuses existing metadata). ──
+    try:
+        from . import source_explorer
+        source_explorer.annotate(results)
+    except Exception:
+        log.exception("[source_explorer] overlay failed; explorer metadata not emitted")
 
     # ── Quick summary ─────────────────────────────────────────────────────────
     _build_ios_quick_summary(results)

@@ -26,20 +26,31 @@ export function WorkspaceProvider({ children, initialSection = 'overview', onOpe
   const [finding, setFinding] = useState(null)
   // Comparison selection — the foundation for side-by-side evidence comparison.
   const [comparison, setComparison] = useState([])
+  // Source Explorer target (Phase 2.3): the file/line a "jump to source" intent last
+  // pointed at. The Source Explorer subscribes to this to expand its tree to + select
+  // the file. Carries a monotonically increasing token so repeat-opens still fire.
+  const [explorerTarget, setExplorerTarget] = useState(null)
 
   const openSection = useCallback((id) => { setSection(id); onScrollTop?.() }, [onScrollTop])
   const openFinding = useCallback((f) => setFinding(f), [])
   const closeFinding = useCallback(() => setFinding(null), [])
 
   // Source seam — the single place "jump to source/smali" is defined. The `view`
-  // hint is forward-compatible: the code modal ignores it today; the Source
-  // Explorer will honor it tomorrow.
+  // hint is forward-compatible. Phase 2.3: these ALSO record an explorerTarget so the
+  // Source Explorer's tree follows the same jump (non-disruptive: no section switch).
   const openSource = useCallback((path, lines = [], opts = {}) => {
+    if (path) setExplorerTarget({ path, lines, opts, token: Date.now() })
     onOpenCode?.(path, lines, { ...opts, view: opts.view || 'java' })
   }, [onOpenCode])
   const openSmali = useCallback((path, lines = [], opts = {}) => {
+    if (path) setExplorerTarget({ path, lines, opts, token: Date.now() })
     onOpenCode?.(path, lines, { ...opts, view: 'smali' })
   }, [onOpenCode])
+  // Explicit "reveal in Source Explorer": switch to the explorer section AND target.
+  const openInExplorer = useCallback((path, lines = [], opts = {}) => {
+    if (path) setExplorerTarget({ path, lines, opts, token: Date.now() })
+    setSection('codebrowser'); onScrollTop?.()
+  }, [onScrollTop])
 
   const addToComparison = useCallback((f) => setComparison(c => (
     c.find(x => x === f) ? c : [...c, f].slice(-2)   // hold at most two for side-by-side
@@ -48,13 +59,13 @@ export function WorkspaceProvider({ children, initialSection = 'overview', onOpe
   const clearComparison = useCallback(() => setComparison([]), [])
 
   const value = useMemo(() => ({
-    section, finding, comparison,
-    openSection, openFinding, closeFinding, openSource, openSmali,
+    section, finding, comparison, explorerTarget,
+    openSection, openFinding, closeFinding, openSource, openSmali, openInExplorer,
     addToComparison, removeFromComparison, clearComparison,
     // Raw host hook for the rare consumer that needs it directly (kept internal).
     _onOpenCode: onOpenCode,
-  }), [section, finding, comparison, openSection, openFinding, closeFinding,
-       openSource, openSmali, addToComparison, removeFromComparison, clearComparison, onOpenCode])
+  }), [section, finding, comparison, explorerTarget, openSection, openFinding, closeFinding,
+       openSource, openSmali, openInExplorer, addToComparison, removeFromComparison, clearComparison, onOpenCode])
 
   return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>
 }
@@ -66,9 +77,9 @@ export function useWorkspaceNav() {
   if (ctx) return ctx
   const noop = () => {}
   return {
-    section: 'overview', finding: null, comparison: [],
+    section: 'overview', finding: null, comparison: [], explorerTarget: null,
     openSection: noop, openFinding: noop, closeFinding: noop,
-    openSource: noop, openSmali: noop,
+    openSource: noop, openSmali: noop, openInExplorer: noop,
     addToComparison: noop, removeFromComparison: noop, clearComparison: noop,
     _onOpenCode: null,
   }
