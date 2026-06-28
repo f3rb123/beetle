@@ -28,6 +28,7 @@ from .path_utils import relativize_path
 from .virustotal import run_virustotal
 from . import network_intel
 from . import flutter_analyzer
+from . import react_native_analyzer
 from .evidence_scanner import (
     scan_directory_for_secrets as ev_scan_secrets,
     scan_directory_for_jwts,
@@ -216,6 +217,14 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                 flutter_analyzer.analyze([app_bundle or tmpdir], results, platform="ios")
             except Exception:
                 log.exception("[flutter] iOS analysis failed; continuing without Flutter findings")
+
+        # ── React Native Security Intelligence (Phase 2.2) ────────────────────
+        # Same canonical model as Android/Flutter, gated on the framework flag.
+        if results.get("framework", {}).get("type") == "react_native":
+            try:
+                react_native_analyzer.analyze([app_bundle or tmpdir], results, platform="ios")
+            except Exception:
+                log.exception("[react_native] iOS analysis failed; continuing without RN findings")
 
         # ── Cross-dedup: remove JWT values already in jwts section ────────────
         jwt_values = {j["value"] for j in results.get("jwts", []) if j.get("value")}

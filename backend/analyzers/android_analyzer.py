@@ -48,6 +48,7 @@ from .api_analyzer import analyze_android_apis, extract_emails_from_app, detect_
 from .domain_analyzer import check_domains
 from . import network_intel
 from . import flutter_analyzer
+from . import react_native_analyzer
 from .evidence_scanner import (
     scan_directory_for_secrets, scan_directory_for_ips,
     scan_directory_for_jwts, extract_urls
@@ -474,9 +475,16 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         # ── Network security config ───────────────────────────────────────────
         _analyze_network_security_config(tmpdir, results)
 
-        # ── React Native bundle analysis ──────────────────────────────────────
+        # ── React Native Security Intelligence (Phase 2.2) ────────────────────
+        # First-class sub-analyzer (replaces the old inline _analyze_rn_bundle),
+        # mirroring Flutter: RN-idiomatic findings (native bridge / storage / network /
+        # deep links / env) + canonical secrets/endpoints into the EXISTING streams.
         if results["framework"]["type"] == "react_native":
-            _analyze_rn_bundle(tmpdir, results)
+            try:
+                rn_roots = (preferred_source_dirs[:] or []) + [tmpdir]
+                react_native_analyzer.analyze(rn_roots, results, platform="android")
+            except Exception:
+                log.exception("[react_native] analysis failed; continuing without RN findings")
         # ── Flutter Security Intelligence (Phase 2.1) ─────────────────────────
         # Gated on the existing framework detection — mirrors the RN sub-analyzer.
         # Contributes canonical findings/secrets/endpoints to the EXISTING streams,
@@ -2267,56 +2275,10 @@ def _analyze_network_security_config(tmpdir, results):
                 })
 
 
-# ─── React Native bundle analysis ─────────────────────────────────────────────
-def _analyze_rn_bundle(tmpdir, results):
-    bundle_path = None
-    for root, _, files in os.walk(tmpdir):
-        for f in files:
-            if f.endswith(".bundle") or f == "index.android.bundle":
-                bundle_path = os.path.join(root, f)
-                break
-
-    if not bundle_path:
-        return
-
-    try:
-        with open(bundle_path, "r", errors="replace") as f:
-            content = f.read()
-
-        # Scan bundle for secrets
-        bundle_secrets = scan_text_for_secrets(content, relativize_path(bundle_path, tmpdir))
-        seen = {f"{s['name']}:{s['value']}" for s in results["secrets"]}
-        for s in bundle_secrets:
-            key = f"{s['name']}:{s['value']}"
-            if key not in seen:
-                results["secrets"].append(s)
-
-        # Extract URLs
-        urls = extract_urls(content)
-        seen_urls = set(results["endpoints"])
-        results["endpoints"].extend(u for u in urls if u not in seen_urls)
-
-        # Look for API base URLs
-        api_patterns = [
-            r'(?:baseURL|apiUrl|BASE_URL|API_URL|api_base)[\'"\s:=]+[\'"]?(https?://[^\s\'"]+)',
-            r'(?:host|server|endpoint)[\'"\s:=]+[\'"]?(https?://[^\s\'"]+)',
-        ]
-        for pat in api_patterns:
-            for m in re.findall(pat, content):
-                if m and m not in seen_urls:
-                    results["endpoints"].append(m)
-                    seen_urls.add(m)
-
-        results["findings"].append({
-            "title":          "React Native JS Bundle Analysis Complete",
-            "severity":       "info",
-            "category":       "Framework",
-            "description":    f"JS bundle analyzed. Found {len(bundle_secrets)} potential secrets and {len(urls)} endpoints directly in bundle. "
-                              "Full business logic is readable without decompilation.",
-            "recommendation": "Use Hermes AOT compilation to convert bundle to bytecode. Consider additional obfuscation.",
-        })
-    except Exception:
-        pass
+# React Native bundle analysis is handled by the first-class `react_native_analyzer`
+# sub-analyzer (Phase 2.2), gated on `framework == "react_native"` above — it replaces
+# the former inline `_analyze_rn_bundle`. Generic JS dangerous-sink detection + bundle
+# inventory remain in `js_bundle_analyzer` (which runs for every app).
 
 
 # ─── DEX string scanning ──────────────────────────────────────────────────────

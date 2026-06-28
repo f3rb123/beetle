@@ -70,10 +70,13 @@ export const ENGINEERING_MODULES = [
     id: 'react-native',
     name: 'React Native Security Intelligence',
     icon: Atom,
-    status: MODULE_STATUS.COMING_SOON,
-    description: 'JavaScript bundle and native-bridge analysis for React Native apps.',
+    status: MODULE_STATUS.AVAILABLE,
+    description: 'JS bundle & native-bridge analysis — NativeModules, storage, network, secrets.',
     capability: 'Hermes/JSC bundle inspection, bridge attack-surface mapping.',
-    eta: 'Planned',
+    // React Native ships as an APK or IPA; the existing upload + auto-detection handle
+    // it, and react_native_analyzer runs when the framework is detected.
+    accept: '.apk,.ipa',
+    platform: 'react_native',
   },
   {
     id: 'semgrep',
