@@ -226,7 +226,8 @@ def test_annotate_non_destructive_and_regression():
 
     annotate(results)
 
-    NEW = {"secret_intelligence", "secret_status", "secret_overall_confidence"}
+    NEW = {"secret_intelligence", "secret_status", "secret_overall_confidence",
+           "secret_context_score", "secret_validation_reason"}
     for orig, now in zip(before, results["secrets"]):
         for k, v in orig.items():
             _check(k in now and now[k] == v, f"annotate changed existing key {k}")

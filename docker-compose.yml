@@ -2,27 +2,30 @@ services:
   backend:
     build: ./backend
     container_name: cortex-backend
+
     volumes:
       - cortex-uploads:/tmp/cortex
       - cortex-data:/data
 
     environment:
+      # Core configuration
       - MAX_UPLOAD_SIZE=200
       - CORTEX_DATA_DIR=/data
       - JADX_PATH=/opt/jadx/bin/jadx
       - APKTOOL_PATH=/usr/local/bin/apktool
 
-      # Cap the jadx JVM heap (jadx only — does not affect apktool or any other tool)
+      # JADX
       - CORTEX_JADX_HEAP=4g
-
-      # Writable HOME/XDG base for jadx runtime state
       - CORTEX_JADX_STATE_DIR=/tmp/jadx
 
-      # AI providers
+      # AI Providers
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+
+      # Threat Intelligence
+      - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY}
 
     restart: unless-stopped
 
@@ -32,35 +35,39 @@ services:
     cpus: ${CORTEX_BACKEND_CPUS:-4.0}
     pids_limit: 512
 
-    # Drop all Linux capabilities
+    # Harden container
     cap_drop:
       - ALL
 
     security_opt:
       - no-new-privileges:true
 
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9005/api/health >/dev/null 2>&1 || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-
     read_only: true
 
     tmpfs:
       - /tmp:size=2g,mode=1777
 
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:9005/api/health >/dev/null 2>&1 || exit 1"
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
   frontend:
     build: ./frontend
     container_name: cortex-frontend
 
-    ports:
-      - "9005:80"
-
     depends_on:
       backend:
         condition: service_healthy
+
+    ports:
+      - "9005:80"
 
     restart: unless-stopped
     mem_limit: ${CORTEX_FRONTEND_MEM:-256m}

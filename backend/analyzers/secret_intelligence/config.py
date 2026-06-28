@@ -203,3 +203,90 @@ DEGENERATE_UUIDS = frozenset((
     "ffffffff-ffff-ffff-ffff-ffffffffffff",
     "11111111-1111-1111-1111-111111111111",
 ))
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# CONTEXT VALIDATION  (Phase 1.91 — variable name + nearby usage + dead constant)
+# ════════════════════════════════════════════════════════════════════════════
+# These let Beetle keep application-specific / custom enterprise secrets while
+# refusing to report a long random string *simply because it is long*. They read
+# only the already-captured snippet / code_context / detector name — no file
+# re-read, no network. A GENERIC value with NONE of these signals is treated as an
+# unreferenced constant; a GENERIC value WITH them is corroborated as a real secret.
+
+# Identifier tokens that, when they name the assignment holding the value, signal a
+# genuine credential (variable-name analysis).
+CONTEXT_VAR_NAME_HINTS = (
+    "apikey", "api_key", "apisecret", "api_secret", "secretkey", "secret_key",
+    "clientsecret", "client_secret", "accesstoken", "access_token",
+    "bearertoken", "bearer_token", "refreshtoken", "refresh_token",
+    "privatekey", "private_key", "signingkey", "signing_key",
+    "encryptionkey", "encryption_key", "consumerkey", "consumer_key",
+    "consumersecret", "consumer_secret", "authkey", "auth_key",
+    "apitoken", "api_token", "password", "passwd", "pwd", "credential",
+    "secret", "token", "auth_secret",
+)
+
+# Security / credential APIs that, when used near the value, corroborate it
+# (nearby-usage analysis).
+CONTEXT_USAGE_HINTS = (
+    "authorization", "bearer ", "basic ", "x-api-key", "x-auth-token",
+    ".header(", ".addheader", "setrequestproperty", "httpurlconnection",
+    "httpsurlconnection", "retrofit", "okhttp", "interceptor",
+    "cipher", "keystore", "keypair", "secretkeyspec", "ivparameterspec",
+    "sharedpreferences", "encryptedsharedpreferences",
+    "firebase", "firebaseapp", "getinstance", "credentials", "oauth",
+    "amazonaws", "cognito", "awscredentials", "signrequest",
+)
+
+# Context kinds (from _context_kind) that are themselves a strong secret surface.
+CONTEXT_STRONG_KINDS = frozenset((
+    "buildconfig", "properties", "config", "gradle",
+))
+
+# Declaration shapes that mark a (possibly inert) constant.
+CONTEXT_CONSTANT_DECL = (
+    "static final", "public static final", "private static final",
+    "const ", "const val ", " val ", "@stringdef",
+)
+
+CONTEXT_BASE = 50
+CONTEXT_POINTS = {
+    "var_name":        30,   # the assignment identifier names a credential
+    "usage":           25,   # a security/credential API is used nearby
+    "strong_file":     15,   # value lives in BuildConfig / Config / Properties
+    "provider_format": 20,   # value already matched a provider format (corroborates)
+}
+CONTEXT_DEAD_CONSTANT_PENALTY = 35   # constant decl, no credential name/usage → inert
+CONTEXT_NO_SIGNAL_PENALTY = 25       # generic value, snippet present, zero positive signals
+
+# A GENERIC/WEAK value whose context score is at/below this — AND whose snippet was
+# actually inspected — is the classic "long random string" false positive (UUID,
+# hash, library constant, crypto parameter). It is rejected as unreferenced.
+CONTEXT_GENERIC_FP_MAX = 35
+# At/above this, a GENERIC value's credential context is strong enough to
+# corroborate it as a real secret (validation bonus).
+CONTEXT_STRONG_MIN = 75
+CONTEXT_VALIDATION_BONUS = 20
+
+# ════════════════════════════════════════════════════════════════════════════
+# VISIBILITY  (Phase 1.91 — consumed by secret_intel's suppression gate)
+# ════════════════════════════════════════════════════════════════════════════
+# The engine classifies; secret_intel decides what an analyst sees by DEFAULT.
+# Secrets the engine rejects (these statuses) or scores below the floor are moved
+# to the suppressed partition — KEPT and COUNTED, never silently dropped.
+#
+# The full vocabulary of statuses the engine treats as non-secrets. The consumer
+# (``secret_intel``) splits these by CERTAINTY before suppressing: PUBLIC_VALUE and
+# DOC_EXAMPLE are DEFINITIVE (a public cert is public; a doc example is matched by an
+# exact value hash) and may suppress even a recognized format; FALSE_POSITIVE and
+# GENERATED_CONSTANT are HEURISTIC and must never hide a value that also carries a
+# recognized provider/structured format (so a real key is never lost to an FP guess).
+REJECT_STATUSES = frozenset((
+    Status.FALSE_POSITIVE, Status.DOC_EXAMPLE,
+    Status.PUBLIC_VALUE, Status.GENERATED_CONSTANT,
+))
+# Overall-confidence floor below which a value with NO recognized provider/
+# structured format is suppressed from the default view. Recognized-format
+# secrets (format_valid) and Probable/Validated secrets are never floored out.
+SUPPRESS_OVERALL_FLOOR = 45

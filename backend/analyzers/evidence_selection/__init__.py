@@ -23,8 +23,10 @@ from . import library, scoring
 from .config import SELECTION_VERSION
 from .engine import annotate, bug_bounty_enabled, select
 from .scoring import register_contributor
+from .view import build_evidence_view, primary_location
 
 __all__ = [
     "annotate", "select", "register_contributor", "bug_bounty_enabled",
+    "build_evidence_view", "primary_location",
     "library", "scoring", "SELECTION_VERSION",
 ]

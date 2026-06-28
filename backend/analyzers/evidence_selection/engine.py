@@ -26,11 +26,12 @@ import os
 
 from ..canonical_finding import severity_rank
 from ..ownership import context_from_results
-from ..ownership.types import OwnershipContext
+from ..ownership.types import OwnershipContext, OwnerType
 from . import config as C
 from . import scoring
 from .library import classify_file
 from .scoring import Candidate, SelectionContext
+from .view import build_evidence_view
 
 log = logging.getLogger("cortex.evidence_selection")
 
@@ -57,9 +58,29 @@ def _int(v) -> int:
         return 0
 
 
-def _candidates_from_finding(f: dict) -> list[Candidate]:
+def _is_manifest_derived(f: dict) -> bool:
+    if str(f.get("evidence_type") or "").lower() == "manifest":
+        return True
+    cat = str(f.get("category") or "").lower()
+    if any(m in cat for m in C.MANIFEST_CATEGORIES):
+        return True
+    # If a candidate location is already the manifest, the finding is declaration-
+    # driven even when its category is ambiguous (e.g. a real manifest finding that
+    # was filed under "Configuration"/"Network Security").
+    paths = [f.get("file_path") or ""] + [
+        e.get("path", "") for e in (f.get("file_evidence") or []) if isinstance(e, dict)]
+    return any((p or "").replace("\\", "/").lower().rsplit("/", 1)[-1] in C.MANIFEST_FILENAMES
+               for p in paths)
+
+
+def _manifest_filename(platform: str) -> str:
+    return "Info.plist" if (platform or "").lower() == "ios" else "AndroidManifest.xml"
+
+
+def _candidates_from_finding(f: dict, platform: str = "android") -> list[Candidate]:
     """De-duped candidate proof locations for a finding (file_path + file_evidence
-    + fusion merged_locations)."""
+    + fusion merged_locations + a synthesized manifest candidate for declaration-
+    driven findings)."""
     out: list[Candidate] = []
     seen: set = set()
 
@@ -68,7 +89,7 @@ def _candidates_from_finding(f: dict) -> list[Candidate]:
         if not path:
             return
         line = _int(line)
-        key = (path, line)
+        key = (path.replace("\\", "/").lower(), line)
         if key in seen:
             return
         seen.add(key)
@@ -83,6 +104,14 @@ def _candidates_from_finding(f: dict) -> list[Candidate]:
     for loc in f.get("merged_locations") or []:
         if isinstance(loc, dict):
             add(loc.get("file_path"), loc.get("line"), "", "fusion")
+    # Declaration-driven findings: the manifest is the authoritative proof. Add it as
+    # a candidate (if not already present) so an exported component / permission /
+    # deep-link finding can point at AndroidManifest.xml instead of the SDK class
+    # that implements it. The manifest scoring signal makes it win for these.
+    if _is_manifest_derived(f):
+        mname = _manifest_filename(platform)
+        if not any(c.file_path.replace("\\", "/").lower().endswith(mname.lower()) for c in out):
+            add(mname, f.get("line") or 0, f.get("snippet") or "", "manifest")
     return out
 
 
@@ -123,19 +152,23 @@ def select(f: dict, ctx: OwnershipContext | None = None, *,
     adds ``(file,line)`` of the chosen primary to ``already_selected`` (cross-finding
     de-noise) when that set is supplied.
     """
-    candidates = _candidates_from_finding(f)
+    platform = (ctx.platform if ctx and ctx.platform else "android")
+    candidates = _candidates_from_finding(f, platform)
     if not candidates:
         return {"version": C.SELECTION_VERSION, "primary": {}, "supporting": [],
                 "rejected": [], "candidate_count": 0,
                 "reason": "No proof location available for this finding."}
 
+    is_chain = bool(f.get("is_attack_chain") or f.get("in_attack_chain"))
     sctx = SelectionContext(
         bug_bounty=bug_bounty,
         reachability=str(f.get("reachability") or "").upper(),
-        in_attack_chain=bool(f.get("in_attack_chain") or f.get("is_attack_chain")),
+        in_attack_chain=is_chain,
         validated=(str(f.get("validation_status") or "").lower() == "valid"
                    or f.get("validated") is True),
         detection_count=max(_int(f.get("detection_count")), 1),
+        manifest_derived=_is_manifest_derived(f),
+        chain=is_chain,
         already_selected=already_selected if already_selected is not None else set(),
         file_engine_counts=_file_engine_counts(f),
     )
@@ -162,6 +195,21 @@ def select(f: dict, ctx: OwnershipContext | None = None, *,
     if already_selected is not None:
         already_selected.add((primary.file_path, primary.line))
 
+    # Framework-only: the finding's ONLY proof is framework/library code (no
+    # application/manifest/unknown candidate). The primary is then legitimately a
+    # framework file (the "no application-owned evidence exists" exception), but it
+    # is flagged + honestly explained so rendering never presents it as app proof.
+    def _is_nonframework(c):
+        ot = c.classification.owner_type
+        return (c.classification.is_application or ot in (OwnerType.UNKNOWN, "")
+                or (c.file_path or "").replace("\\", "/").lower().rsplit("/", 1)[-1] in C.MANIFEST_FILENAMES)
+    framework_only = not any(_is_nonframework(c) for c in candidates)
+
+    reason = _selection_reason(primary, len(candidates))
+    if framework_only:
+        reason = ("Only framework/library evidence exists for this finding — no "
+                  "application-owned proof was detected. Shown for completeness.")
+
     return {
         "version": C.SELECTION_VERSION,
         "bug_bounty_mode": bug_bounty,
@@ -169,8 +217,49 @@ def select(f: dict, ctx: OwnershipContext | None = None, *,
         "primary": _entry(primary),
         "supporting": [_entry(c) for c in supporting],
         "rejected": [_entry(c) for c in rejected],
-        "reason": _selection_reason(primary, len(candidates)),
+        "framework_only": framework_only,
+        "reason": reason,
     }
+
+
+# Owner types whose primary is safe to promote into the finding's display location
+# (the analyst's own code / the authoritative manifest). We never promote a
+# library/framework/generated file over whatever was already there.
+_PROMOTABLE_OWNERS = {OwnerType.APPLICATION, OwnerType.UNKNOWN}
+
+
+def _promote_primary(f: dict, sel: dict) -> bool:
+    """Promote the selected primary into the finding's legacy location fields.
+
+    Returns True if a correction was applied. Conservative: only when the primary
+    is application/manifest-owned and points at a DIFFERENT file than the current
+    ``file_path`` — so we only ever replace a worse (library/framework) location
+    with a better one, never the reverse. The original detection site is preserved.
+    """
+    prim = (sel or {}).get("primary") or {}
+    new_path = prim.get("file_path")
+    if not new_path:
+        return False
+    cur_path = f.get("file_path") or f.get("file") or ""
+    if new_path == cur_path:
+        return False
+    owner = prim.get("owner_type")
+    is_manifest = new_path.replace("\\", "/").lower().rsplit("/", 1)[-1] in C.MANIFEST_FILENAMES
+    if owner not in _PROMOTABLE_OWNERS and not is_manifest:
+        return False
+    # Preserve the detection site once (idempotent across re-runs).
+    f.setdefault("detected_location", {
+        "file_path": cur_path,
+        "line": f.get("line") or f.get("line_number") or 0,
+        "snippet": f.get("snippet") or "",
+    })
+    f["legacy_file_path"] = cur_path
+    f["file_path"] = new_path
+    f["line"] = prim.get("line") or 0
+    f["line_number"] = prim.get("line") or 0
+    if prim.get("snippet"):
+        f["snippet"] = prim["snippet"]
+    return True
 
 
 def _selection_reason(primary: Candidate, n: int) -> str:
@@ -201,16 +290,27 @@ def annotate(results: dict, *, platform: str | None = None) -> dict:
     bb = bug_bounty_enabled(results)
     already: set = set()
 
+    # Skip bridged secret→finding mirrors: they are removed at reconcile and must
+    # not claim a shared proof file in the cross-finding de-noise pass.
     ordered = sorted(
-        [f for f in findings if isinstance(f, dict)],
+        [f for f in findings if isinstance(f, dict) and not f.get("secret_bridge")],
         key=lambda f: (severity_rank(f.get("severity", "info")),
                        -_int(f.get("overall_confidence"))))
-    annotated = multi = 0
+    annotated = multi = corrected = 0
     for f in ordered:
         sel = select(f, ctx, bug_bounty=bb, already_selected=already)
         f["evidence_selection"] = sel
         if sel.get("primary"):
             f["primary_evidence"] = sel["primary"]
+        # Report-accuracy keystone: stamp the precomputed render view and promote the
+        # selected primary into the legacy location fields so EVERY consumer (incl.
+        # un-migrated ones and the frontend reading file_path) shows the correct
+        # proof. Conservative + reversible: only when the primary is application /
+        # manifest owned and differs from the current file_path; the detection site
+        # is preserved under f["detected_location"].
+        if _promote_primary(f, sel):
+            corrected += 1
+        f["evidence_view"] = build_evidence_view(f)
         annotated += 1
         if sel.get("candidate_count", 0) > 1:
             multi += 1
@@ -220,6 +320,7 @@ def annotate(results: dict, *, platform: str | None = None) -> dict:
         "bug_bounty_mode": bb,
         "findings_annotated": annotated,
         "multi_candidate_findings": multi,
+        "primary_location_corrected": corrected,
     }
     results["evidence_selection_summary"] = summary
     log.info("[evidence_selection] %s | %s", ctx.platform, summary)

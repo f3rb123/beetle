@@ -307,12 +307,29 @@ def _chain_severity(goal: str, exploitability: int, blocked: bool) -> str:
 # ════════════════════════════════════════════════════════════════════════════
 # Chain assembly
 # ════════════════════════════════════════════════════════════════════════════
+def _selection_primary(f: dict):
+    """The Evidence Selection primary location, if present. Lazy import avoids any
+    import cycle and keeps attack chains independent when selection didn't run."""
+    try:
+        from ..evidence_selection import primary_location
+        sel = f.get("evidence_selection")
+        if isinstance(sel, dict) and sel.get("primary"):
+            return primary_location(f)
+    except Exception:  # noqa: BLE001
+        pass
+    return "", 0, ""
+
+
 def _aggregate_evidence(findings: list[dict]):
     files, classes, methods, refs = [], [], [], []
     for f in findings:
         eb = f.get("evidence_bundle") or {}
         prim = eb.get("primary") or {}
-        fp = prim.get("relative_path") or prim.get("file_path") or f.get("file_path")
+        # Phase 1.97: prefer the Evidence Selection primary (application-owned, not a
+        # framework/library file) so chains never present a library-only node as
+        # proof. Falls back to the evidence bundle / file_path when selection is absent.
+        sel_file, _sel_line, _sel_snip = _selection_primary(f)
+        fp = sel_file or prim.get("relative_path") or prim.get("file_path") or f.get("file_path")
         if fp and fp not in files:
             files.append(fp)
         loc = prim.get("locator") or {}

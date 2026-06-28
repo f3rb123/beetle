@@ -35,6 +35,23 @@ def _sev_of(f: dict) -> str:
     return s if s in _SEV_RANK else "info"
 
 
+def _what_found_entry(f: dict) -> dict:
+    """A developer-guide row pointing at the SELECTED primary proof (application
+    code / manifest), not a legacy library file. Falls back to legacy fields."""
+    try:
+        from analyzers.evidence_selection import primary_location
+        file_path, line, _snip = primary_location(f)
+    except Exception:  # noqa: BLE001
+        file_path = f.get("file_path") or ""
+        line = f.get("line") or f.get("line_number")
+    return {
+        "title": f.get("title", ""),
+        "severity": _sev_of(f),
+        "file": file_path or "",
+        "line": line,
+    }
+
+
 def _worst_severity(findings: list) -> str:
     if not findings:
         return "info"
@@ -281,12 +298,7 @@ def build_developer_summary(results: dict) -> dict:
             "max_severity": worst,
             "priority": _priority_for(worst),
             "what_found": [
-                {
-                    "title": f.get("title", ""),
-                    "severity": _sev_of(f),
-                    "file": f.get("file_path") or "",
-                    "line": f.get("line") or f.get("line_number"),
-                }
+                _what_found_entry(f)
                 for f in items[:5]
             ],
             "why_dangerous": str(why)[:400],

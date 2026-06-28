@@ -42,6 +42,58 @@ OWNER_NAME_OVERRIDES: dict[str, int] = {
 APP_BUSINESS_LOGIC_BONUS = 20   # app-owned AND carries a real code line/snippet
 APP_USER_SOURCE_BONUS    = 10   # decompiled app source (not a resource/binary)
 
+# Manifest declaration is the authoritative proof for manifest-derived findings
+# (exported components, permissions, deep links, network-security config). Policy:
+# "manifest findings ALWAYS prefer AndroidManifest.xml" — so the bonus is set high
+# enough that the manifest outranks even an application source candidate for these
+# findings. File-scope so it drives selection.
+MANIFEST_DECLARATION_BONUS = 80
+# Filenames treated as the security manifest/config of record, per platform.
+MANIFEST_FILENAMES = ("androidmanifest.xml", "info.plist")
+# A finding is "manifest-derived" when its evidence_type is manifest, a candidate is
+# already the manifest, or its category is a DECLARATION-only category below. Kept
+# strict on purpose: ambiguous categories like "Network Security"/"Configuration"
+# span both manifest config AND code (e.g. a TrustManager), so they are NOT auto-
+# treated as manifest unless evidence_type=="manifest" or a manifest candidate
+# exists. Data — extend with declaration-only categories only.
+MANIFEST_CATEGORIES = (
+    "permissions", "permission", "deeplinks", "deep links",
+    "exported component", "exported components", "components", "component",
+    "manifest", "backup", "debuggable", "task affinity",
+)
+
+# XML-aware manifest snippet selection: map a finding (by title keyword) to the
+# EXACT manifest attribute it triggers, so the snippet shows e.g.
+# android:debuggable="true" — not a nearby unrelated attribute. (keyword, attr,
+# default_value). Order matters: first keyword found in the title wins.
+MANIFEST_FINDING_ATTRS = (
+    ("debuggable", "debuggable", "true"),
+    ("cleartext", "usesCleartextTraffic", "true"),
+    ("allowbackup", "allowBackup", "true"),
+    ("backup", "allowBackup", "true"),
+    ("legacy external storage", "requestLegacyExternalStorage", "true"),
+    ("legacy storage", "requestLegacyExternalStorage", "true"),
+    ("test only", "testOnly", "true"),
+    ("testonly", "testOnly", "true"),
+    ("task affinity", "taskAffinity", None),
+    ("taskaffinity", "taskAffinity", None),
+    ("network security config", "networkSecurityConfig", None),
+    ("network security configuration", "networkSecurityConfig", None),
+    ("profileable", "profileable", "true"),
+    ("exported", "exported", "true"),
+)
+
+# Manifest attributes worth surfacing as the focused evidence snippet (security-
+# relevant). Benign attributes (label/icon/theme/name) are dropped. Data-driven.
+SECURITY_MANIFEST_ATTRS = (
+    "debuggable", "usescleartexttraffic", "allowbackup", "exported", "testonly",
+    "networksecurityconfig", "requestlegacyexternalstorage", "shareduserid",
+    "taskaffinity", "launchmode", "granturipermissions",
+    "protectionlevel", "permission", "readpermission", "writepermission",
+    "host", "scheme", "path", "pathprefix", "pathpattern", "mimetype",
+    "profileable", "extractnativelibs", "directbootaware",
+)
+
 # ── Finding-level corroboration signals ───────────────────────────────────────
 VALIDATED_BONUS          = 30   # finding is live-validated
 REACHABLE_BONUS          = 25   # reachability == YES
@@ -54,6 +106,57 @@ PER_EXTRA_ENGINE         = 0    # (reserved) additional per-engine credit
 DEAD_CODE_PENALTY        = -20  # app-owned but provably unreachable (heuristic)
 ALREADY_SELECTED_PENALTY = -25  # this exact (file,line) is another finding's primary
 BINARY_DUMP_PENALTY      = -15  # evidence points at a *.dex/.so string dump
+
+# ── Framework suppression (Phase 1.997) ───────────────────────────────────────
+# Framework / well-known-library code must almost never become Primary Evidence.
+# Ownership already classifies most of these (ThirdPartySDK/GoogleSDK → negative),
+# but this is a deterministic, data-driven SECOND gate keyed on the path itself so a
+# framework file is deprioritized even when ownership returns Unknown (obfuscated or
+# not-yet-fingerprinted). Matched as path segments (case-insensitive). Extend freely.
+FRAMEWORK_PATH_PREFIXES = (
+    "androidx/", "android/support/", "com/android/support/",
+    "com/google/", "com/google/android/material/", "com/google/firebase/",
+    "kotlin/", "kotlinx/", "okhttp3/", "okhttp/", "okio/",
+    "retrofit2/", "retrofit/", "com/bumptech/glide/", "coil/",
+    "androidx/compose/", "com/google/android/gms/", "dagger/", "hilt_aggregated_deps/",
+    "io/reactivex/", "com/squareup/", "org/jetbrains/", "scala/",
+)
+# Applied IN ADDITION to the ownership delta (file-scope). Big enough that no
+# framework file outranks an application/manifest proof, regardless of ownership.
+FRAMEWORK_PATH_PENALTY = -45
+
+# ── Attack-chain evidence policy (Phase 1.997) ────────────────────────────────
+# Chains pick evidence differently: Manifest → app business logic → configuration →
+# resources → supporting → framework. These file-scope bonuses (only applied in
+# chain mode) bias toward declaration/config evidence the analyst can act on.
+CHAIN_MANIFEST_BONUS = 80
+CHAIN_CONFIG_BONUS = 22
+CHAIN_RESOURCE_BONUS = 14
+CHAIN_FRAMEWORK_EXTRA_PENALTY = -20
+CONFIG_PATH_HINTS = ("res/xml/", "network_security_config", ".properties", ".cfg",
+                     ".conf", ".json", "build.gradle", "strings.xml", "/assets/")
+RESOURCE_PATH_HINTS = ("res/values/", "res/raw/", "res/xml/", "/resources/")
+
+# ── Certificate / artifact evidence (Phase 1.997) ─────────────────────────────
+# Certificate / signing findings have no Java source — never render "Unknown file".
+# Map the finding to the real artifact the analyst should inspect.
+ARTIFACT_CATEGORIES = ("certificate", "signing", "code signing", "apk signing")
+CERTIFICATE_ARTIFACT = "APK Signing Block"
+CERTIFICATE_ARTIFACT_LANG = "Signing Metadata"
+# Title keyword → artifact label, so each cert finding names its real evidence.
+CERTIFICATE_ARTIFACT_LABELS = (
+    ("chain", "Certificate Chain"),
+    ("expired", "Signing Certificate"),
+    ("self-signed", "Signing Certificate"),
+    ("rsa", "Signing Certificate"),
+    ("key", "Signing Certificate"),
+    ("v1", "APK Signature Block"),
+    ("v2", "APK Signature Block"),
+    ("v3", "APK Signature Block"),
+    ("scheme", "APK Signature Block"),
+    ("debug", "Signing Certificate"),
+    ("metadata", "APK Metadata"),
+)
 
 # ── Selection thresholds ──────────────────────────────────────────────────────
 # A candidate scoring below this is "rejected" (kept for transparency, not shown as

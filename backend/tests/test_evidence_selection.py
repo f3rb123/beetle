@@ -197,18 +197,32 @@ def test_register_contributor_influences_score():
 
 
 # ── Pipeline / regression ─────────────────────────────────────────────────────
-def test_annotate_is_additive_and_non_destructive():
+def test_annotate_promotes_primary_and_preserves_detection_site():
+    """Phase 1.97 keystone: annotate promotes the app primary into file_path (so all
+    legacy consumers show the right file) while preserving the original detection
+    site under detected_location. This supersedes the 1.96 'never mutate' contract."""
     appfile = f"sources/{APP.replace('.', '/')}/Pay.java"
     f = _f(file_path="sources/androidx/x/A.java", line=1,
            file_evidence=[_ev("sources/androidx/x/A.java", 1), _ev(appfile, 12, "y")])
     res = _results(f)
     es.annotate(res, platform="android")
-    _check(f["file_path"] == "sources/androidx/x/A.java",
-           "annotate must NOT mutate the finding's original file_path (additive only)")
-    _check("evidence_selection" in f and "primary_evidence" in f,
-           "annotate must add evidence_selection + primary_evidence")
-    _check(appfile in f["evidence_selection"]["primary"]["file_path"],
-           "the app file should still be chosen as the primary proof")
+    _check(f["file_path"] == appfile, "annotate must promote the app primary into file_path")
+    _check(f["detected_location"]["file_path"] == "sources/androidx/x/A.java",
+           "the original detection site must be preserved under detected_location")
+    _check(f["legacy_file_path"] == "sources/androidx/x/A.java", "legacy_file_path must be preserved")
+    for k in ("evidence_selection", "primary_evidence", "evidence_view"):
+        _check(k in f, f"annotate must add {k}")
+
+
+def test_library_only_finding_not_falsely_promoted():
+    """A finding whose only proof is a library file must NOT have its file_path
+    replaced by a fabricated app file — promotion only ever improves."""
+    libfile = "sources/androidx/x/A.java"
+    f = _f(file_path=libfile, line=1, file_evidence=[_ev(libfile, 1)])
+    res = _results(f)
+    es.annotate(res, platform="android")
+    _check(f["file_path"] == libfile, "library-only finding must keep its location")
+    _check("detected_location" not in f, "no correction → no detected_location stamped")
 
 
 def test_empty_and_malformed_safe():

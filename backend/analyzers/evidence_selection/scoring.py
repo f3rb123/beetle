@@ -47,6 +47,8 @@ class SelectionContext:
     in_attack_chain: bool = False
     validated: bool = False
     detection_count: int = 1
+    manifest_derived: bool = False       # finding is declaration-driven (manifest/exported/…)
+    chain: bool = False                  # selecting for an attack chain (manifest-first policy)
     already_selected: set = field(default_factory=set)  # (file, line) primaries elsewhere
     file_engine_counts: dict = field(default_factory=dict)  # file -> #engines referencing it
 
@@ -157,12 +159,60 @@ def _binary_dump_signal(c: Candidate, ctx: SelectionContext) -> list:
         if c.classification.is_binary_dump else []
 
 
+def _framework_path_signal(c: Candidate, ctx: SelectionContext) -> list:
+    """Deterministic framework suppression keyed on the PATH (not just ownership),
+    so a framework/library file is deprioritized even when ownership returns Unknown
+    (obfuscated / not-yet-fingerprinted). Application files are never matched here."""
+    if c.classification.is_application:
+        return []
+    path = (c.file_path or "").replace("\\", "/").lower()
+    for frag in C.FRAMEWORK_PATH_PREFIXES:
+        if frag in path:
+            penalty = C.FRAMEWORK_PATH_PENALTY
+            if ctx.chain:
+                penalty += C.CHAIN_FRAMEWORK_EXTRA_PENALTY
+            return [(penalty, "Framework / library code (deprioritized as proof)")]
+    return []
+
+
+def _chain_priority_signal(c: Candidate, ctx: SelectionContext) -> list:
+    """Attack-chain evidence policy: Manifest → app logic → config → resources →
+    supporting → framework. Only applied when selecting for a chain."""
+    if not ctx.chain:
+        return []
+    path = (c.file_path or "").replace("\\", "/").lower()
+    name = path.rsplit("/", 1)[-1]
+    out = []
+    if name in C.MANIFEST_FILENAMES:
+        out.append((C.CHAIN_MANIFEST_BONUS, "Attack chain: manifest declaration"))
+    elif any(h in path for h in C.CONFIG_PATH_HINTS):
+        out.append((C.CHAIN_CONFIG_BONUS, "Attack chain: configuration evidence"))
+    elif any(h in path for h in C.RESOURCE_PATH_HINTS):
+        out.append((C.CHAIN_RESOURCE_BONUS, "Attack chain: resource evidence"))
+    return out
+
+
+def _manifest_signal(c: Candidate, ctx: SelectionContext) -> list:
+    """For declaration-driven findings, the manifest is the authoritative proof —
+    it must beat a framework/library implementation file (e.g. an exported component
+    should point at AndroidManifest.xml, not the SDK class that implements it)."""
+    if not ctx.manifest_derived:
+        return []
+    name = (c.file_path or "").replace("\\", "/").lower().rsplit("/", 1)[-1]
+    if name in C.MANIFEST_FILENAMES:
+        return [(C.MANIFEST_DECLARATION_BONUS, "Manifest declaration (authoritative for this finding)")]
+    return []
+
+
 # Built-ins. Registration order is irrelevant (deltas sum); kept logical so the
 # reason bullets read in a sensible sequence. File-scope signals are intrinsic to
 # the candidate file; finding-scope signals are finding-wide corroboration.
 _BUILTIN_CONTRIBUTORS = (
     (_ownership_signal, FILE_SCOPE),
     (_app_relevance_signal, FILE_SCOPE),
+    (_framework_path_signal, FILE_SCOPE),
+    (_chain_priority_signal, FILE_SCOPE),
+    (_manifest_signal, FILE_SCOPE),
     (_multi_engine_file_signal, FILE_SCOPE),
     (_already_selected_signal, FILE_SCOPE),
     (_binary_dump_signal, FILE_SCOPE),

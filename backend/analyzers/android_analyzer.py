@@ -401,6 +401,7 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         # ── Androguard analysis ───────────────────────────────────────────────
         manifest_started = time.perf_counter()
         log.info(f"[{scan_id}] stage=manifest_analysis start")
+        apk = None
         if ANDROGUARD:
             try:
                 apk = AndroAPK(apk_path)
@@ -417,6 +418,19 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         # Guarantees View Code shows readable XML (never the compiled binary
         # AXML in apk_extract) even when apktool failed or timed out.
         _persist_decoded_manifest(scan_id, results)
+
+        # ── Persist decoded resources.arsc string values for the secret walk ──
+        # String resources (res/values/strings.xml) are where Android apps embed
+        # Cognito pool ids, Firebase/API config, etc. — but they live ONLY in the
+        # compiled resources.arsc. jadx runs with --no-res and apktool's resource
+        # decoder can throw on some APKs, leaving NO decoded strings.xml, so those
+        # values never reach the unified secret walk (which scans jadx+apktool).
+        # androguard (already loaded) reconstructs them exactly like MobSF does;
+        # we write them to the canonical apktool/res/values/strings.xml location
+        # the walk already scans — only when apktool didn't produce one itself.
+        arsc_dir = _persist_decoded_resource_strings(scan_id, apk)
+        if arsc_dir and arsc_dir not in preferred_source_dirs:
+            preferred_source_dirs.append(arsc_dir)
 
         # ── Framework detection ───────────────────────────────────────────────
         _record_module_metric(results, "manifest_analysis", manifest_started, components=sum(len(results["attack_surface"].get(key, [])) for key in ("activities", "services", "receivers", "providers")))
@@ -956,6 +970,18 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         triage.annotate(results)
     except Exception:
         log.exception("[triage] failed; findings left without triage decisions")
+    # ── Phase 1.96/1.97: Intelligent Evidence Selection + Report Accuracy — pick the
+    # strongest, most application-relevant primary proof per finding (demoting AndroidX
+    # / GMS / generated / framework files; preferring the manifest for declaration-
+    # driven findings), stamp the unified evidence_view every renderer consumes, and
+    # promote the chosen primary into the legacy location fields so all surfaces show
+    # the correct file. Runs BEFORE attack chains so chains reference the corrected
+    # primaries; ownership/confidence/evidence/reachability are already present. ──
+    try:
+        from . import evidence_selection
+        evidence_selection.annotate(results, platform="android")
+    except Exception:
+        log.exception("[evidence_selection] failed; findings left without proof selection")
     # ── Phase 1.7: Attack Chain Engine v2 — build realistic, evidence-backed,
     # explainable attacker journeys from the triaged findings + attack surface
     # (SAFE CHAINING: framework noise / suppressed / FP secrets / generated code
@@ -987,16 +1013,6 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         _ds_fusion.reconcile_bridged_findings(results)
     except Exception:
         log.exception("[detection_sources] bridge reconcile failed")
-    # ── Phase 1.96: Intelligent Evidence Selection — for every finding, pick the
-    # strongest, most application-relevant primary proof (demoting AndroidX / GMS /
-    # generated / framework files to supporting/rejected) with an explanation. Runs
-    # LATE so ownership/confidence/reachability/attack-chain/fusion signals are all
-    # present; additive (writes evidence_selection, never mutates file_path). ──
-    try:
-        from . import evidence_selection
-        evidence_selection.annotate(results, platform="android")
-    except Exception:
-        log.exception("[evidence_selection] failed; findings left without proof selection")
     # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
     try:
         from . import analyst_intel
@@ -2540,6 +2556,46 @@ def _persist_decoded_manifest(scan_id: str, results: dict):
         dest.write_text(manifest_xml, encoding="utf-8", errors="replace")
     except Exception:
         pass
+
+
+def _persist_decoded_resource_strings(scan_id: str, apk) -> str | None:
+    """Decode resources.arsc string values to a scannable apktool/res/values/strings.xml.
+
+    Why this exists: the AWS Cognito Identity Pool id (and most Android string-resource
+    secrets — Firebase/API config, etc.) live only inside the compiled ``resources.arsc``.
+    Beetle's secret walk scans the jadx + apktool trees, but jadx is invoked with
+    ``--no-res`` and apktool's resource decoder can throw on some APKs (it does on
+    InsecureShop) — so no ``strings.xml`` is produced and the value is never matched.
+    MobSF finds it because it reads ``resources.arsc`` directly via androguard's
+    ``ARSCParser``; we do the same, reusing the already-loaded APK object, and write the
+    reconstructed ``<string name=…>…</string>`` table to the canonical decoded location
+    the unified walk already scans. This is a FALLBACK only — if a real apktool decode
+    already produced strings.xml we never overwrite it, and there is no second matcher:
+    the value flows through the one ``secret_catalog.combined()`` walk like any other.
+
+    Returns the apktool root dir (so the caller can ensure it is scanned) or ``None``.
+    """
+    if apk is None:
+        return None
+    try:
+        dest = scan_storage.scan_root(scan_id) / "apktool" / "res" / "values" / "strings.xml"
+        apktool_root = str(scan_storage.scan_root(scan_id) / "apktool")
+        if dest.exists():
+            return apktool_root  # a real apktool decode already wrote it — keep it.
+        arsc = apk.get_android_resources()
+        if arsc is None:
+            return None
+        xml = arsc.get_strings_resources()
+        if isinstance(xml, bytes):
+            xml = xml.decode("utf-8", "replace")
+        if not xml or "<string" not in xml:
+            return None
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(xml, encoding="utf-8", errors="replace")
+        return apktool_root
+    except Exception:
+        log.exception(f"[{scan_id}] resources.arsc string reconstruction failed")
+        return None
 
 
 def _extract_strings_for_viewer(data: bytes, min_len: int = 6) -> str:

@@ -71,6 +71,14 @@ def _ensure_native() -> None:
         register("apkleaks", APKLEAKS_PATTERNS, source="APKLeaks")
     except Exception:
         log.exception("[secret_catalog] failed to register apkleaks patterns")
+    # Phase 1.98: Detection Coverage Expansion contributes its secret-kind gap
+    # patterns (AWS Cognito Identity Pool, Google OAuth client secret, …) into the
+    # SAME catalog, so they are matched by the one combined walk + Secret Intelligence.
+    try:
+        from .detection_coverage import catalog as _coverage_catalog  # registers on import
+        _coverage_catalog.register_all()
+    except Exception:
+        log.exception("[secret_catalog] failed to register coverage patterns")
     _REGISTERED_NATIVE = True
 
 
@@ -88,13 +96,15 @@ def patterns(*provenances: str) -> list[dict]:
 
 
 def combined() -> list[dict]:
-    """Native + APKLeaks rules in one list for a single combined walk.
+    """Native + APKLeaks + Coverage-Expansion rules in one list for a single walk.
 
     Native rules come first so that, on an exact value collision, the native hit
-    is produced first; provenance-aware dedup keeps the APKLeaks hit too, and the
-    fusion layer merges them into ONE finding attributed to both.
+    is produced first; provenance-aware dedup keeps the other hits too, and the
+    fusion layer merges them into ONE finding attributed to every engine. The
+    coverage provenance (Phase 1.98) adds gap patterns that beetle_native/apkleaks
+    miss (e.g. AWS Cognito Identity Pool) — matched in the SAME walk.
     """
-    return patterns("beetle_native", "apkleaks")
+    return patterns("beetle_native", "apkleaks", "coverage")
 
 
 def provenance_summary() -> dict:

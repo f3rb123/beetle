@@ -777,9 +777,42 @@ def _safe(text) -> str:
 
 
 def _format_finding_evidence(finding: dict) -> str:
-    snippets = []
-    evidence_entries = finding.get("file_evidence") or []
+    """Render evidence from the unified Evidence Selection view: the application-
+    relevant Primary proof first, then Supporting proofs, then a collapsed
+    Hidden-library count — instead of a flat list that can lead with an SDK file."""
+    try:
+        from analyzers.evidence_selection import build_evidence_view
+        view = build_evidence_view(finding)
+    except Exception:  # noqa: BLE001
+        view = None
 
+    blocks: list[str] = []
+    if view and view.get("primary", {}).get("file"):
+        p = view["primary"]
+        line_str = f":{p['line']}" if p.get("line") else ""
+        block = f"<b>Primary Evidence:</b> {escape(str(p['file']))}{escape(line_str)}"
+        if p.get("snippet"):
+            block += f"<br/><font face='Courier'>{escape(str(p['snippet'])[:280])}</font>"
+        if p.get("reasons"):
+            block += "<br/><i>Selected: " + escape("; ".join(p["reasons"][:3])) + "</i>"
+        blocks.append(block)
+
+        for s in (view.get("supporting") or [])[:2]:
+            ls = f":{s['line']}" if s.get("line") else ""
+            sb = f"<b>Supporting:</b> {escape(str(s['file']))}{escape(ls)}"
+            if s.get("snippet"):
+                sb += f"<br/><font face='Courier'>{escape(str(s['snippet'])[:200])}</font>"
+            blocks.append(sb)
+
+        hidden = view.get("hidden_library_evidence") or {}
+        if hidden.get("count"):
+            owners = ", ".join(hidden.get("owners") or [])
+            blocks.append(f"<i>Hidden library evidence ({hidden['count']}): {escape(owners)}</i>")
+        if blocks:
+            return "<br/><br/>".join(blocks)
+
+    # Fallback: legacy rendering (selection view unavailable).
+    evidence_entries = finding.get("file_evidence") or []
     if evidence_entries:
         for entry in evidence_entries[:2]:
             path = entry.get("path") or finding.get("file_path") or "Unknown file"
@@ -789,20 +822,20 @@ def _format_finding_evidence(finding: dict) -> str:
             block = f"File: {escape(str(path))}{escape(str(line_str))}"
             if snippet:
                 block += f"<br/><font face='Courier'>{escape(snippet[:280])}</font>"
-            snippets.append(block)
+            blocks.append(block)
     elif finding.get("file_path") or finding.get("snippet"):
         path = finding.get("file_path") or "Unknown file"
         line = f":{finding.get('line')}" if finding.get("line") else ""
         block = f"File: {escape(str(path))}{escape(str(line))}"
         if finding.get("snippet"):
             block += f"<br/><font face='Courier'>{escape(str(finding.get('snippet'))[:280])}</font>"
-        snippets.append(block)
+        blocks.append(block)
 
     code_context = finding.get("code_context")
-    if code_context and not snippets:
-        snippets.append(f"<font face='Courier'>{escape(str(code_context)[:320])}</font>")
+    if code_context and not blocks:
+        blocks.append(f"<font face='Courier'>{escape(str(code_context)[:320])}</font>")
 
-    return "<br/><br/>".join(snippets)
+    return "<br/><br/>".join(blocks)
 
 
 _OWNERSHIP_BADGE_LABELS = {
