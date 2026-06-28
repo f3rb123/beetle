@@ -107,6 +107,32 @@ DEAD_CODE_PENALTY        = -20  # app-owned but provably unreachable (heuristic)
 ALREADY_SELECTED_PENALTY = -25  # this exact (file,line) is another finding's primary
 BINARY_DUMP_PENALTY      = -15  # evidence points at a *.dex/.so string dump
 
+# ── Snippet quality & code relevance (Phase 1.96 — snippet quality) ───────────
+# Selecting the right proof FILE is only half of report quality; among candidates in
+# the SAME file (different lines) the one whose snippet actually shows the triggering
+# code must win. These are FILE-scope but deliberately SMALL — they reorder candidates
+# without ever rejecting application code (app base +40 ≫ these), honoring the spec's
+# "reject weak-relevance evidence UNLESS there is no better alternative".
+SNIPPET_BLANK_PENALTY        = -4   # no code snippet captured at this location
+SNIPPET_IMPORT_ONLY_PENALTY  = -8   # snippet is only imports/package/comments/braces
+SNIPPET_METHOD_SIG_BONUS     = 6    # snippet includes the enclosing method signature
+SNIPPET_CALL_BONUS           = 5    # snippet shows an API call (usage / call proximity)
+SNIPPET_RELEVANT_TOKEN_BONUS = 10   # snippet contains the flagged value / variable / API
+
+# ── Rule specificity (Phase 1.96) ─────────────────────────────────────────────
+# Source confidence / rule specificity is a FINDING-wide signal (same for every
+# candidate, so it never changes WHICH file wins) that raises the displayed evidence
+# score for findings from precise, high-confidence rules. Derived from the detector's
+# numeric confidence; specific (non-generic) CWEs add a little more.
+RULE_SPECIFICITY_HIGH = 12   # detector confidence >= 90
+RULE_SPECIFICITY_MED  = 6    # detector confidence >= 75
+RULE_SPECIFICITY_CWE_BONUS = 4   # a specific CWE is present (not a broad umbrella)
+# Broad umbrella CWEs that do not, by themselves, indicate a specific rule (mirrors
+# the Finding Fusion Engine's broad-CWE list; kept local so this module is standalone).
+BROAD_CWES_FOR_SPECIFICITY = frozenset((
+    "cwe-200", "cwe-284", "cwe-693", "cwe-664", "cwe-noinfo",
+))
+
 # ── Framework suppression (Phase 1.997) ───────────────────────────────────────
 # Framework / well-known-library code must almost never become Primary Evidence.
 # Ownership already classifies most of these (ThirdPartySDK/GoogleSDK → negative),

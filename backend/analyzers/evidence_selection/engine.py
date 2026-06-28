@@ -27,8 +27,11 @@ import os
 from ..canonical_finding import severity_rank
 from ..ownership import context_from_results
 from ..ownership.types import OwnershipContext, OwnerType
+import re
+
 from . import config as C
 from . import scoring
+from . import snippet as snip
 from .library import classify_file
 from .scoring import Candidate, SelectionContext
 from .view import build_evidence_view
@@ -115,6 +118,23 @@ def _candidates_from_finding(f: dict, platform: str = "android") -> list[Candida
     return out
 
 
+def _rule_specificity(f: dict) -> int:
+    """Source-confidence / rule-specificity bonus (finding-wide). Higher for precise,
+    high-confidence detectors and for findings carrying a specific (non-broad) CWE."""
+    spec = 0
+    conf = _int(f.get("confidence")) or _int(f.get("overall_confidence"))
+    if conf >= 90:
+        spec += C.RULE_SPECIFICITY_HIGH
+    elif conf >= 75:
+        spec += C.RULE_SPECIFICITY_MED
+    cwe = str(f.get("cwe") or "").strip().lower()
+    m = re.search(r"cwe[-\s]?(\d+)", cwe)
+    norm = f"cwe-{m.group(1)}" if m else ""
+    if norm and norm not in C.BROAD_CWES_FOR_SPECIFICITY:
+        spec += C.RULE_SPECIFICITY_CWE_BONUS
+    return spec
+
+
 def _file_engine_counts(f: dict) -> dict:
     """Per-file count of detection engines that referenced it (from fusion sources)."""
     counts: dict[str, int] = {}
@@ -171,6 +191,8 @@ def select(f: dict, ctx: OwnershipContext | None = None, *,
         chain=is_chain,
         already_selected=already_selected if already_selected is not None else set(),
         file_engine_counts=_file_engine_counts(f),
+        match_tokens=snip.relevant_tokens(f),
+        rule_specificity=_rule_specificity(f),
     )
 
     for c in candidates:
@@ -186,6 +208,15 @@ def select(f: dict, ctx: OwnershipContext | None = None, *,
 
     primary = candidates[0]
     rest = candidates[1:]
+    # Snippet quality (Phase 1.96): refine the primary's displayed snippet to the most
+    # relevant line — dropping import/comment/brace noise — using the richer finding
+    # code_context when the primary IS the finding's own detection site, else the
+    # candidate's own captured snippet. Never blanks a snippet (falls back to the
+    # original). Only the primary is refined; supporting entries keep their raw snippet.
+    ctx_text = (f.get("code_context") if primary.source == "finding" else "") or primary.snippet
+    refined = snip.refine_snippet(ctx_text, primary.snippet, sctx.match_tokens)
+    if refined:
+        primary.snippet = refined
     # Reject on the FILE-intrinsic score so finding-wide corroboration (reachable,
     # attack-chain, validated) never rescues a library/framework file from rejection.
     supporting = [c for c in rest if c.file_score >= C.REJECT_BELOW][:C.MAX_SUPPORTING]

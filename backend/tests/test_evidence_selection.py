@@ -239,6 +239,88 @@ def test_summary_emitted():
     _check(s["findings_annotated"] == 1 and "bug_bounty_mode" in s, "summary malformed")
 
 
+# ── Snippet quality & code relevance (Phase 1.96) ─────────────────────────────
+def test_import_only_snippet_loses_to_real_code():
+    """Between two application candidates, the one whose snippet is only imports must
+    lose to the one showing the actual triggering code."""
+    base = f"sources/{APP.replace('.', '/')}"
+    f = _f(file_path=f"{base}/Imports.java", line=2,
+           snippet="import javax.crypto.Cipher;\nimport java.util.*;",
+           file_evidence=[
+               _ev(f"{base}/Imports.java", 2, "import javax.crypto.Cipher;\nimport java.util.*;"),
+               _ev(f"{base}/CryptoManager.java", 40, 'Cipher.getInstance("AES/ECB");'),
+           ])
+    sel = es.select(f, _ctx())
+    _check("CryptoManager" in sel["primary"]["file_path"],
+           "import-only snippet must lose to the real usage site")
+    # The import-only candidate (now demoted) records an import-only penalty wherever
+    # it landed (supporting or rejected — it is still app code, so not auto-rejected).
+    others = (sel["supporting"] or []) + (sel["rejected"] or [])
+    imp = next((c for c in others if "Imports.java" in c["file_path"]), None)
+    _check(imp is not None and any("import" in r.lower() for r in imp["rejected_because"]),
+           "the import-only candidate must record an import-only penalty reason")
+
+
+def test_primary_snippet_refined_from_code_context():
+    """A noisy captured snippet (an import line) is refined to the most relevant line
+    using the finding's richer code_context."""
+    base = f"sources/{APP.replace('.', '/')}"
+    f = _f(title="Weak Hash MessageDigest", file_path=f"{base}/Hash.java", line=10,
+           cwe="CWE-327", confidence=92,
+           snippet="import java.security.MessageDigest;",
+           code_context=("import java.security.MessageDigest;\n"
+                         "public String hash(String in){\n"
+                         '  MessageDigest md = MessageDigest.getInstance("MD5");\n'
+                         "  return md.digest();\n}"))
+    sel = es.select(f, _ctx())
+    snip_text = sel["primary"]["snippet"]
+    _check("getInstance" in snip_text and "import" not in snip_text.lower(),
+           f"primary snippet should be refined to the real line, got: {snip_text!r}")
+
+
+def test_relevant_token_bonus_picks_usage_site():
+    """The candidate whose snippet contains the flagged value/API outscores a same-
+    file candidate that does not."""
+    base = f"sources/{APP.replace('.', '/')}"
+    f = _f(title="Insecure Cipher Cipher.getInstance", value="AES/ECB",
+           file_path=f"{base}/A.java", line=5, snippet="int x = 1;",
+           file_evidence=[
+               _ev(f"{base}/A.java", 5, "int x = 1;"),
+               _ev(f"{base}/A.java", 9, 'Cipher.getInstance("AES/ECB");'),
+           ])
+    sel = es.select(f, _ctx())
+    _check(sel["primary"]["line"] == 9,
+           "the line showing the flagged API/value must be the primary")
+    _check(any("flagged value" in r for r in sel["primary"]["selected_because"]),
+           "relevance reason must be recorded")
+
+
+def test_rule_specificity_raises_score_not_selection():
+    """Rule specificity is finding-wide: it raises the score but does not change which
+    file wins (every candidate gets the same finding_score)."""
+    base = f"sources/{APP.replace('.', '/')}"
+    hi = es.select(_f(file_path=f"{base}/P.java", line=5, confidence=95, cwe="CWE-327",
+                      snippet='Cipher.getInstance("AES")'), _ctx())
+    lo = es.select(_f(file_path=f"{base}/P.java", line=5, confidence=50, cwe="CWE-200",
+                      snippet='Cipher.getInstance("AES")'), _ctx())
+    _check(hi["primary"]["finding_score"] > lo["primary"]["finding_score"],
+           "a precise, high-confidence rule must raise the finding score")
+    _check(hi["primary"]["file_path"] == lo["primary"]["file_path"],
+           "rule specificity must not change which file is selected")
+
+
+def test_snippet_quality_never_rejects_app_code():
+    """A weak snippet on application code must not push its file-intrinsic score below
+    rejection — 'reject weak relevance UNLESS no better alternative'."""
+    base = f"sources/{APP.replace('.', '/')}"
+    f = _f(file_path=f"{base}/Only.java", line=1, snippet="import a.b.C;",
+           file_evidence=[_ev(f"{base}/Only.java", 1, "import a.b.C;")])
+    sel = es.select(f, _ctx())
+    _check(sel["primary"]["file_score"] >= 0,
+           "an application file must stay selectable even with a weak snippet")
+    _check("Only.java" in sel["primary"]["file_path"], "the only app proof must remain primary")
+
+
 # ── Standalone runner ─────────────────────────────────────────────────────────
 def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items())

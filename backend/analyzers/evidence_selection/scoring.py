@@ -19,6 +19,7 @@ from typing import Callable
 
 from ..ownership.types import OwnerType
 from . import config as C
+from . import snippet as snip
 from .library import FileClassification
 
 
@@ -51,6 +52,8 @@ class SelectionContext:
     chain: bool = False                  # selecting for an attack chain (manifest-first policy)
     already_selected: set = field(default_factory=set)  # (file, line) primaries elsewhere
     file_engine_counts: dict = field(default_factory=dict)  # file -> #engines referencing it
+    match_tokens: set = field(default_factory=set)  # flagged value / variable / API for relevance
+    rule_specificity: int = 0            # finding-wide source-confidence / rule-specificity bonus
 
 
 # A contributor returns a list of (delta, reason) pairs.
@@ -192,6 +195,41 @@ def _chain_priority_signal(c: Candidate, ctx: SelectionContext) -> list:
     return out
 
 
+def _snippet_quality_signal(c: Candidate, ctx: SelectionContext) -> list:
+    """Snippet QUALITY (Phase 1.96): a candidate whose snippet is only imports /
+    comments / braces — or blank — is weak proof; one that carries the enclosing
+    method signature or an API call is the real usage site. File-scope but small, so
+    it picks the better LINE among same-file candidates without rejecting app code."""
+    s = c.snippet or ""
+    if snip.is_blank(s):
+        return [(C.SNIPPET_BLANK_PENALTY, "No code snippet captured")]
+    if snip.is_import_only(s):
+        return [(C.SNIPPET_IMPORT_ONLY_PENALTY, "Snippet is only imports/comments (weak proof)")]
+    out: list = []
+    if snip.has_method_signature(s):
+        out.append((C.SNIPPET_METHOD_SIG_BONUS, "Snippet includes the enclosing method"))
+    if snip.has_call(s):
+        out.append((C.SNIPPET_CALL_BONUS, "Snippet shows an API call (usage site)"))
+    return out
+
+
+def _relevance_signal(c: Candidate, ctx: SelectionContext) -> list:
+    """Variable / API context (Phase 1.96): the strongest snippet relevance signal —
+    the candidate snippet actually contains the flagged value, variable or API the
+    finding is about. Its absence is what marks a snippet as 'unrelated code'."""
+    if ctx.match_tokens and snip.contains_tokens(c.snippet or "", ctx.match_tokens):
+        return [(C.SNIPPET_RELEVANT_TOKEN_BONUS, "Snippet shows the flagged value/variable/API")]
+    return []
+
+
+def _rule_specificity_signal(c: Candidate, ctx: SelectionContext) -> list:
+    """Source confidence / rule specificity (Phase 1.96): a finding-wide signal that
+    raises the displayed score for findings from precise, high-confidence rules. Same
+    for every candidate, so it never changes which file wins."""
+    return [(ctx.rule_specificity, "Specific, high-confidence detection rule")] \
+        if ctx.rule_specificity else []
+
+
 def _manifest_signal(c: Candidate, ctx: SelectionContext) -> list:
     """For declaration-driven findings, the manifest is the authoritative proof —
     it must beat a framework/library implementation file (e.g. an exported component
@@ -216,9 +254,12 @@ _BUILTIN_CONTRIBUTORS = (
     (_multi_engine_file_signal, FILE_SCOPE),
     (_already_selected_signal, FILE_SCOPE),
     (_binary_dump_signal, FILE_SCOPE),
+    (_snippet_quality_signal, FILE_SCOPE),
+    (_relevance_signal, FILE_SCOPE),
     (_validation_signal, FINDING_SCOPE),
     (_reachability_signal, FINDING_SCOPE),
     (_attack_chain_signal, FINDING_SCOPE),
+    (_rule_specificity_signal, FINDING_SCOPE),
 )
 for _fn, _scope in _BUILTIN_CONTRIBUTORS:
     register_contributor(_fn, scope=_scope)

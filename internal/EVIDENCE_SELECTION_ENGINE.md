@@ -29,7 +29,9 @@ analyzers/evidence_selection/
   config.py     the scoring model as DATA (owner deltas, bonuses, penalties, bug-bounty)
   library.py    per-FILE owner/library classifier — wraps ownership.classify()
   scoring.py    pluggable SIGNAL CONTRIBUTORS + score() (the extensibility seam)
+  snippet.py    pure snippet-quality toolkit (import-only/method/call/relevance/refine)
   engine.py     candidate gather → classify → score → primary/supporting/rejected
+  view.py       the single rendering model every report surface consumes
 ```
 
 It runs as a **late, additive pipeline stage** (`annotate`) in both analyzers, after
@@ -66,15 +68,48 @@ in `config.py`. Contributors carry a **scope**:
 | Binary string-dump (`*.dex/.so`) | −15 | file |
 | Corroborated by ≥2 detection engines | +15 | file |
 | Already another finding's primary | −25 | file |
+| Snippet shows the flagged value / variable / API | **+10** | file |
+| Snippet includes the enclosing method signature | +6 | file |
+| Snippet shows an API call (usage / call proximity) | +5 | file |
+| Snippet is only imports / comments / braces | −8 | file |
+| No code snippet captured | −4 | file |
 | Validated finding | +30 | finding |
 | Reachable (`YES` / `MAYBE`) | +25 / +8 | finding |
 | Referenced by an attack chain | +20 | finding |
 | App code but unreachable (likely dead code) | −20 | finding |
+| Specific, high-confidence detection rule | +6 … +16 | finding |
 
 Ranking: total score desc → file-intrinsic score → application-owned → has-line →
 path. A candidate whose **file-intrinsic** score is below `REJECT_BELOW` (0) is
 **rejected** (kept for transparency, not shown as proof) unless it is the only
 candidate — a finding always keeps one primary.
+
+### Snippet quality & code relevance (Phase 1.96)
+
+Selecting the right proof *file* is only half of report quality — the proof *snippet*
+must show the code that actually triggered the finding, not a block of imports or an
+unrelated line. `snippet.py` is a small, pure, deterministic toolkit used by both the
+scoring contributors and the engine:
+
+- **Quality signals (file scope, small).** A snippet that is only imports / comments /
+  braces — or blank — is penalized; one carrying the enclosing **method signature** or
+  an **API call** is rewarded. The deltas are intentionally small (app base +40 ≫ them)
+  so they reorder candidates **within** a file without ever rejecting application code
+  ("reject weak relevance *unless there is no better alternative*").
+- **Relevance signal (file scope).** The strongest snippet signal: the candidate
+  snippet actually contains the **flagged value / variable / API** (`relevant_tokens`
+  derives these from the finding's matched value and API-looking title identifiers).
+  Its absence is precisely what marks a snippet as "unrelated code".
+- **Snippet refinement.** The chosen primary's displayed snippet is refined to the
+  single most relevant line — flagged-token > real API call > method signature > plain
+  code, never an import/comment/brace — using the finding's richer `code_context` when
+  the primary is the detection site. It never blanks a snippet (falls back to the
+  original). So an `import javax.crypto.Cipher;` capture becomes
+  `Cipher c = Cipher.getInstance("AES/ECB");`.
+
+**Rule specificity** (`finding` scope) raises the displayed score for findings from
+precise, high-confidence rules (detector confidence + a specific, non-broad CWE). Being
+finding-wide, it never changes *which* file wins — only the score shown.
 
 ## Library identification
 
@@ -156,11 +191,14 @@ files.
 
 ## Tests
 
-`backend/tests/test_evidence_selection.py` (15 tests): application-beats-library,
+`backend/tests/test_evidence_selection.py` (21 tests): application-beats-library,
 AndroidX/GMS rejection, finding-signals-don't-rescue-libraries (scope separation),
 generated-code demotion, single-candidate, score boosts, multi-engine bonus,
 cross-finding de-noise, Bug Bounty Mode (amplify/reward/detection), contributor
-extensibility, additive/non-destructive, and malformed-input safety. Run:
+extensibility, additive/non-destructive, malformed-input safety, and the Phase 1.96
+snippet-quality work (import-only snippet demoted, primary snippet refined from
+code_context, relevant-token usage-site selection, rule specificity raises score but
+not selection, weak snippet never rejects app code). Run:
 
 ```
 cd backend && python -m tests.test_evidence_selection
