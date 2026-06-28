@@ -27,6 +27,7 @@ from .scoring import calculate_score
 from .path_utils import relativize_path
 from .virustotal import run_virustotal
 from . import network_intel
+from . import flutter_analyzer
 from .evidence_scanner import (
     scan_directory_for_secrets as ev_scan_secrets,
     scan_directory_for_jwts,
@@ -205,6 +206,16 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
             results["string_analysis"] = _fut_strings.result() or {}
             _fut_sast.result()
             _fut_framework.result()
+
+        # ── Flutter Security Intelligence (Phase 2.1) ─────────────────────────
+        # Gated on the existing framework detection. Same canonical model as Android:
+        # contributes findings/secrets/endpoints to the EXISTING streams, which then
+        # flow through the unchanged finalize pipeline. Never raises into the scan.
+        if results.get("framework", {}).get("type") == "flutter":
+            try:
+                flutter_analyzer.analyze([app_bundle or tmpdir], results, platform="ios")
+            except Exception:
+                log.exception("[flutter] iOS analysis failed; continuing without Flutter findings")
 
         # ── Cross-dedup: remove JWT values already in jwts section ────────────
         jwt_values = {j["value"] for j in results.get("jwts", []) if j.get("value")}

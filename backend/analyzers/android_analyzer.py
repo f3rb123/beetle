@@ -47,6 +47,7 @@ from .tracker_db import detect_trackers, analyze_malware_permissions
 from .api_analyzer import analyze_android_apis, extract_emails_from_app, detect_apkid_features
 from .domain_analyzer import check_domains
 from . import network_intel
+from . import flutter_analyzer
 from .evidence_scanner import (
     scan_directory_for_secrets, scan_directory_for_ips,
     scan_directory_for_jwts, extract_urls
@@ -476,6 +477,16 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         # ── React Native bundle analysis ──────────────────────────────────────
         if results["framework"]["type"] == "react_native":
             _analyze_rn_bundle(tmpdir, results)
+        # ── Flutter Security Intelligence (Phase 2.1) ─────────────────────────
+        # Gated on the existing framework detection — mirrors the RN sub-analyzer.
+        # Contributes canonical findings/secrets/endpoints to the EXISTING streams,
+        # which then flow through the unchanged finalize pipeline. Never raises.
+        if results["framework"]["type"] == "flutter":
+            try:
+                flutter_roots = (preferred_source_dirs[:] or []) + [tmpdir]
+                flutter_analyzer.analyze(flutter_roots, results, platform="android")
+            except Exception:
+                log.exception("[flutter] analysis failed; continuing without Flutter findings")
         _record_module_metric(results, "resource_analysis", resource_started, endpoints=len(results.get("endpoints", [])))
         _stage(scan_id, "resource_scan", resource_started)
 

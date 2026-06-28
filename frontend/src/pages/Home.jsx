@@ -459,7 +459,11 @@ export default function Home() {
               </div>
               <div className="upload-intro__copy">
                 {selectedModule
-                  ? `Drag a${selectedModule.platform === 'ios' ? 'n IPA' : 'n APK'} to begin analysis`
+                  ? (selectedModule.platform === 'ios'
+                      ? 'Drag an IPA to begin analysis'
+                      : selectedModule.platform === 'android'
+                        ? 'Drag an APK to begin analysis'
+                        : 'Drag an APK or IPA to begin analysis')
                   : 'Drag an APK or IPA to begin analysis'}
               </div>
             </div>

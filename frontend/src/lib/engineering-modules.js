@@ -58,10 +58,13 @@ export const ENGINEERING_MODULES = [
     id: 'flutter',
     name: 'Flutter Security Intelligence',
     icon: Layers,
-    status: MODULE_STATUS.COMING_SOON,
-    description: 'Dart/Flutter snapshot analysis for cross-platform applications.',
+    status: MODULE_STATUS.AVAILABLE,
+    description: 'Dart/Flutter analysis for cross-platform apps — channels, storage, network, secrets.',
     capability: 'Dart AOT snapshot parsing, Flutter secret & API surface analysis.',
-    eta: 'Planned',
+    // Flutter ships as an APK or IPA; the existing upload + auto-detection handle it,
+    // and the flutter_analyzer sub-analyzer runs when the framework is detected.
+    accept: '.apk,.ipa',
+    platform: 'flutter',
   },
   {
     id: 'react-native',
