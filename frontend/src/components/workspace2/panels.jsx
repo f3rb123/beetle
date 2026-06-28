@@ -282,7 +282,7 @@ function FindingRow({ f, onOpen, onOpenCode, meta }) {
   )
 }
 
-export function FindingsPanel({ results, onOpenFinding, onOpenCode, collab }) {
+export function FindingsPanel({ results, onOpenFinding, onOpenCode, collab, initialDetectionSource }) {
   const meta = collab?.collab?.meta || {}
   // Suppressed findings live in their own list (moved there at save time); the
   // "Suppressed" chip surfaces them so analysts can review/undo a suppression.
@@ -292,7 +292,9 @@ export function FindingsPanel({ results, onOpenFinding, onOpenCode, collab }) {
   const [sev, setSev] = useState('all')
   const [appOnly, setAppOnly] = useState(false)
   const [stateFilter, setStateFilter] = useState('all')   // all | <state> | suppressed
-  const [adv, setAdv] = useState({ category: 'all', detectionSource: 'all', ownership: 'all', framework: 'all', minTrust: 0 })
+  // `initialDetectionSource` lets the Semgrep launcher deep-link straight into the
+  // findings pre-filtered to Detected By = Semgrep; the analyst can clear it after.
+  const [adv, setAdv] = useState({ category: 'all', detectionSource: initialDetectionSource || 'all', ownership: 'all', framework: 'all', minTrust: 0 })
   const [limit, setLimit] = useState(60)
 
   const showSuppressed = stateFilter === 'suppressed'

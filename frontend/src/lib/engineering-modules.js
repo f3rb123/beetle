@@ -87,9 +87,10 @@ export const ENGINEERING_MODULES = [
     status: MODULE_STATUS.AVAILABLE,
     description: 'Professional file tree + code viewer with intelligence badges across every platform.',
     capability: 'Lazy tree, syntax-highlighted viewer, finding-to-source navigation.',
-    // Investigation view inside a scan — the launcher routes to the scan section
-    // instead of uploading. `nav` is the workspace section id to open.
-    nav: 'codebrowser',
+    // Investigation view inside a scan — the launcher deep-links into a scan section
+    // instead of uploading. `deepLink.section` is the workspace section id to open;
+    // optional `category`/`detectedBy` pre-seed the destination panel's filters.
+    deepLink: { section: 'codebrowser' },
   },
   {
     id: 'security-explorer',
@@ -98,7 +99,9 @@ export const ENGINEERING_MODULES = [
     status: MODULE_STATUS.AVAILABLE,
     description: 'Investigate by security category — Secrets, Crypto, Network, Storage, IPC and more.',
     capability: 'Category filters that drive the Source Explorer tree.',
-    nav: 'codebrowser',
+    // Same Source Explorer surface, opened with the security filter engaged so the
+    // tree shows only files carrying security findings.
+    deepLink: { section: 'codebrowser', category: 'findings' },
   },
   {
     id: 'semgrep',
@@ -107,9 +110,9 @@ export const ENGINEERING_MODULES = [
     status: MODULE_STATUS.AVAILABLE,
     description: 'Policy-as-code SAST fused natively into Beetle findings, credited as "Detected By: Semgrep".',
     capability: 'Configurable Semgrep rule packs as a first-class detection source.',
-    // Semgrep runs automatically during a scan (when on PATH); its canonical findings
-    // appear in Findings/Source Explorer. The card navigates into the latest scan.
-    nav: 'findings',
+    // No dedicated Semgrep section exists — open Findings pre-filtered to the
+    // Semgrep detection source so analysts land on its canonical results.
+    deepLink: { section: 'findings', detectedBy: 'Semgrep' },
   },
   {
     id: 'cicd',

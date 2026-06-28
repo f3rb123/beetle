@@ -11,6 +11,7 @@ export const SECTION_GROUPS = [
   {
     title: 'Evidence',
     items: [
+      { id: 'codebrowser', label: 'Source Explorer', hint: 'Project file tree with security badges; the deep-link target for the Source & Security Explorer launchers.' },
       { id: 'source', label: 'Source Files', hint: 'Browse decompiled output and open files in the unified code viewer.' },
       { id: 'code', label: 'Code Analysis', hint: 'SAST-oriented issues grouped for code review.' },
       { id: 'manifest', label: 'Manifest', hint: 'Unified code view for manifest review and exported defaults.' },
@@ -73,6 +74,7 @@ export const SECTION_GROUPS = [
 export const QUICK_SECTION_IDS = new Set([
   'dashboard',
   'findings',
+  'codebrowser',
   'manifest',
   'surface',
   'cert',

@@ -8,6 +8,7 @@
 // navigable (they open a ComingSoon placeholder), which proves the hierarchy,
 // routing and layout accommodate them.
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useParams, useSearchParams } from 'react-router-dom'
 import {
   LayoutDashboard, ShieldAlert, GitBranch, KeyRound, ShieldCheck, FileCode2,
   Download, Search, ChevronLeft, Command, ScrollText, Network, Fingerprint,
@@ -29,6 +30,7 @@ import { SourceExplorerPanel } from './SourceExplorer.jsx'
 import { findingPath, useEscape } from './ui.jsx'
 import { useCollab, canManage, SHARE_MODES } from '../../lib/collab.js'
 import { navGroups, getPanel, isReady } from './workspace-registry.js'
+import { urlToWorkspaceSection } from './workspace-sections.js'
 import { WorkspaceProvider, useWorkspaceNav } from './workspace-context.jsx'
 
 // Registry icon-name → lucide component (keeps the registry React-free/testable).
@@ -138,7 +140,7 @@ function SearchPalette({ index, onClose, onPick }) {
 }
 
 // ── Shell (consumes the workspace context) ───────────────────────────────────
-function WorkspaceShell({ results, scanId, actions }) {
+function WorkspaceShell({ results, scanId, actions, deepLink }) {
   const nav = useWorkspaceNav()
   const { section, finding } = nav
   const onOpenCode = nav._onOpenCode
@@ -201,7 +203,7 @@ function WorkspaceShell({ results, scanId, actions }) {
     }
     switch (section) {
       case 'overview': return <OverviewPanel results={results} onOpenSection={goSection} onOpenFinding={nav.openFinding} onOpenCode={onOpenCode} />
-      case 'findings': return <FindingsPanel results={results} onOpenFinding={nav.openFinding} onOpenCode={onOpenCode} collab={collab} />
+      case 'findings': return <FindingsPanel results={results} onOpenFinding={nav.openFinding} onOpenCode={onOpenCode} collab={collab} initialDetectionSource={deepLink?.detectionSource} />
       case 'chains': return <ChainsPanel results={results} onOpenCode={onOpenCode} />
       case 'secrets': return <SecretsPanel results={results} onOpenCode={onOpenCode} />
       case 'masvs': return <MasvsPanel results={results} />
@@ -219,7 +221,7 @@ function WorkspaceShell({ results, scanId, actions }) {
       case 'androidapis': return <AndroidApiPanel results={results} onOpenCode={onOpenCode} />
       case 'taint': return <TaintFlowPanel results={results} onOpenCode={onOpenCode} />
       case 'malware': return <MalwarePanel results={results} />
-      case 'codebrowser': return <SourceExplorerPanel results={results} scanId={scanId} onOpenCode={onOpenCode} />
+      case 'codebrowser': return <SourceExplorerPanel results={results} scanId={scanId} onOpenCode={onOpenCode} initialCategory={deepLink?.category} />
       case 'compare': return <ComparePanel results={results} />
       case 'ai': return <AiAssistantPanel results={results} />
       default: return <ComingSoonPanel panelId={section} />
@@ -292,9 +294,22 @@ function WorkspaceShell({ results, scanId, actions }) {
 }
 
 export default function Workspace({ results, scanId, onOpenCode, actions }) {
+  // The route is the single source of truth for the section to open on mount, so a
+  // launcher deep link (e.g. Source Explorer → /scans/:id/codebrowser) lands on the
+  // right panel instead of always Overview. Optional query params pre-seed the
+  // destination panel's filters: ?cat= (Source Explorer category) and ?src= (Findings
+  // detection source, used by the Semgrep launcher).
+  const { sectionId } = useParams()
+  const [searchParams] = useSearchParams()
+  const initialSection = urlToWorkspaceSection(sectionId)
+  const deepLink = {
+    category: searchParams.get('cat') || undefined,
+    detectionSource: searchParams.get('src') || undefined,
+  }
+
   return (
-    <WorkspaceProvider onOpenCode={onOpenCode}>
-      <WorkspaceShell results={results} scanId={scanId} actions={actions} />
+    <WorkspaceProvider onOpenCode={onOpenCode} initialSection={initialSection}>
+      <WorkspaceShell results={results} scanId={scanId} actions={actions} deepLink={deepLink} />
     </WorkspaceProvider>
   )
 }

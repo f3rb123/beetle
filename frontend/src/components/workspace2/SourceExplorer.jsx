@@ -125,7 +125,7 @@ function TreeNode({ node, depth, expanded, toggle, onOpen, overlay, filters, sel
   )
 }
 
-export function SourceExplorerPanel({ results, scanId, onOpenCode, extensions }) {
+export function SourceExplorerPanel({ results, scanId, onOpenCode, extensions, initialCategory }) {
   const nav = useWorkspaceNav()
   const explorer = results.source_explorer || {}
   const securityIndex = explorer.security_index || {}
@@ -137,8 +137,10 @@ export function SourceExplorerPanel({ results, scanId, onOpenCode, extensions })
   const [q, setQ] = useState('')
   // The ONE filter selection, shared by the Quick Filters row and the Security
   // Explorer pane. 'all' = no filter; 'findings' = any file with a finding; else a
-  // security category. No second filtering system exists.
-  const [activeCat, setActiveCat] = useState('all')
+  // security category. No second filtering system exists. `initialCategory` lets the
+  // Security Explorer launcher open the tree pre-filtered (deep link); the analyst
+  // can still change it freely afterward.
+  const [activeCat, setActiveCat] = useState(initialCategory || 'all')
   const [selected, setSelected] = useState(null)
   const storeKey = `ws_explorer_expanded_${scanId}`
   const [expanded, setExpanded] = useState(() => {
