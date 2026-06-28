@@ -987,6 +987,16 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         _ds_fusion.reconcile_bridged_findings(results)
     except Exception:
         log.exception("[detection_sources] bridge reconcile failed")
+    # ── Phase 1.96: Intelligent Evidence Selection — for every finding, pick the
+    # strongest, most application-relevant primary proof (demoting AndroidX / GMS /
+    # generated / framework files to supporting/rejected) with an explanation. Runs
+    # LATE so ownership/confidence/reachability/attack-chain/fusion signals are all
+    # present; additive (writes evidence_selection, never mutates file_path). ──
+    try:
+        from . import evidence_selection
+        evidence_selection.annotate(results, platform="android")
+    except Exception:
+        log.exception("[evidence_selection] failed; findings left without proof selection")
     # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
     try:
         from . import analyst_intel

@@ -514,6 +514,15 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         _ds_fusion.reconcile_bridged_findings(results)
     except Exception:
         log.exception("[detection_sources] bridge reconcile failed")
+    # ── Phase 1.96: Intelligent Evidence Selection — pick the strongest, most
+    # application-relevant primary proof per finding (demoting SDK/framework/generated
+    # files), with an explanation. Runs LATE so all signals are present; additive.
+    # Mirror of the Android placement. ──
+    try:
+        from . import evidence_selection
+        evidence_selection.annotate(results, platform="ios")
+    except Exception:
+        log.exception("[evidence_selection] failed; findings left without proof selection")
     # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
     try:
         from . import analyst_intel
