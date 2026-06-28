@@ -226,6 +226,18 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
             except Exception:
                 log.exception("[react_native] iOS analysis failed; continuing without RN findings")
 
+        # ── Semgrep SAST (Phase 2.4) — external detection engine via the SAST
+        # adapter. Gated on availability (no-op + zero cost when absent); runs only
+        # iOS/framework-relevant rule packs. Canonical findings flow through fusion. ──
+        try:
+            from .semgrep_runner import run_semgrep as _run_semgrep
+            _m = _run_semgrep([tmpdir], results, platform="ios",
+                              framework=(results.get("framework") or {}).get("type"))
+            results.setdefault("scan_metrics", {}).setdefault("modules", {})["semgrep_sast"] = {
+                "ran": _m.get("ran"), "findings": _m.get("finding_count", 0)}
+        except Exception:
+            log.exception("[semgrep] iOS SAST failed; continuing without Semgrep findings")
+
         # ── Cross-dedup: remove JWT values already in jwts section ────────────
         jwt_values = {j["value"] for j in results.get("jwts", []) if j.get("value")}
         if jwt_values:

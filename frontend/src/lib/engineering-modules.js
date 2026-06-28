@@ -104,10 +104,12 @@ export const ENGINEERING_MODULES = [
     id: 'semgrep',
     name: 'Semgrep Integration',
     icon: ScanSearch,
-    status: MODULE_STATUS.COMING_SOON,
-    description: 'Policy-as-code SAST rules fused natively into Beetle findings.',
-    capability: 'Semgrep rulepacks as a first-class detection source.',
-    eta: 'Planned',
+    status: MODULE_STATUS.AVAILABLE,
+    description: 'Policy-as-code SAST fused natively into Beetle findings, credited as "Detected By: Semgrep".',
+    capability: 'Configurable Semgrep rule packs as a first-class detection source.',
+    // Semgrep runs automatically during a scan (when on PATH); its canonical findings
+    // appear in Findings/Source Explorer. The card navigates into the latest scan.
+    nav: 'findings',
   },
   {
     id: 'cicd',
