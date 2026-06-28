@@ -16,6 +16,24 @@ FUSION_VERSION = "1.0.0"
 # issue_class + file already scope the group.
 LINE_BUCKET = 3          # lines per bucket; 0 disables line bucketing (exact line)
 
+# ── Broad / non-specific CWEs ─────────────────────────────────────────────────
+# A CWE is the strongest cross-engine identity signal — but some CWEs are broad
+# umbrellas shared by many DISTINCT rules (CWE-327 covers AES-ECB, weak-DES and
+# weak-hash; CWE-312 covers world-readable prefs, external-storage writes, …). For
+# these, the CWE alone is NOT enough to call two differently-titled findings the
+# same issue: merging them collapses genuinely distinct findings sitting a few lines
+# apart in one file and silently DROPS one. So for a broad CWE the identity also
+# factors the normalized title — UNLESS a value fingerprint already separates the
+# findings (secrets). Specific CWEs keep CWE-only identity, so real cross-engine
+# duplicates still merge; intentional equivalence on a broad CWE stays expressible
+# via the alias registry. Derived from the shipped rule set (CWEs shared by >= 3
+# distinct rules) plus inherently-generic umbrella CWEs.
+BROAD_CWES = frozenset((
+    "cwe-200", "cwe-284", "cwe-295", "cwe-312", "cwe-319", "cwe-327",
+    "cwe-89", "cwe-532", "cwe-664", "cwe-693", "cwe-926", "cwe-927",
+    "cwe-noinfo",
+))
+
 # ── Fusion score (0-100): corroboration strength of a fused finding ───────────
 FUSION_SCORE_BASE        = 50    # a single-engine finding starts here
 FUSION_SCORE_PER_ENGINE  = 18    # + per ADDITIONAL independent engine

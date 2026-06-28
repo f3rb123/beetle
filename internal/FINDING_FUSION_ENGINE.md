@@ -64,14 +64,23 @@ single seam every future engine flows through.
 
    - `issue_class` is resolved, in priority order, from: an **alias-registry** entry
      for this `(engine, rule_id)` → the **CWE** id → a normalized `category:title`.
-     CWE is the strongest cross-engine signal: Beetle "AWS Access Key ID" and a
-     Semgrep "hardcoded-aws-credentials" both carry **CWE-798**, so they land in one
-     class even though their rule ids and titles differ.
+     A *specific* CWE is the strongest cross-engine signal: Beetle "AWS Access Key ID"
+     and a Semgrep "hardcoded-aws-credentials" both carry **CWE-798**, so they land in
+     one class even though their rule ids and titles differ.
+   - **Broad-CWE guard** (`config.BROAD_CWES`): some CWEs are umbrellas shared by many
+     distinct rules (CWE-327 covers AES-ECB *and* weak-DES *and* weak-hash; CWE-312,
+     CWE-200, CWE-319, … likewise). For these the CWE alone is **not** enough identity —
+     keying on it would merge genuinely different findings sitting a few lines apart in
+     one file and silently drop one. So for a broad CWE the class also factors the
+     normalized **title** (unless a `value_fingerprint` already separates the findings).
+     Specific CWEs keep CWE-only identity, so true cross-engine duplicates still merge;
+     deliberate equivalence on a broad CWE stays expressible via the alias registry.
    - `line_bucket` tolerates small line drift between engines (`config.LINE_BUCKET`,
      default 3) without merging genuinely separate issues — `issue_class` + `file`
      already scope the group.
    - `value_fingerprint` keeps two **different** secret literals in the same file
-     apart, while letting two engines on the **same** literal merge.
+     apart, while letting two engines on the **same** literal merge. (It is also why a
+     broad CWE is safe for secrets: the literal, not the title, is the discriminator.)
 
    Attack-chain findings (`is_attack_chain`) and malformed entries are passed through
    untouched — they are not engine duplicates.
@@ -171,13 +180,36 @@ seam that keeps report noise flat as the number of detection engines grows.
 
 ## Tests
 
-`backend/tests/test_finding_fusion.py` (21 tests): cross-engine CWE unification,
+`backend/tests/test_finding_fusion.py` (25 tests): cross-engine CWE unification,
 distinct-value / distinct-file separation, alias registry, two/three-engine merge,
 partial overlap, severity/category/ownership/location/confidence conflict resolution,
 evidence de-dup + merged locations, singleton + unattributed provenance, confidence
 agreement boost + conflict damping, attack-chain pass-through, canonical round-trip,
-dedupe-superset parity, and malformed-input safety. Run:
+dedupe-superset parity, malformed-input safety, the **broad-CWE over-merge guard**
+(distinct rules sharing CWE-327 stay separate; same-title still merges cross-engine;
+secrets merge by value fingerprint), and **Android == iOS** output parity. Run:
 
 ```
 cd backend && python -m tests.test_finding_fusion
 ```
+
+## Verification audit (post-implementation)
+
+A deep audit probed identity edge cases beyond the happy path:
+
+* **Broad-CWE over-merge → data loss** — *real defect, fixed.* Two distinct rules
+  sharing a broad umbrella CWE (e.g. AES-ECB + weak-DES, both CWE-327) a few lines
+  apart in one file collapsed into one, dropping the second. Fixed by the
+  `config.BROAD_CWES` guard above (8 rules share CWE-327 and CWE-312 in the shipped
+  set, so this was reachable in normal scans).
+* **Idempotency / order-independence** — verified: re-running `fuse`, and reversing
+  input order, yield identical resolved findings and provenance.
+* **Android == iOS** — verified identical fusion output for identical input.
+* **Masked-vs-raw value fingerprint** — a finding carrying a *masked* secret value and
+  another carrying the *raw* value of the same secret would fingerprint differently and
+  fail to merge. Verified **not reachable** in the live pipeline: secret-value masking
+  of the findings stream happens in the secret→finding **bridge**, which runs *after*
+  `fuse`, so all findings entering fusion carry raw values uniformly (and bridged
+  findings carry a unique `APKLEAKS-SECRET-*` rule id, so they never fuse-merge). It is
+  recorded here as a consideration for any future engine that emits a pre-masked secret
+  finding directly into the stream before fusion.

@@ -94,6 +94,14 @@ def issue_class(f: dict) -> str:
         return alias
     cwe = _norm_cwe(f.get("cwe"))
     if cwe:
+        # A broad umbrella CWE is shared by many distinct rules, so the CWE alone
+        # would over-merge genuinely different findings (and drop one). For those,
+        # also key on the normalized title — but ONLY when no value fingerprint is
+        # present (a secret's literal already keeps distinct values apart, and two
+        # engines naming the same secret differently must still merge on CWE+value).
+        if cwe in C.BROAD_CWES and not _value_fingerprint(f):
+            t = _norm_title(f.get("title") or f.get("name") or f.get("rule_id") or "")
+            return f"{cwe}:{t}" if t else cwe
         return cwe
     cat = _norm_title(f.get("category") or "")
     title = _norm_title(f.get("title") or f.get("name") or f.get("rule_id") or "")

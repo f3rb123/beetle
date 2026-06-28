@@ -75,6 +75,73 @@ def test_distinct_secret_values_do_not_merge():
            "distinct secret values must not collapse together")
 
 
+def test_broad_cwe_does_not_overmerge_distinct_rules():
+    """Audit regression (Defect A): two DIFFERENT rules sharing a BROAD umbrella CWE
+    a few lines apart in one file must stay separate — never collapse and drop one.
+    e.g. AES/ECB and weak-DES both carry CWE-327."""
+    out, _ = _fuse([
+        _f(rule_id="android_aes_ecb_default", title="AES/ECB mode", cwe="CWE-327",
+           category="Cryptography", file_path="com/app/Crypto.java", line=40,
+           snippet="Cipher.getInstance('AES')", detected_by=["Beetle Native"]),
+        _f(rule_id="android_weak_cipher_des", title="DES cipher", cwe="CWE-327",
+           category="Cryptography", file_path="com/app/Crypto.java", line=42,
+           snippet="Cipher.getInstance('DES')", detected_by=["Beetle Native"]),
+    ])
+    _check(len(out) == 2, "distinct rules sharing a broad CWE must not over-merge")
+    _check(sorted(o["title"] for o in out) == ["AES/ECB mode", "DES cipher"],
+           "both distinct findings must survive (no data loss)")
+
+
+def test_broad_cwe_same_issue_still_merges_cross_engine():
+    """The fix must not break cross-engine merging: the SAME issue (same title) on a
+    broad CWE detected by two engines still collapses to one."""
+    out, _ = _fuse([
+        _f(rule_id="aes-ecb", title="AES/ECB mode", cwe="CWE-327",
+           file_path="a/C.java", line=10, detected_by=["Beetle Native"]),
+        _f(rule_id="semgrep-ecb", title="AES/ECB mode", cwe="CWE-327",
+           file_path="a/C.java", line=11, detected_by=["Semgrep"]),
+    ])
+    _check(len(out) == 1, "same broad-CWE issue from two engines must still merge")
+    _check(set(out[0]["detected_by"]) == {"Beetle Native", "Semgrep"}, "both engines credited")
+
+
+def test_broad_cwe_with_value_fingerprint_still_merges():
+    """A value-bearing finding (secret) is kept distinct by its fingerprint, so even
+    on a broad CWE the same secret from two engines merges and two different secrets
+    do not."""
+    same = _fuse([
+        _f(title="Cleartext Secret", cwe="CWE-312", file_path="a/C.java", line=10,
+           value="AKIAIOSFODNN7EXAMPLE", detected_by=["Beetle Native"]),
+        _f(title="Hardcoded value", cwe="CWE-312", file_path="a/C.java", line=10,
+           value="AKIAIOSFODNN7EXAMPLE", detected_by=["APKLeaks"]),
+    ])[0]
+    _check(len(same) == 1, "same secret value on a broad CWE must merge across engines")
+    diff = _fuse([
+        _f(title="Secret A", cwe="CWE-312", file_path="a/C.java", line=10,
+           value="AKIAIOSFODNN7EXAMPLE1", detected_by=["Beetle Native"]),
+        _f(title="Secret B", cwe="CWE-312", file_path="a/C.java", line=10,
+           value="AKIAIOSFODNN7EXAMPLE2", detected_by=["APKLeaks"]),
+    ])[0]
+    _check(len(diff) == 2, "different secret values must stay separate even on a broad CWE")
+
+
+def test_android_and_ios_fusion_identical():
+    """Android and iOS must produce identical fusion output for identical input."""
+    inp = [
+        _f(rule_id="a", title="AWS", cwe="CWE-798", severity="high",
+           file_path="x/A.java", line=10, detected_by=["Beetle Native"]),
+        _f(rule_id="b", title="AWS2", cwe="CWE-798", severity="critical",
+           file_path="x/A.java", line=11, detected_by=["Semgrep"]),
+    ]
+    def _shape(plat):
+        r = {"findings": [dict(x) for x in inp]}
+        fusion.fuse(r, platform=plat)
+        return [(o["detection_count"], o["severity"], sorted(o["detected_by"]),
+                 o["fusion_score"]) for o in r["findings"]]
+    _check(_shape("android") == _shape("ios"),
+           "fusion output must be platform-independent (Android == iOS)")
+
+
 def test_alias_registry_is_data_only_extensible():
     """A new engine's idiosyncratic rule can be declared equivalent via data."""
     identity.register_alias("CustomEngine", "weird-rule-42", "cwe-798")
