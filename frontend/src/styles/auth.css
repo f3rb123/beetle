@@ -447,3 +447,64 @@ select.up-input { cursor: pointer; }
   .up-form__grid { grid-template-columns: 1fr; }
   .up-form { padding: 18px 16px; }
 }
+
+/* ── Engineering Workspace (Phase 2.0) — scalable module launcher ─────────────
+   Additive section above the upload card. Uses ONLY the existing --auth-* tokens
+   (no new colors), so it inherits the theme and is dark-mode-ready by construction. */
+.ew { width: 100%; max-width: 960px; margin: 0 auto; }
+.ew__head { margin-bottom: 6px; }
+.ew__title { margin: 0; font-size: 1.05rem; font-weight: 700; letter-spacing: -0.01em; color: var(--auth-ink); }
+.ew__subtitle { margin: 4px 0 0; font-size: 0.84rem; color: var(--auth-muted); }
+.ew__group-label {
+  font: 600 0.7rem/1 var(--auth-font); letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--auth-faint); margin: 18px 2px 10px;
+}
+.ew__grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+
+.ew-card {
+  display: flex; flex-direction: column; align-items: stretch; gap: 7px; text-align: left;
+  background: var(--auth-card); border: 1px solid var(--auth-border);
+  border-radius: var(--auth-radius); padding: 16px 16px 15px;
+  box-shadow: var(--auth-shadow-3); cursor: pointer; font-family: var(--auth-font);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+}
+.ew-card__top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ew-card__icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 38px; height: 38px; border-radius: 11px;
+  background: var(--auth-sunken); color: var(--auth-ink); border: 1px solid var(--auth-border);
+}
+.ew-card__badge {
+  font: 600 0.62rem/1 var(--auth-font); letter-spacing: 0.05em; text-transform: uppercase;
+  padding: 4px 8px; border-radius: 999px; white-space: nowrap;
+}
+.ew-card__badge--ready { background: var(--auth-ink); color: #fff; }
+.ew-card__badge--soon { background: var(--auth-sunken); color: var(--auth-faint); border: 1px solid var(--auth-border); }
+.ew-card__name { font-size: 0.95rem; font-weight: 650; color: var(--auth-text); letter-spacing: -0.01em; margin-top: 4px; }
+.ew-card__desc { font-size: 0.8rem; line-height: 1.45; color: var(--auth-muted); }
+.ew-card__meta { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--auth-border); }
+.ew-card__capability { font-size: 0.74rem; color: var(--auth-muted); }
+.ew-card__eta { font: 600 0.68rem/1 var(--auth-font); color: var(--auth-faint); }
+.ew-card__notice {
+  margin-top: 8px; font-size: 0.74rem; font-weight: 600; color: var(--auth-text);
+  background: var(--auth-sunken); border: 1px dashed var(--auth-border-strong);
+  border-radius: 9px; padding: 7px 10px;
+}
+
+/* Available cards: lift on hover (matches the upload-card depth language). */
+.ew-card--ready:hover { transform: translateY(-3px); box-shadow: var(--auth-shadow-card-hover); border-color: var(--auth-border-strong); }
+.ew-card--ready:focus-visible { outline: 2px solid var(--auth-ink); outline-offset: 2px; }
+.ew-card--ready.is-active { border-color: var(--auth-ink); box-shadow: var(--auth-shadow-2); }
+
+/* Coming Soon cards: clearly unavailable — muted, dashed, no lift. */
+.ew-card--soon { cursor: default; background: var(--auth-soft); border-style: dashed; opacity: 0.92; }
+.ew-card--soon .ew-card__icon { color: var(--auth-faint); }
+.ew-card--soon .ew-card__name { color: var(--auth-muted); }
+.ew-card--soon:hover { border-color: var(--auth-border-strong); }
+
+/* Upload card highlight when an Available module is active. */
+.upload-card--ws.is-module-active { border-color: var(--auth-border-strong); box-shadow: var(--auth-shadow-card-hover); }
+
+@media (max-width: 560px) {
+  .ew__grid { grid-template-columns: 1fr; }
+}

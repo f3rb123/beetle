@@ -106,6 +106,61 @@ garbage; public keys & certificates (→ Public Value); and crypto-library const
 
 ---
 
+## 5a. AWS detection philosophy & Cognito coverage
+
+AWS appears in mobile apps as both **credentials** and **configuration identifiers**,
+and Beetle deliberately reports both — but classifies them honestly so a config id is
+never dressed up as a live key.
+
+**Credentials** (high severity, treated as live until rotated):
+
+| Identifier | Prefix / shape | Rule |
+|---|---|---|
+| Access Key ID (long-term) | `AKIA…16` | `beetle_native` AWS Access Key ID |
+| STS / temporary key | `ASIA…16` | `coverage` `cov_aws_sts_key` |
+| IAM principal unique id | `AROA/AIDA/AGPA/…16` | `coverage` `cov_aws_iam_unique_id` |
+| Secret access key | 40-char base64 | `beetle_native` AWS Secret Key |
+
+**Cognito / configuration identifiers** (recon signal, not a credential by itself —
+reported at lower exploitability with a `CWE-200` info framing):
+
+| Identifier | Shape | Rule |
+|---|---|---|
+| **Cognito Identity Pool** | `region:uuid` (e.g. `us-east-1:7e94…65c1c`) | `coverage` `cov_aws_cognito_identity_pool` |
+| **Cognito User Pool** | `region_id` (e.g. `us-east-1_aBcD1234X`) | `coverage` `cov_aws_cognito_user_pool` |
+| ARN (account id) | `arn:aws:…:123456789012:…` | `coverage` `cov_aws_account_arn` |
+| CloudFront distribution | `…​.cloudfront.net` | `coverage` `cov_cloudfront_url` |
+
+**Why configuration identifiers are reported.** A Cognito Identity Pool with
+unauthenticated/guest access enabled, or an over-broad guest IAM role, can grant
+real access to AWS resources *without any key* — so the pool id is the finding. A
+User Pool id enables account enumeration / unauthenticated sign-up abuse when
+self-service registration is open. These are surfaced as **low-exploitability recon
+identifiers**, not as critical secrets, keeping the report honest while never
+silently missing what a mature scanner (MobSF) surfaces.
+
+The Identity Pool (colon-separated `:uuid`) and User Pool (`_id`) patterns use
+**disjoint separators**, so a single value never double-reports as both — no
+duplicate findings. All of these flow through the one unified `secret_catalog`
+combined walk (provenance `coverage`) → Secret Intelligence → fusion → evidence
+selection, exactly like every other secret. **App Client IDs** (26-char
+lowercase-alnum) are *intentionally not* value-regex'd: that shape is
+indistinguishable from countless non-secret tokens and would inflate false
+positives — they are left to be surfaced by context adjacent to a detected pool,
+matching Beetle's minimize-FP philosophy (and MobSF itself relies on key-name
+heuristics, not a value regex, for them).
+
+**MobSF benchmark.** The MobSF v4.4.6 comparison flagged one missed value —
+`aws_Identity_pool_ID` = `us-east-1:7e9426f7-42af-4717-8689-00a9a4b65c1c`. MobSF
+surfaces it via its key-name heuristic (`is_secret_key` matching `aws`/key-value
+pairs) plus entropy; Beetle now detects it via a precise **value regex**, which is
+more specific (no reliance on the surrounding key name) and carries Beetle's
+file+line evidence and explainable confidence. With Cognito Identity **and** User
+Pool added, the known AWS benchmark gap vs MobSF is closed. See
+`internal/DETECTION_COVERAGE_ENGINE.md` for the benchmark engine and corpus.
+
+---
+
 ## 6. Ownership awareness
 
 The engine calls the **Ownership Engine** directly (no duplicated logic). A value's

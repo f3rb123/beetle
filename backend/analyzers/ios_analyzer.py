@@ -26,6 +26,9 @@ from .string_analyzer import analyze_strings
 from .scoring import calculate_score
 from .path_utils import relativize_path
 from .virustotal import run_virustotal
+from . import network_intel
+from . import flutter_analyzer
+from . import react_native_analyzer
 from .evidence_scanner import (
     scan_directory_for_secrets as ev_scan_secrets,
     scan_directory_for_jwts,
@@ -148,21 +151,29 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         with _TPE(max_workers=7) as _pool:
             # Use evidence_scanner (richer, full CWE/MASVS/OWASP metadata)
             # in addition to the legacy common.py scanner so iOS gets the same
-            # quality secret detection as Android.
-            _fut_secrets_ev = _pool.submit(ev_scan_secrets, tmpdir)
+            # quality secret detection as Android. Phase 1.9: the evidence walk
+            # applies the UNIFIED catalog (native + APKLeaks) so APKLeaks adds NO
+            # extra filesystem traversal — its hits are split out below and fused.
+            from . import secret_catalog as _secret_catalog
+            _fut_secrets_ev = _pool.submit(ev_scan_secrets, tmpdir, None, None,
+                                           _secret_catalog.combined())
             _fut_secrets_lg = _pool.submit(scan_files_for_secrets, tmpdir, [
                 ".plist", ".json", ".xml", ".strings", ".js", ".swift",
                 ".m", ".h", ".txt", ".yml", ".yaml", ".cfg",
             ])
             _fut_jwts = _pool.submit(scan_directory_for_jwts, tmpdir)
-            _fut_ips  = _pool.submit(scan_directory_for_ips, tmpdir)
+            _fut_ips  = _pool.submit(network_intel.extract_ips, tmpdir)
             _fut_endpoints = _pool.submit(_extract_endpoints, tmpdir, results)
             _fut_strings = _pool.submit(analyze_strings, tmpdir, "ios")
             _fut_sast = _pool.submit(run_ios_sast, tmpdir, results)
             _fut_framework = _pool.submit(_detect_framework, app_bundle or tmpdir, results)
 
-            # Merge evidence_scanner secrets (richer) with legacy scan (broader)
-            ev_secrets_out = _fut_secrets_ev.result() or []
+            # Split the combined evidence walk into native vs APKLeaks hits BEFORE
+            # the native merge, so APKLeaks hits are routed/attributed (and endpoints
+            # don't get misfiled as secrets) rather than collapsed by name+value.
+            from .detection_sources import routing as _routing, fusion as _fusion
+            ev_all = _fut_secrets_ev.result() or []
+            ev_secrets_out, _apk_result = _routing.extract_apkleaks(ev_all)
             lg_secrets_out = _fut_secrets_lg.result() or []
             # Dedup: evidence_scanner results take priority (better metadata)
             _seen_secrets: set[tuple] = set()
@@ -178,13 +189,54 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                     _seen_secrets.add(k)
                     merged_secrets.append(s)
             results["secrets"] = merged_secrets
+            # Fuse the APKLeaks slice into the native streams (attribution + dedup).
+            _fusion.merge_secret_streams(results, _apk_result.secrets)
+            _fusion.merge_finding_streams(results, _apk_result.findings, platform="ios")
+            _fusion.merge_endpoint_streams(results, _apk_result.endpoints)
 
             results["jwts"] = _fut_jwts.result() or []
             results["ips"]  = _fut_ips.result() or []
+            # Phase 1.99: enrich raw IP hits (classify / owner / suppress / merge /
+            # intelligence) using the SAME canonical model as Android, BEFORE the
+            # public-IP finding and UI consume them. Additive; URLs untouched.
+            try:
+                network_intel.annotate(results, platform="ios")
+            except Exception:
+                log.exception("[network_intel] iOS IP enrichment failed; raw IPs left as-is")
             _fut_endpoints.result()
             results["string_analysis"] = _fut_strings.result() or {}
             _fut_sast.result()
             _fut_framework.result()
+
+        # ── Flutter Security Intelligence (Phase 2.1) ─────────────────────────
+        # Gated on the existing framework detection. Same canonical model as Android:
+        # contributes findings/secrets/endpoints to the EXISTING streams, which then
+        # flow through the unchanged finalize pipeline. Never raises into the scan.
+        if results.get("framework", {}).get("type") == "flutter":
+            try:
+                flutter_analyzer.analyze([app_bundle or tmpdir], results, platform="ios")
+            except Exception:
+                log.exception("[flutter] iOS analysis failed; continuing without Flutter findings")
+
+        # ── React Native Security Intelligence (Phase 2.2) ────────────────────
+        # Same canonical model as Android/Flutter, gated on the framework flag.
+        if results.get("framework", {}).get("type") == "react_native":
+            try:
+                react_native_analyzer.analyze([app_bundle or tmpdir], results, platform="ios")
+            except Exception:
+                log.exception("[react_native] iOS analysis failed; continuing without RN findings")
+
+        # ── Semgrep SAST (Phase 2.4) — external detection engine via the SAST
+        # adapter. Gated on availability (no-op + zero cost when absent); runs only
+        # iOS/framework-relevant rule packs. Canonical findings flow through fusion. ──
+        try:
+            from .semgrep_runner import run_semgrep as _run_semgrep
+            _m = _run_semgrep([tmpdir], results, platform="ios",
+                              framework=(results.get("framework") or {}).get("type"))
+            results.setdefault("scan_metrics", {}).setdefault("modules", {})["semgrep_sast"] = {
+                "ran": _m.get("ran"), "findings": _m.get("finding_count", 0)}
+        except Exception:
+            log.exception("[semgrep] iOS SAST failed; continuing without Semgrep findings")
 
         # ── Cross-dedup: remove JWT values already in jwts section ────────────
         jwt_values = {j["value"] for j in results.get("jwts", []) if j.get("value")}
@@ -356,10 +408,27 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         results.setdefault("virustotal", {})
 
     # ── Severity summary ──────────────────────────────────────────────────────
-    # Dedupe BEFORE sorting / summary / scoring so all three agree.
-    results["findings"] = dedupe_findings(results["findings"])
+    # ── Phase 1.95: Finding Fusion Engine — collapse multi-engine duplicates into
+    # ONE canonical finding "Detected By" all of them, with full provenance + a
+    # multi-engine agreement signal. Supersets the old exact-key dedupe (also
+    # unifies cross-engine equivalents). Runs BEFORE the Confidence Engine so
+    # agreement feeds confidence. Deterministic, additive. Mirror of Android. ──
+    try:
+        from . import fusion
+        fusion.fuse(results, platform="ios")
+    except Exception:
+        log.exception("[fusion] failed; falling back to exact-key dedupe")
+        results["findings"] = dedupe_findings(results["findings"])
     # ── Phase 0/1: canonical normalization + ownership (additive, non-destructive) ──
     _app_pkg = results.get("app_info", {}).get("bundle_id", "")
+    # ── Phase 1.9: APKLeaks Detection Source — already applied. The APKLeaks
+    # pattern catalog (platform-agnostic: PEM keys, cloud creds, JWTs, URLs all
+    # appear in iOS bundles too) was folded into the SINGLE combined secret walk
+    # near the top of this function (``secret_catalog.combined()`` →
+    # ``routing.extract_apkleaks`` → fusion), so its secrets/findings/endpoints are
+    # already in the native streams with attribution + de-dup. We deliberately do
+    # NOT call the registry orchestrator here — that would re-walk the bundle a
+    # second time. ──
     # ── Phase 1.4: Secret Intelligence Engine — multi-stage validation of every
     # detected secret. MUST run BEFORE secret_intel masking so it sees raw values;
     # it stores only derived, non-sensitive signals. Additive only; never
@@ -403,6 +472,19 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     results["findings"] = sort_findings(results["findings"])
     results["severity_summary"] = compute_severity_summary(results["findings"])
 
+    # ── Phase 1.9: secret→finding intelligence bridge — mirror MASKED APKLeaks
+    # secrets into results["findings"] so they traverse ownership → confidence →
+    # evidence → triage → attack chains → bug-bounty. Placed AFTER severity_summary
+    # (so the bridged copies are never double-counted in the user-facing severity
+    # counts) and AFTER masking (so no raw value can enter the findings stream).
+    # reconcile_bridged_findings() (after bug-bounty) copies the enrichment back
+    # onto the secret and REMOVES these copies, so they never display twice. Mirror
+    # of the Android placement — Android/iOS stay consistent. ──
+    try:
+        from .detection_sources import fusion as _ds_fusion
+        _ds_fusion.bridge_secrets_to_findings(results, platform="ios")
+    except Exception:
+        log.exception("[detection_sources] secret->finding bridge failed")
     # ── Phase 1.2: Ownership Engine — enrich every finding with ownership
     # metadata (owner_type/name/confidence/reason/…). Additive only: it writes
     # new owner_* keys and never touches existing finding data, so reports/UI are
@@ -440,6 +522,16 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         triage.annotate(results)
     except Exception:
         log.exception("[triage] failed; findings left without triage decisions")
+    # ── Phase 1.96/1.97: Intelligent Evidence Selection + Report Accuracy — pick the
+    # strongest application-relevant primary proof, stamp the unified evidence_view,
+    # and promote it into the legacy location fields so every surface shows the right
+    # file. Runs BEFORE attack chains so chains reference corrected primaries. Mirror
+    # of the Android placement. ──
+    try:
+        from . import evidence_selection
+        evidence_selection.annotate(results, platform="ios")
+    except Exception:
+        log.exception("[evidence_selection] failed; findings left without proof selection")
     # ── Phase 1.7: Attack Chain Engine v2 — build realistic, evidence-backed,
     # explainable attacker journeys from the triaged findings + attack surface
     # (SAFE CHAINING: framework noise / suppressed / FP secrets / generated code
@@ -459,6 +551,19 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         bug_bounty.annotate(results)
     except Exception:
         log.exception("[bug_bounty] failed; no reportability guidance emitted")
+    # ── Phase 1.9: reconcile the secret→finding bridge — copy the intelligence the
+    # engines computed (ownership/confidence/evidence/triage/bug-bounty/chain
+    # membership) back onto the linked secret, then REMOVE the bridged copies from
+    # results["findings"]. After this the same secret is shown once (Secrets view),
+    # carries its full intelligence, and never appears as a duplicate finding in the
+    # UI / PDF / HTML / JSON / SARIF / dashboard. Runs before analyst/MASVS/
+    # workspaces/quick-summary/score so none of them see the bridged copies. Mirror
+    # of the Android placement. ──
+    try:
+        from .detection_sources import fusion as _ds_fusion
+        _ds_fusion.reconcile_bridged_findings(results)
+    except Exception:
+        log.exception("[detection_sources] bridge reconcile failed")
     # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
     try:
         from . import analyst_intel
@@ -477,6 +582,12 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         workspaces.annotate(results)
     except Exception:
         log.exception("[workspaces] failed; workspace structures not emitted")
+    # ── Phase 2.3: Source / Security Explorer overlay (reuses existing metadata). ──
+    try:
+        from . import source_explorer
+        source_explorer.annotate(results)
+    except Exception:
+        log.exception("[source_explorer] overlay failed; explorer metadata not emitted")
 
     # ── Quick summary ─────────────────────────────────────────────────────────
     _build_ios_quick_summary(results)

@@ -155,6 +155,79 @@ class SecretIntelligenceEngine:
             return "production"
         return "unknown"
 
+    # ── needs-context test (generic, or an intrinsically ambiguous format) ───
+    @staticmethod
+    def _needs_context(rec: dict | None) -> bool:
+        """True when the value's format alone cannot establish it is a secret.
+
+        Covers generic/weak fallbacks AND ambiguous UUID-shaped "provider" formats
+        (e.g. the Heroku API key, a bare UUID): these are indistinguishable from a
+        request/correlation id, so they require credential context to corroborate.
+        """
+        if rec is None:
+            return True
+        if rec["kind"] in (P.KIND_GENERIC, P.KIND_WEAK):
+            return True
+        return rec.get("note") == "uuid-form" or rec.get("structure") == "uuid"
+
+    # ── context signals (variable name / nearby usage / dead constant) ───────
+    @staticmethod
+    def _context_signals(ctx: dict, rec: dict | None,
+                         context_kind: str) -> tuple[int | None, bool | None, list[str]]:
+        """Deterministic variable-name + nearby-usage + dead-constant analysis.
+
+        Returns ``(context_score 0-100 | None, usage_referenced | None, factors)``.
+        Reads only the already-captured ``snippet`` / ``code_context`` / detector
+        ``name`` — never re-reads files, never networks. ``None`` score means there
+        was no inspectable context (e.g. a bare DEX string), so the value is neither
+        boosted nor penalized on this axis.
+
+        This is what lets Beetle keep an application-specific secret named
+        ``clientSecret`` while refusing a long random hex constant with no
+        credential variable name and no security-API usage nearby.
+        """
+        snippet = ctx.get("snippet") or ""
+        code_ctx = ctx.get("code_context") or ""
+        name = ctx.get("name") or ""
+        if not (snippet or code_ctx or name):
+            return None, None, ["no inspectable context"]
+
+        blob = f"{name}\n{snippet}\n{code_ctx}".lower()
+        score = C.CONTEXT_BASE
+        factors: list[str] = []
+        p = C.CONTEXT_POINTS
+
+        var_hit = any(h in blob for h in C.CONTEXT_VAR_NAME_HINTS)
+        if var_hit:
+            score += p["var_name"]; factors.append("credential variable name")
+        usage_hit = any(h in blob for h in C.CONTEXT_USAGE_HINTS)
+        if usage_hit:
+            score += p["usage"]; factors.append("security-API usage nearby")
+        if context_kind in C.CONTEXT_STRONG_KINDS:
+            score += p["strong_file"]; factors.append(f"{context_kind} surface")
+        # An unambiguous provider/structured format corroborates on its own; an
+        # ambiguous UUID-shaped "provider" does NOT (it needs credential context).
+        needs_context = SecretIntelligenceEngine._needs_context(rec)
+        if rec and rec["kind"] in (P.KIND_PROVIDER, P.KIND_STRUCTURED) and not needs_context:
+            score += p["provider_format"]; factors.append("provider/structured format")
+
+        is_generic = needs_context
+        is_constant_decl = any(d in blob for d in C.CONTEXT_CONSTANT_DECL)
+        usage_referenced: bool | None = None
+        if var_hit or usage_hit:
+            usage_referenced = True
+        elif is_constant_decl and is_generic:
+            # A constant declaration with neither a credential name nor a nearby
+            # security-API use is most likely an inert generated/library constant.
+            score -= C.CONTEXT_DEAD_CONSTANT_PENALTY
+            usage_referenced = False
+            factors.append("inert constant (no credential name/usage)")
+        elif is_generic:
+            score -= C.CONTEXT_NO_SIGNAL_PENALTY
+            factors.append("no credential name/usage signal")
+
+        return _clamp(score), usage_referenced, factors
+
     # ── false-positive detection ─────────────────────────────────────────────
     @staticmethod
     def _false_positive(value: str, rec: dict | None, context_kind: str,
@@ -248,6 +321,8 @@ class SecretIntelligenceEngine:
             return C.Status.DOC_EXAMPLE, "known documentation/example value"
         if fp_kind == "crypto_constant":
             return C.Status.GENERATED_CONSTANT, "crypto test vector / library constant"
+        if fp_kind == "unreferenced_generic":
+            return C.Status.FALSE_POSITIVE, "long random value with no credential context"
         if fp_kind in ("placeholder", "garbage"):
             return C.Status.FALSE_POSITIVE, "placeholder or low-entropy non-secret"
         if owner_type == "GeneratedCode" and kind not in (P.KIND_PROVIDER, P.KIND_STRUCTURED):
@@ -275,11 +350,34 @@ class SecretIntelligenceEngine:
         fmt = self._validate_format(value, rec)
         kind = fmt["kind"]
         environment = self._environment(value, context_kind)
+        context_score, usage_referenced, context_factors = self._context_signals(
+            ctx, rec, context_kind)
         is_fp, fp_kind, fp_reason = self._false_positive(value, rec, context_kind, owner_type)
+
+        # Context-driven FP: a GENERIC/WEAK value with an INSPECTED snippet but no
+        # credential variable name and no security-API usage nearby is the classic
+        # "long random string" false positive (UUID / hash / library constant /
+        # crypto parameter). Provider/structured/validated values are never touched
+        # — EXCEPT intrinsically ambiguous UUID-shaped "provider" formats (e.g. the
+        # Heroku API key, which is just a bare UUID): those are indistinguishable
+        # from any request/correlation id, so they also require credential context.
+        is_generic = self._needs_context(rec)
+        if (not is_fp and not validated and is_generic and context_score is not None
+                and context_score <= C.CONTEXT_GENERIC_FP_MAX):
+            is_fp, fp_kind = True, "unreferenced_generic"
+            fp_reason = ("high-entropy value with no credential variable name or "
+                         "security-API usage nearby (context score "
+                         f"{context_score}) — treated as an inert constant")
 
         det, det_reason = self._detection(rec, name, validated, entropy, length)
         own = C.OWNERSHIP_RELEVANCE.get(owner_type, C.OWNERSHIP_RELEVANCE_DEFAULT)
         val, val_factors = self._validation(fmt, entropy, length, is_fp)
+        # Strong credential context corroborates a generic value (the inverse of the
+        # rule above): keeps application-specific / custom enterprise secrets visible.
+        if (is_generic and not is_fp and context_score is not None
+                and context_score >= C.CONTEXT_STRONG_MIN):
+            val = _clamp(val + C.CONTEXT_VALIDATION_BONUS)
+            val_factors.append(f"strong credential context ({context_score})")
         evi, evi_factors = self._evidence(ctx, context_kind)
 
         w = C.OVERALL_WEIGHTS
@@ -304,20 +402,40 @@ class SecretIntelligenceEngine:
                           f"[{', '.join(val_factors) or 'none'}]; ownership {own} ({owner_type}); "
                           f"evidence {evi}")
         why_rejected = fp_reason if is_fp else ""
+        why_context = "; ".join(context_factors) if context_factors else "n/a"
+        # Single analyst-facing line that explains the verdict (the "Validation
+        # Reason" the report shows): the rejection cause if rejected, else why it
+        # was accepted (provider format / structure / credential context).
+        if why_rejected:
+            validation_reason = why_rejected
+        elif rec:
+            validation_reason = f"matches {secret_type} format; {why_context}"
+        else:
+            validation_reason = f"generic value — {why_context}"
+
+        # `recognized_format` = an UNAMBIGUOUS provider/structured/public format
+        # (distinct from `format_valid`, which is True even for an ambiguous bare-UUID
+        # "provider" like Heroku). The visibility gate uses THIS so a heuristic FP can
+        # never hide a real provider secret (item 13), while an ambiguous UUID that the
+        # engine rejected for lack of context is still suppressible.
+        recognized_format = bool(fmt["format_valid"]) and not is_generic
 
         return SecretAssessment(
             secret_type=secret_type, provider=provider, status=status,
             detection_confidence=det, ownership_confidence=own,
             evidence_confidence=evi, validation_confidence=val,
+            context_score=context_score, usage_referenced=usage_referenced,
             overall_confidence=overall,
             entropy=round(entropy, 2), length=length,
-            format_valid=fmt["format_valid"], structure_valid=fmt["structure_valid"],
+            format_valid=fmt["format_valid"], recognized_format=recognized_format,
+            structure_valid=fmt["structure_valid"],
             checksum_valid=fmt["checksum_valid"], environment=environment,
             context=context_kind, owner_type=owner_type, false_positive=is_fp,
+            validation_reason=validation_reason,
             reasons={
                 "detected": why_detected, "classified": why_classified,
                 "provider": why_provider, "confidence": why_confidence,
-                "rejected": why_rejected,
+                "context": why_context, "rejected": why_rejected,
             },
             version=self.version,
         )
@@ -376,6 +494,9 @@ def annotate(results: dict) -> dict:
         item["secret_intelligence"] = a
         item["secret_status"] = a["status"]
         item["secret_overall_confidence"] = a["overall_confidence"]
+        # Flat conveniences for the suppression gate (secret_intel) and reports.
+        item["secret_context_score"] = a.get("context_score")
+        item["secret_validation_reason"] = a.get("validation_reason")
         by_status[a["status"]] = by_status.get(a["status"], 0) + 1
         n += 1
 

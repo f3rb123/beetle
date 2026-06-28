@@ -546,6 +546,7 @@ export function NetworkPanel({ results }) {
   const [q, setQ] = useState('')
   const [tab, setTab] = useState('endpoints')
   const [limit, setLimit] = useState(60)
+  const [showSuppressedIps, setShowSuppressedIps] = useState(false)
   const ql = q.trim().toLowerCase()
 
   return (
@@ -633,7 +634,41 @@ export function NetworkPanel({ results }) {
         {tab === 'ips' ? (() => {
           const rows = ips.filter(ip => !ql || String(ip.ip || '').toLowerCase().includes(ql))
           if (!rows.length) return <EmptyState title="No IP addresses" body="No literal IP addresses were found in the package." />
-          return <div className="ws-card" style={{ overflow: 'hidden' }}>{rows.slice(0, limit).map((ip, i) => <div key={i} className="ws-file"><span className="ws-mono">{ip.ip}</span>{ip.type ? <SoftTag>{ip.type}</SoftTag> : null}{ip.geo || ip.country ? <span className="ws-muted" style={{ fontSize: 12 }}>{ip.geo || ip.country}</span> : null}</div>)}<Pager count={rows.length} limit={limit} setLimit={setLimit} /></div>
+          // Noise classes (loopback/link-local/multicast/reserved/broadcast/docs and
+          // placeholders) are classified + kept but suppressed-by-default; the rest
+          // (public/private + context-promoted) are shown. A toggle reveals the noise.
+          const visible = rows.filter(ip => !ip.suppressed)
+          const suppressed = rows.filter(ip => ip.suppressed)
+          const shown = showSuppressedIps ? rows : (visible.length ? visible : rows)
+          const ownerClass = o => /application/i.test(o || '') ? 'ok' : (/framework|sdk|generated/i.test(o || '') ? 'risk' : '')
+          const renderIp = (ip, i) => (
+            <div key={i} className="ws-file" style={{ flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
+              <span className="ws-mono" style={ip.suppressed ? { opacity: 0.6 } : undefined}>{ip.ip}</span>
+              <SoftTag title="Classification">{ip.classification_label || ip.type || 'IP'}</SoftTag>
+              {ip.owner ? <span className={`ws-pill ws-pill--${ownerClass(ip.owner) || 'ok'}`} title="Owner (Ownership Engine)">{ip.owner}</span> : null}
+              {typeof ip.confidence === 'number' ? <span className="ws-muted" style={{ fontSize: 12 }} title="Proof confidence">{ip.confidence}%</span> : null}
+              {ip.file_path ? <span className="ws-muted ws-mono" style={{ fontSize: 12 }} title={ip.file_path}>{String(ip.file_path).split('/').pop()}{ip.line ? `:${ip.line}` : ''}</span> : null}
+              {ip.occurrences > 1 ? <span className="ws-muted" style={{ fontSize: 12 }} title="Occurrences">×{ip.occurrences}</span> : null}
+              {(ip.intelligence || []).map((t, j) => <SoftTag key={j} title="Intelligence">{t}</SoftTag>)}
+              {ip.geo || ip.country ? <span className="ws-muted" style={{ fontSize: 12 }}>{ip.geo || ip.country}</span> : null}
+            </div>
+          )
+          return (
+            <div className="ws-card" style={{ overflow: 'hidden' }}>
+              {shown.slice(0, limit).map(renderIp)}
+              <Pager count={shown.length} limit={limit} setLimit={setLimit} />
+              {suppressed.length && !showSuppressedIps ? (
+                <button type="button" className="ws-btn ws-btn--sm" style={{ margin: 10 }}
+                  onClick={() => setShowSuppressedIps(true)}>
+                  Show {suppressed.length} suppressed (loopback / reserved / placeholder noise)
+                </button>
+              ) : null}
+              {showSuppressedIps ? (
+                <button type="button" className="ws-btn ws-btn--sm" style={{ margin: 10 }}
+                  onClick={() => setShowSuppressedIps(false)}>Hide noise</button>
+              ) : null}
+            </div>
+          )
         })() : null}
       </div>
 

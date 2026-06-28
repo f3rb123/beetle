@@ -18,6 +18,12 @@ import { FINDING_AI_ACTIONS, fetchAiProviders, runFindingAction } from '../../li
 import {
   findingKey, FINDING_STATES, STATE_META, PRIORITIES, canWrite, renderMarkdown,
 } from '../../lib/collab.js'
+import {
+  getEvidenceView, detectionSources, trustScore, trustBand, confidenceContributions,
+  reachabilityLabel, matchesFilters, findingDetectionSourceSet, findingFrameworkSet,
+  OWNERSHIP_OPTIONS,
+} from './evidence-model.js'
+import { useWorkspaceNav } from './workspace-context.jsx'
 
 // Small coloured pill showing a finding's triage state / priority / assignee.
 function StateBadge({ meta }) {
@@ -220,6 +226,20 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCod
 // ───────────────────────────── Findings ──────────────────────────────────
 // Stacked finding card (Phase 11.86 Task 8): severity + confidence header,
 // title, file:line, and explicit View Code / Open Finding actions.
+// Compact labelled <select> for the analyst filter row.
+function FilterSelect({ label, value, options, onChange }) {
+  if (!options || !options.length) return null
+  return (
+    <label className="ws-filter">
+      <span className="ws-filter__label">{label}</span>
+      <select className="ws-input ws-filter__select" value={value} onChange={e => onChange(e.target.value)}>
+        <option value="all">All</option>
+        {options.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </label>
+  )
+}
+
 function FindingRow({ f, onOpen, onOpenCode, meta }) {
   const s = normSev(f.severity)
   const conf = confidenceLabel(f)
@@ -241,6 +261,7 @@ function FindingRow({ f, onOpen, onOpenCode, meta }) {
           {conf ? <SoftTag title="Evidence quality / confidence">{conf} confidence</SoftTag> : null}
           {own ? <SoftTag title="Ownership">{own}</SoftTag> : null}
           {f.category ? <SoftTag>{f.category}</SoftTag> : null}
+          {detectionSources(f).length > 1 ? <SoftTag title={detectionSources(f).join(', ')}>{detectionSources(f).length} engines</SoftTag> : null}
           {f.suppressed ? <SoftTag title={f.suppression_reason}>suppressed</SoftTag> : null}
           <StateBadge meta={meta} />
         </div>
@@ -271,10 +292,19 @@ export function FindingsPanel({ results, onOpenFinding, onOpenCode, collab }) {
   const [sev, setSev] = useState('all')
   const [appOnly, setAppOnly] = useState(false)
   const [stateFilter, setStateFilter] = useState('all')   // all | <state> | suppressed
+  const [adv, setAdv] = useState({ category: 'all', detectionSource: 'all', ownership: 'all', framework: 'all', minTrust: 0 })
   const [limit, setLimit] = useState(60)
 
   const showSuppressed = stateFilter === 'suppressed'
   const all = showSuppressed ? suppressedAll : active
+
+  // Option lists for the analyst filters (derived from the actual findings).
+  const opts = useMemo(() => ({
+    categories: [...new Set(active.map(f => f.category).filter(Boolean))].sort(),
+    sources: findingDetectionSourceSet(active),
+    ownerships: OWNERSHIP_OPTIONS.filter(o => active.some(f => (f.owner_type || f.ownership) === o)),
+    frameworks: findingFrameworkSet(active),
+  }), [active])
 
   const filtered = useMemo(() => {
     const ql = q.trim().toLowerCase()
@@ -285,13 +315,17 @@ export function FindingsPanel({ results, onOpenFinding, onOpenCode, collab }) {
         const st = meta[findingKey(f)]?.state || 'open'
         if (st !== stateFilter) return false
       }
+      // Analyst filters (detection source / ownership / framework / category / trust).
+      if (!matchesFilters(f, adv)) return false
       if (ql) {
-        const blob = `${f.title} ${f.category} ${findingPath(f)} ${f.cwe || ''}`.toLowerCase()
+        const blob = `${f.title} ${f.category} ${findingPath(f)} ${f.cwe || ''} ${detectionSources(f).join(' ')}`.toLowerCase()
         if (!blob.includes(ql)) return false
       }
       return true
     }).sort((a, b) => SEV_RANK[normSev(a.severity)] - SEV_RANK[normSev(b.severity)])
-  }, [all, q, sev, appOnly, stateFilter, showSuppressed, meta])
+  }, [all, q, sev, appOnly, stateFilter, showSuppressed, meta, adv])
+
+  const setAdvKey = (k, v) => { setAdv(a => ({ ...a, [k]: v })); setLimit(60) }
 
   return (
     <div>
@@ -314,6 +348,16 @@ export function FindingsPanel({ results, onOpenFinding, onOpenCode, collab }) {
         {suppressedAll.length ? (
           <button type="button" className={`ws-chip${showSuppressed ? ' is-active' : ''}`} onClick={() => { setStateFilter('suppressed'); setLimit(60) }}>Suppressed ({suppressedAll.length})</button>
         ) : null}
+      </div>
+      <div className="ws-toolbar ws-toolbar--filters">
+        <FilterSelect label="Category" value={adv.category} options={opts.categories} onChange={v => setAdvKey('category', v)} />
+        <FilterSelect label="Detected By" value={adv.detectionSource} options={opts.sources} onChange={v => setAdvKey('detectionSource', v)} />
+        <FilterSelect label="Ownership" value={adv.ownership} options={opts.ownerships} onChange={v => setAdvKey('ownership', v)} />
+        {opts.frameworks.length ? <FilterSelect label="Framework" value={adv.framework} options={opts.frameworks} onChange={v => setAdvKey('framework', v)} /> : null}
+        <label className="ws-filter-range" title="Minimum trust score">
+          <span className="ws-muted" style={{ fontSize: 12 }}>Trust ≥ {adv.minTrust}</span>
+          <input type="range" min="0" max="100" step="5" value={adv.minTrust} onChange={e => setAdvKey('minTrust', Number(e.target.value))} />
+        </label>
       </div>
       {filtered.length ? (
         <>
@@ -421,6 +465,183 @@ function CollabBlock({ finding, collab }) {
   )
 }
 
+// ─── Analyst intelligence components (Phase 1.99) ─────────────────────────────
+// All presentation-only; consume the backend evidence_view / detected_by / fusion
+// / confidence_breakdown via the pure evidence-model helpers. No backend calls.
+
+function copyToClipboard(text) {
+  try { navigator.clipboard?.writeText(String(text || '')) } catch { /* clipboard unavailable */ }
+}
+
+// Header metrics strip: every key signal at a glance.
+function IntelStrip({ finding }) {
+  const f = finding
+  const view = getEvidenceView(f)
+  const trust = trustScore(f)
+  const conf = confidenceLabel(f)
+  const reach = reachabilityLabel(f)
+  const cells = [
+    { label: 'Severity', value: normSev(f.severity).toUpperCase() },
+    conf ? { label: 'Confidence', value: conf } : null,
+    { label: 'Trust', value: `${trust}`, band: trustBand(trust) },
+    view.evidenceScore ? { label: 'Evidence', value: view.evidenceScore } : null,
+    Number(f.fusion_score) ? { label: 'Fusion', value: f.fusion_score } : null,
+    view.ownership ? { label: 'Ownership', value: ownershipLabel({ ownership: view.ownership }) || view.ownership } : null,
+    reach ? { label: 'Reachability', value: reach } : null,
+    (view.inAttackChain) ? { label: 'Attack Chain', value: 'In chain' } : null,
+  ].filter(Boolean)
+  return (
+    <div className="ws-intel">
+      {cells.map((c, i) => (
+        <div key={i} className={`ws-intel__cell${c.band ? ` ws-intel__cell--${c.band}` : ''}`}>
+          <div className="ws-intel__label">{c.label}</div>
+          <div className="ws-intel__value">{c.value}</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// Detected-By badges. Future engines appear automatically (data-driven).
+function DetectedByBadges({ finding }) {
+  const sources = detectionSources(finding)
+  if (!sources.length) return null
+  return (
+    <Block label="Detected By">
+      <div className="ws-badges">
+        {sources.map((s, i) => <span key={i} className="ws-badge ws-badge--engine">✓ {s}</span>)}
+      </div>
+    </Block>
+  )
+}
+
+// Large highlighted primary-evidence card with analyst actions.
+function PrimaryEvidenceCard({ view, finding, onOpenCode }) {
+  const nav = useWorkspaceNav()
+  const p = view.primary
+  if (!p || !p.file) return null
+  const fileName = p.file.split('/').pop()
+  const lines = p.line ? [p.line] : []
+  // Jump-to-source/smali flows through the nav seam (re-targetable to the future
+  // Source Explorer); falls back to the raw onOpenCode prop when rendered without
+  // a workspace context.
+  const open = (vw) => {
+    const opts = { snippet: p.snippet, view: vw }
+    if (nav._onOpenCode) (vw === 'smali' ? nav.openSmali : nav.openSource)(p.file, lines, opts)
+    else onOpenCode?.(p.file, lines, opts)
+  }
+  return (
+    <div className="ws-block">
+      <div className="ws-block__label">Primary Evidence</div>
+      <div className="ws-primary">
+        <div className="ws-primary__top">
+          <FileCode2 size={16} />
+          <span className="ws-primary__file ws-mono" title={p.file}>{fileName}{p.line ? `:${p.line}` : ''}</span>
+          {p.language ? <span className="ws-badge">{p.language}</span> : null}
+          {p.owner_type ? <span className="ws-badge ws-badge--own">{ownershipLabel({ ownership: p.owner_type }) || p.owner_type}</span> : null}
+          {p.source ? <span className="ws-badge ws-badge--engine">{p.source}</span> : null}
+        </div>
+        {p.snippet ? <pre className="ws-code">{p.snippet}</pre> : null}
+        {(p.reasons || []).length ? (
+          <ul className="ws-primary__reasons">
+            {p.reasons.slice(0, 5).map((r, i) => <li key={i}>✓ {r}</li>)}
+          </ul>
+        ) : (view.reason ? <div className="ws-primary__reason ws-muted">{view.reason}</div> : null)}
+        {view.frameworkOnly ? (
+          <div className="ws-primary__note">No application-owned evidence exists for this finding — the proof is framework/library code.</div>
+        ) : null}
+        <div className="ws-primary__actions">
+          {/* Certificate / signing artifacts have no source file — only offer Copy. */}
+          {p.artifact ? null : <button type="button" className="ws-btn ws-btn--primary" onClick={() => open('java')}><FileCode2 size={14} /> View Source</button>}
+          {p.artifact ? null : <button type="button" className="ws-btn" onClick={() => open('smali')} title="Smali view (Source Explorer — roadmap)"><Layers size={14} /> View Smali</button>}
+          <button type="button" className="ws-btn" onClick={() => copyToClipboard(p.file + (p.line ? `:${p.line}` : ''))}>Copy Path</button>
+          {p.snippet ? <button type="button" className="ws-btn" onClick={() => copyToClipboard(p.snippet)}>Copy Snippet</button> : null}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Collapsible supporting evidence (app/manifest/config + chain references).
+function SupportingEvidence({ view, onOpenCode }) {
+  const items = view.supporting || []
+  const [open, setOpen] = useState(false)
+  if (!items.length) return null
+  return (
+    <div className="ws-block">
+      <button type="button" className="ws-collapse" onClick={() => setOpen(o => !o)}>
+        <ChevronRight size={14} className={open ? 'ws-rot90' : ''} /> Supporting Evidence ({items.length})
+      </button>
+      {open ? items.map((s, i) => (
+        <div key={i} className="ws-evid ws-evid--sm">
+          <div className="ws-evid__loc ws-mono" title={s.file}>{(s.file || '').split('/').pop()}{s.line ? `:${s.line}` : ''}
+            {s.language ? <span className="ws-badge" style={{ marginLeft: 6 }}>{s.language}</span> : null}</div>
+          {s.snippet ? <pre className="ws-code">{s.snippet}</pre> : null}
+          {onOpenCode && s.file ? <button type="button" className="ws-btn ws-btn--sm" onClick={() => onOpenCode(s.file, s.line ? [s.line] : [])}><FileCode2 size={13} /> View</button> : null}
+        </div>
+      )) : null}
+    </div>
+  )
+}
+
+// Hidden library evidence — collapsed by default, explains WHY each was hidden,
+// capped so we never render thousands of SDK files.
+function HiddenLibraryEvidence({ view }) {
+  const hidden = view.hidden || { count: 0, items: [], owners: [] }
+  const [open, setOpen] = useState(false)
+  if (!hidden.count) return null
+  const items = (hidden.items || []).slice(0, 50)
+  return (
+    <div className="ws-block">
+      <button type="button" className="ws-collapse ws-collapse--muted" onClick={() => setOpen(o => !o)}>
+        <ChevronRight size={14} className={open ? 'ws-rot90' : ''} /> Hidden Library Evidence ({hidden.count})
+        {hidden.owners?.length ? <span className="ws-muted" style={{ fontWeight: 400 }}> — {hidden.owners.slice(0, 4).join(', ')}</span> : null}
+      </button>
+      {open ? (
+        <div className="ws-hidden">
+          {items.map((it, i) => (
+            <div key={i} className="ws-hidden__row">
+              <span className="ws-mono ws-muted" title={it.file}>{(it.file || '').split('/').pop()}</span>
+              <span className="ws-badge ws-badge--own">{it.owner_name || it.owner_type}</span>
+              {(it.reasons || []).length ? <span className="ws-muted" style={{ fontSize: 11.5 }}>✗ {it.reasons[0]}</span> : null}
+            </div>
+          ))}
+          {hidden.count > items.length ? <div className="ws-muted" style={{ fontSize: 11.5, marginTop: 6 }}>+{hidden.count - items.length} more hidden</div> : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+// Explainable confidence panel: overall + contributions + why high/low.
+function ConfidencePanel({ finding }) {
+  const c = confidenceContributions(finding)
+  if (!c.overall && !c.reason) return null
+  const Bar = ({ label, value }) => (
+    <div className="ws-confbar">
+      <span className="ws-confbar__label">{label}</span>
+      <span className="ws-confbar__track"><span className="ws-confbar__fill" style={{ width: `${Math.max(0, Math.min(100, value))}%` }} /></span>
+      <span className="ws-confbar__val">{value}</span>
+    </div>
+  )
+  return (
+    <Block label="Confidence">
+      <div className="ws-conf-head">
+        <span className={`ws-rating ws-rating--${String(c.band).toLowerCase()}`}>{c.band}</span>
+        <span className="ws-mono">{c.overall}/100</span>
+      </div>
+      {c.reason ? <p className="ws-muted" style={{ fontSize: 12.5, margin: '6px 0 10px' }}>{c.reason}</p> : null}
+      {c.positives.map((p, i) => <Bar key={`p${i}`} label={`✓ ${p.label}`} value={p.value} />)}
+      {c.negatives.map((p, i) => <Bar key={`n${i}`} label={`✗ ${p.label}`} value={p.value} />)}
+      <div className="ws-conf-contrib">
+        <div><b>Fusion:</b> {c.fusionContribution}</div>
+        <div><b>Evidence:</b> {c.evidenceContribution || '—'}</div>
+        <div><b>Ownership:</b> {c.ownershipContribution}</div>
+      </div>
+    </Block>
+  )
+}
+
 // ───────────────────────── Finding details drawer ────────────────────────
 export function FindingDrawer({ finding, onClose, onOpenCode, collab }) {
   useEscape(onClose)
@@ -439,6 +660,7 @@ export function FindingDrawer({ finding, onClose, onOpenCode, collab }) {
   const ex = f.analyst_explanation || {}
   const snippet = f.snippet || f.code_context || (f.file_evidence?.[0]?.snippet) || ''
   const rem = ex.remediation || {}
+  const view = getEvidenceView(f)
 
   const runAi = async action => {
     setBusy(action)
@@ -466,6 +688,9 @@ export function FindingDrawer({ finding, onClose, onOpenCode, collab }) {
           <button type="button" className="ws-drawer__close" onClick={onClose}>×</button>
         </div>
         <div className="ws-drawer__body">
+          {/* Analyst intelligence strip + detection sources (Phase 1.99). */}
+          <IntelStrip finding={f} />
+          <DetectedByBadges finding={f} />
           {/* Collaboration — triage state, assignment, comments, suppression. */}
           {collab ? <CollabBlock finding={f} collab={collab} /> : null}
 
@@ -508,7 +733,20 @@ export function FindingDrawer({ finding, onClose, onOpenCode, collab }) {
             <ChainEvidenceBlock finding={f} onOpenCode={onOpenCode} />
           ) : null}
 
-          <EvidenceLocations finding={f} onOpenCode={onOpenCode} />
+          {/* Evidence (Phase 1.99): the selected application-relevant Primary proof,
+              collapsible Supporting, and collapsed Hidden Library evidence. Legacy
+              findings (no evidence_view) fall back to the structured location list. */}
+          {view.primary && !view.fallback ? (
+            <>
+              <PrimaryEvidenceCard view={view} finding={f} onOpenCode={onOpenCode} />
+              <SupportingEvidence view={view} onOpenCode={onOpenCode} />
+              <HiddenLibraryEvidence view={view} />
+            </>
+          ) : (
+            <EvidenceLocations finding={f} onOpenCode={onOpenCode} />
+          )}
+
+          <ConfidencePanel finding={f} />
 
           {ex.attack_scenario ? <Block label="Attack Scenario"><p>{ex.attack_scenario}</p></Block> : null}
           {(ex.prerequisites || []).length ? <Block label="Prerequisites"><ul>{ex.prerequisites.map((p, i) => <li key={i}>{p}</li>)}</ul></Block> : null}
@@ -751,7 +989,7 @@ function ChainEvidenceBlock({ finding, onOpenCode }) {
 }
 
 // ───────────────────────────── Attack Chains ─────────────────────────────
-export function ChainsPanel({ results }) {
+export function ChainsPanel({ results, onOpenCode }) {
   const cloud = results.cloud_attack_paths || []
   const findingChains = (results.findings || []).filter(f => f.is_attack_chain)
   const chains = [...cloud, ...findingChains]
@@ -773,20 +1011,28 @@ export function ChainsPanel({ results }) {
             </div>
             <div className="ws-chain__summary">{c.summary || ex.why_it_matters || ''}</div>
             <div className="ws-timeline">
-              {steps.map((s, j) => (
+              {steps.map((s, j) => {
+                const stepFile = s.file || s.file_path
+                const clickable = !!(onOpenCode && stepFile)
+                return (
                 <div key={j} className="ws-step">
                   <div className="ws-step__rail">
                     <span className={`ws-step__node${s.kind === 'exposure' ? ' ws-step__node--exposure' : ''}`} />
                     <span className="ws-step__line" />
                   </div>
-                  <div className="ws-step__body">
+                  <div className={`ws-step__body${clickable ? ' ws-step__body--clickable' : ''}`}
+                    role={clickable ? 'button' : undefined} tabIndex={clickable ? 0 : undefined}
+                    onClick={clickable ? () => onOpenCode(stepFile, s.line ? [s.line] : []) : undefined}
+                    onKeyDown={clickable ? (e => { if (e.key === 'Enter') onOpenCode(stepFile, s.line ? [s.line] : []) }) : undefined}
+                    title={clickable ? `Jump to ${stepFile}` : undefined}>
                     {s.kind ? <div className="ws-step__kind">{s.kind}</div> : null}
-                    <div className="ws-step__label">{s.label}</div>
+                    <div className="ws-step__label">{s.label}{clickable ? <FileCode2 size={12} style={{ marginLeft: 6, verticalAlign: '-1px', opacity: 0.6 }} /> : null}</div>
                     {s.masked_value ? <div className="ws-step__val ws-mono">{s.masked_value}</div> : null}
                     {s.state ? <div className="ws-step__val">{s.state}</div> : null}
                   </div>
                 </div>
-              ))}
+                )
+              })}
             </div>
             {ex.impact ? <div className="ws-callout" style={{ marginTop: 14 }}><b>Impact:</b> {ex.impact}</div> : null}
 
@@ -955,6 +1201,12 @@ function SecretDrawer({ secret: s, results, onClose, onOpenCode }) {
   // Cross-reference any cloud exposure that names this secret's provider.
   const exposures = (results.cloud_exposures || []).filter(e =>
     s.provider && `${e.summary || ''} ${e.exposure_type || ''} ${e.provider || ''}`.toLowerCase().includes(String(s.provider).toLowerCase()))
+  // Secret Intelligence assessment (Phase 1.91): context validation + verdict.
+  const si = s.secret_intelligence || {}
+  const detectedBy = detectionSources(s)
+  const contextScore = s.secret_context_score ?? si.context_score
+  const usage = si.usage_referenced
+  const validationReason = s.secret_validation_reason || si.validation_reason || si.reasons?.rejected
 
   return (
     <>
@@ -979,10 +1231,15 @@ function SecretDrawer({ secret: s, results, onClose, onOpenCode }) {
               {[
                 ['Pattern Type', s.type || s.provider || s.name],
                 ['Provider', s.provider],
+                ['Detected By', detectedBy.join(', ')],
+                ['Status', s.secret_status || si.status],
                 ['Confidence', conf ? `${String(conf).toUpperCase()}${s.detector_confidence != null ? ` (${s.detector_confidence})` : ''}` : ''],
-                ['Entropy', s.entropy != null ? Number(s.entropy).toFixed(2) : ''],
+                ['Context Score', contextScore != null ? `${contextScore}/100` : ''],
+                ['Entropy', s.entropy != null ? Number(s.entropy).toFixed(2) : (si.entropy != null ? Number(si.entropy).toFixed(2) : '')],
                 ['Ownership', ownershipLabel(s)],
+                ['Usage', usage === true ? 'referenced' : (usage === false ? 'unreferenced (inert constant)' : '')],
                 ['Validation Result', state],
+                ['Validation Reason', validationReason],
                 ['SDK Suppression', s.suppressed_reason || (s.suppressed ? 'suppressed' : 'not suppressed')],
                 ['Relationship', s.relationship_type],
                 ['Value SHA-256', s.value_sha256 ? `${String(s.value_sha256).slice(0, 16)}…` : ''],

@@ -114,11 +114,21 @@ def _make_rule(finding: dict) -> dict:
     return rule
 
 
+def _primary_location(finding: dict):
+    """The application-relevant primary (file, line, snippet) via the unified
+    Evidence Selection view, falling back to legacy fields."""
+    try:
+        from analyzers.evidence_selection import primary_location
+        return primary_location(finding)
+    except Exception:  # noqa: BLE001
+        return (finding.get("file_path") or finding.get("full_path") or "",
+                finding.get("line") or 0,
+                finding.get("snippet") or finding.get("code_context") or "")
+
+
 def _make_location(finding: dict) -> dict | None:
-    """Build a SARIF physicalLocation from finding evidence."""
-    file_path = finding.get("file_path") or finding.get("full_path") or ""
-    line      = finding.get("line") or 0
-    snippet   = finding.get("snippet") or finding.get("code_context") or ""
+    """Build a SARIF physicalLocation from the SELECTED primary evidence."""
+    file_path, line, snippet = _primary_location(finding)
 
     if not file_path:
         return None
@@ -167,9 +177,18 @@ def _make_result(finding: dict, rule_index_map: dict) -> dict:
     if loc:
         result["locations"] = [loc]
 
-    # Related locations from file_evidence
+    # Related locations = the SELECTED supporting evidence (Evidence Selection view),
+    # falling back to legacy file_evidence when selection did not run.
     related = []
-    for ev in (finding.get("file_evidence") or [])[1:4]:   # skip primary, add up to 3 more
+    supporting = []
+    try:
+        from analyzers.evidence_selection import build_evidence_view
+        supporting = [{"path": s.get("file"), "lines": [s.get("line")] if s.get("line") else [],
+                       "snippet": s.get("snippet", "")}
+                      for s in (build_evidence_view(finding).get("supporting") or [])]
+    except Exception:  # noqa: BLE001
+        supporting = (finding.get("file_evidence") or [])[1:4]
+    for ev in supporting[:3]:
         ev_path = ev.get("path", "")
         ev_lines = ev.get("lines", [])
         ev_snip  = ev.get("snippet", "")

@@ -73,6 +73,27 @@ def _all_chains(results: dict) -> list:
     return chains
 
 
+def _member_evidence(full: dict, member: dict):
+    """(file, line, evidence_view) for a chain member — sourced from the Evidence
+    Selection Engine so chains render the same primary proof as the finding does.
+    Falls back to the member/finding fields when selection did not run."""
+    view = None
+    if full:
+        try:
+            from .evidence_selection import primary_location, build_evidence_view
+            file, line, _snip = primary_location(full)
+            view = build_evidence_view(full)
+            if file:
+                return file, line, view
+        except Exception:  # noqa: BLE001 — never let chain enrichment fail a scan
+            view = None
+    file = (member.get("file_path") or member.get("file")
+            or (full.get("file_path") if full else "")
+            or ((full.get("evidence") or {}).get("file_path") if full else "") or "")
+    line = (full.get("line") if full else 0) or 0
+    return file, line, view
+
+
 def enrich_chains(results: dict) -> None:
     findings = _findings(results)
     by_id, by_title = {}, {}
@@ -92,17 +113,27 @@ def enrich_chains(results: dict) -> None:
             title = m.get("title") or m.get("label") or ""
             fid = str(m.get("id") or m.get("ref") or "")
             full = by_id.get(fid) or by_title.get(title) or {}
-            file = (m.get("file_path") or m.get("file")
-                    or full.get("file_path") or (full.get("evidence") or {}).get("file_path") or "")
-            line = full.get("line") or (full.get("evidence") or {}).get("line") or 0
+            # Phase 1.998: chains consume the SAME proof the Evidence Selection Engine
+            # chose for the member finding — never an independent file_path pick. This
+            # gives chains the application-owned primary (app/manifest over framework),
+            # plus ownership + the honest framework-only label/reason.
+            file, line, view = _member_evidence(full, m)
             role, why = _role(title)
             roles.add(role)
-            evidence.append({
+            entry = {
                 "finding_id": fid or (full.get("canonical_id") or ""),
                 "title": title, "file": file, "line": line,
                 "confidence": _conf(full) if full else (m.get("state") and "HIGH" or "LOW"),
                 "why_it_contributes": why,
-            })
+            }
+            if view:
+                entry["ownership"] = view.get("evidence_ownership") or ""
+                entry["detection_sources"] = view.get("detection_sources") or []
+                entry["evidence_reason"] = view.get("selection_reason") or ""
+                if view.get("framework_only"):
+                    entry["framework_only"] = True
+                    entry["evidence_reason"] = "No application-owned implementation was found."
+            evidence.append(entry)
         chain["chain_evidence"] = evidence
 
         has_runtime = any(

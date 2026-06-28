@@ -1,11 +1,18 @@
-// Phase 13 — Explainable Security Workspace shell. Presentation only; reuses the
-// already-loaded `results` blob and the host's openCode/export/CI plumbing.
+// Analyst Workspace shell (Phase 1.99 — Analyst Workstation foundation).
+//
+// The shell is now DATA-DRIVEN: navigation and section dispatch derive from the
+// panel registry (workspace-registry.js), and all navigation flows through the
+// workspace context (workspace-context.jsx). Adding a panel — including the roadmap
+// Source Explorer / AI Reviewer / Security Controls / Framework views — is a
+// registry entry + a renderer, with no shell refactor. Roadmap panels are already
+// navigable (they open a ComingSoon placeholder), which proves the hierarchy,
+// routing and layout accommodate them.
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   LayoutDashboard, ShieldAlert, GitBranch, KeyRound, ShieldCheck, FileCode2,
   Download, Search, ChevronLeft, Command, ScrollText, Network, Fingerprint,
   Boxes, Cpu, Bug, GitCompare, Sparkles, FolderTree, Lock, ShieldHalf, Workflow,
-  Briefcase, Wrench, MessageSquare,
+  Briefcase, Wrench, MessageSquare, Binary, Rocket,
 } from 'lucide-react'
 import beetleIcon from '../../assets/beetle-icon.png'
 import {
@@ -14,15 +21,70 @@ import {
 } from './panels.jsx'
 import {
   CertificatePanel, NetworkPanel, ManifestPanel, ComponentsPanel, AndroidApiPanel,
-  MalwarePanel, ComparePanel, AiAssistantPanel, CodeBrowserPanel,
+  MalwarePanel, ComparePanel, AiAssistantPanel,
   PermissionsPanel, AndroidPosturePanel, TaintFlowPanel,
   CisoSummaryPanel, DeveloperGuidePanel, AskAiPanel,
 } from './panels2.jsx'
-import { severityCounts, findingPath, useEscape } from './ui.jsx'
+import { SourceExplorerPanel } from './SourceExplorer.jsx'
+import { findingPath, useEscape } from './ui.jsx'
 import { useCollab, canManage, SHARE_MODES } from '../../lib/collab.js'
+import { navGroups, getPanel, isReady } from './workspace-registry.js'
+import { WorkspaceProvider, useWorkspaceNav } from './workspace-context.jsx'
 
-// Workspace-level sharing control (point 6). Managers/admins can change the
-// mode; everyone else sees the current mode read-only.
+// Registry icon-name → lucide component (keeps the registry React-free/testable).
+const ICON_MAP = {
+  LayoutDashboard, ShieldAlert, GitBranch, KeyRound, ShieldCheck, FileCode2,
+  Download, ScrollText, Network, Fingerprint, Boxes, Cpu, Bug, GitCompare,
+  Sparkles, FolderTree, Lock, ShieldHalf, Workflow, Briefcase, Wrench,
+  MessageSquare, Binary,
+}
+const iconFor = name => ICON_MAP[name] || ShieldAlert
+
+// Deep-analysis panels keep their existing nav group; they're appended to the
+// registry-derived groups so the (large) list stays where analysts expect it.
+const DEEP_ANALYSIS = [
+  { id: 'manifest', label: 'Manifest', icon: ScrollText },
+  { id: 'permissions', label: 'Permissions', icon: Lock },
+  { id: 'network', label: 'Network', icon: Network },
+  { id: 'certificate', label: 'Certificate', icon: Fingerprint },
+  { id: 'androidsec', label: 'Android Security', icon: ShieldHalf },
+  { id: 'components', label: 'Components', icon: Boxes },
+  { id: 'androidapis', label: 'Android APIs', icon: Cpu },
+  { id: 'taint', label: 'Taint Flows', icon: Workflow },
+  { id: 'malware', label: 'Malware Analysis', icon: Bug },
+  { id: 'codebrowser', label: 'Source Explorer', icon: FolderTree },
+  { id: 'compare', label: 'Compare', icon: GitCompare },
+  { id: 'ai', label: 'AI Assistant', icon: Sparkles },
+]
+
+// Build the sidebar groups: registry groups (Workspace / Audience / Source /
+// Reviewer) with resolved icons, then the Deep Analysis group.
+function useNavGroups() {
+  return useMemo(() => {
+    const groups = navGroups({ includePlanned: true }).map(g => ({
+      label: g.label,
+      items: g.items.map(p => ({ id: p.id, label: p.label, icon: iconFor(p.icon),
+        count: p.count, planned: p.status === 'planned' })),
+    }))
+    groups.push({ label: 'Deep Analysis', items: DEEP_ANALYSIS })
+    return groups
+  }, [])
+}
+
+// Roadmap placeholder for a planned panel — proves routing reaches it before the
+// feature exists. Implementing the feature flips its registry status to 'ready'.
+function ComingSoonPanel({ panelId }) {
+  const p = getPanel(panelId) || {}
+  return (
+    <div className="ws-coming">
+      <Rocket size={28} className="ws-muted" />
+      <h2>{p.roadmap || p.label || 'Coming soon'}</h2>
+      <p className="ws-muted">{p.blurb || 'This analyst surface is on the roadmap.'}</p>
+      <span className="ws-badge">Planned</span>
+    </div>
+  )
+}
+
 function ShareControl({ collab }) {
   const mode = collab.collab.share?.share_mode || 'team'
   if (!canManage()) {
@@ -36,44 +98,6 @@ function ShareControl({ collab }) {
   )
 }
 
-const NAV_GROUPS = [
-  {
-    label: 'Workspace', items: [
-      { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-      { id: 'findings', label: 'Findings', icon: ShieldAlert },
-      { id: 'chains', label: 'Attack Chains', icon: GitBranch },
-      { id: 'secrets', label: 'Secrets', icon: KeyRound },
-      { id: 'masvs', label: 'MASVS Coverage', icon: ShieldCheck },
-      { id: 'askai', label: 'Ask AI', icon: MessageSquare },
-      { id: 'files', label: 'Files', icon: FileCode2 },
-      { id: 'exports', label: 'Exports', icon: Download },
-    ],
-  },
-  {
-    label: 'Audience Reports', items: [
-      { id: 'ciso', label: 'CISO Summary', icon: Briefcase },
-      { id: 'developer', label: 'Developer Guide', icon: Wrench },
-    ],
-  },
-  {
-    label: 'Deep Analysis', items: [
-      { id: 'manifest', label: 'Manifest', icon: ScrollText },
-      { id: 'permissions', label: 'Permissions', icon: Lock },
-      { id: 'network', label: 'Network', icon: Network },
-      { id: 'certificate', label: 'Certificate', icon: Fingerprint },
-      { id: 'androidsec', label: 'Android Security', icon: ShieldHalf },
-      { id: 'components', label: 'Components', icon: Boxes },
-      { id: 'androidapis', label: 'Android APIs', icon: Cpu },
-      { id: 'taint', label: 'Taint Flows', icon: Workflow },
-      { id: 'malware', label: 'Malware Analysis', icon: Bug },
-      { id: 'codebrowser', label: 'Code Browser', icon: FolderTree },
-      { id: 'compare', label: 'Compare', icon: GitCompare },
-      { id: 'ai', label: 'AI Assistant', icon: Sparkles },
-    ],
-  },
-]
-const SECTIONS = NAV_GROUPS.flatMap(g => g.items)
-
 // ── Global search palette ──────────────────────────────────────────────────
 function SearchPalette({ index, onClose, onPick }) {
   const [q, setQ] = useState('')
@@ -84,10 +108,9 @@ function SearchPalette({ index, onClose, onPick }) {
   const groups = useMemo(() => {
     const ql = q.trim().toLowerCase()
     if (!ql) return index.slice(0, 7)
-    const matched = index.map(g => ({
+    return index.map(g => ({
       ...g, items: g.items.filter(it => it.text.toLowerCase().includes(ql)).slice(0, 6),
     })).filter(g => g.items.length)
-    return matched
   }, [q, index])
 
   return (
@@ -114,14 +137,16 @@ function SearchPalette({ index, onClose, onPick }) {
   )
 }
 
-export default function Workspace({ results, scanId, onOpenCode, actions }) {
-  const [section, setSection] = useState('overview')
-  const [drawer, setDrawer] = useState(null)
+// ── Shell (consumes the workspace context) ───────────────────────────────────
+function WorkspaceShell({ results, scanId, actions }) {
+  const nav = useWorkspaceNav()
+  const { section, finding } = nav
+  const onOpenCode = nav._onOpenCode
   const [searchOpen, setSearchOpen] = useState(false)
   const scrollRef = useRef(null)
   const collab = useCollab(scanId)
+  const groups = useNavGroups()
 
-  // Cmd/Ctrl+K opens search
   useEffect(() => {
     const h = e => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setSearchOpen(true) }
@@ -130,8 +155,7 @@ export default function Workspace({ results, scanId, onOpenCode, actions }) {
     return () => window.removeEventListener('keydown', h)
   }, [])
 
-  // Preserve scroll position when opening the drawer (no layout shift).
-  const openFinding = f => setDrawer(f)
+  const goSection = id => { nav.openSection(id); scrollRef.current?.scrollTo({ top: 0 }) }
 
   const counts = useMemo(() => {
     const findings = results.findings || []
@@ -163,12 +187,47 @@ export default function Workspace({ results, scanId, onOpenCode, actions }) {
   }, [results])
 
   const onPick = it => {
-    if (it.go) setSection(it.go)
-    if (it.finding) setTimeout(() => setDrawer(it.finding), 60)
+    if (it.go) goSection(it.go)
+    if (it.finding) setTimeout(() => nav.openFinding(it.finding), 60)
   }
 
-  const active = SECTIONS.find(s => s.id === section) || SECTIONS[0]
-  const info = results.app_info || {}
+  // Section dispatch — ready panels render their component; planned panels render
+  // the roadmap placeholder. A future panel adds one case (or we move to a map).
+  const renderPanel = () => {
+    if (!isReady(section)) {
+      const known = getPanel(section)
+      const deep = DEEP_ANALYSIS.find(d => d.id === section)
+      if (known && !deep) return <ComingSoonPanel panelId={section} />
+    }
+    switch (section) {
+      case 'overview': return <OverviewPanel results={results} onOpenSection={goSection} onOpenFinding={nav.openFinding} onOpenCode={onOpenCode} />
+      case 'findings': return <FindingsPanel results={results} onOpenFinding={nav.openFinding} onOpenCode={onOpenCode} collab={collab} />
+      case 'chains': return <ChainsPanel results={results} onOpenCode={onOpenCode} />
+      case 'secrets': return <SecretsPanel results={results} onOpenCode={onOpenCode} />
+      case 'masvs': return <MasvsPanel results={results} />
+      case 'askai': return <AskAiPanel results={results} scanId={scanId} />
+      case 'ciso': return <CisoSummaryPanel results={results} onOpenSection={goSection} />
+      case 'developer': return <DeveloperGuidePanel results={results} onOpenCode={onOpenCode} />
+      case 'files': return <FilesPanel results={results} onOpenCode={onOpenCode} />
+      case 'exports': return <ExportsPanel actions={actions} results={results} />
+      case 'manifest': return <ManifestPanel results={results} />
+      case 'permissions': return <PermissionsPanel results={results} onOpenCode={onOpenCode} />
+      case 'network': return <NetworkPanel results={results} />
+      case 'certificate': return <CertificatePanel results={results} />
+      case 'androidsec': return <AndroidPosturePanel results={results} />
+      case 'components': return <ComponentsPanel results={results} />
+      case 'androidapis': return <AndroidApiPanel results={results} onOpenCode={onOpenCode} />
+      case 'taint': return <TaintFlowPanel results={results} onOpenCode={onOpenCode} />
+      case 'malware': return <MalwarePanel results={results} />
+      case 'codebrowser': return <SourceExplorerPanel results={results} scanId={scanId} onOpenCode={onOpenCode} />
+      case 'compare': return <ComparePanel results={results} />
+      case 'ai': return <AiAssistantPanel results={results} />
+      default: return <ComingSoonPanel panelId={section} />
+    }
+  }
+
+  const allItems = groups.flatMap(g => g.items)
+  const active = allItems.find(s => s.id === section) || allItems[0]
 
   return (
     <div className="ws">
@@ -179,31 +238,32 @@ export default function Workspace({ results, scanId, onOpenCode, actions }) {
             <div><b>Beetle</b><span>{results.app_name || 'Security Analysis'}</span></div>
           </div>
           <nav className="ws-nav">
-            {NAV_GROUPS.map(group => (
+            {groups.map(group => (
               <div key={group.label} className="ws-nav__group">
                 <div className="ws-nav__grouplabel">{group.label}</div>
                 {group.items.map(s => {
                   const Icon = s.icon
-                  const n = counts[s.id]
+                  const n = counts[s.count || s.id]
                   return (
-                    <button key={s.id} type="button" className={`ws-nav__item${s.id === section ? ' is-active' : ''}`}
-                      onClick={() => { setSection(s.id); scrollRef.current?.scrollTo({ top: 0 }) }}>
+                    <button key={s.id} type="button"
+                      className={`ws-nav__item${s.id === section ? ' is-active' : ''}${s.planned ? ' ws-nav__item--planned' : ''}`}
+                      onClick={() => goSection(s.id)}>
                       <Icon size={16} />
                       <span className="ws-nav__label">{s.label}</span>
-                      {n ? <span className="ws-nav__count">{n}</span> : null}
+                      {s.planned ? <span className="ws-nav__soon">soon</span> : (n ? <span className="ws-nav__count">{n}</span> : null)}
                     </button>
                   )
                 })}
               </div>
             ))}
           </nav>
-          <div className="ws-sidebar__foot">Beetle · Explainable Security Workspace</div>
+          <div className="ws-sidebar__foot">Beetle · Analyst Workspace</div>
         </aside>
 
         <div className="ws-main">
           <header className="ws-topbar">
             <button type="button" className="ws-btn" onClick={actions.onHome} title="Back home"><ChevronLeft size={15} /> Home</button>
-            <div className="ws-topbar__title">{active.label}</div>
+            <div className="ws-topbar__title">{active?.label}</div>
             <div className="ws-topbar__spacer" />
             <button type="button" className="ws-search-trigger" onClick={() => setSearchOpen(true)}>
               <Search size={14} /> Search workspace
@@ -214,35 +274,27 @@ export default function Workspace({ results, scanId, onOpenCode, actions }) {
             {actions.user ? <button type="button" className="ws-btn" onClick={actions.onSignOut} title="Sign out">{actions.user}</button> : null}
           </header>
 
+          {/* Layout regions: a primary region today; the secondary region is reserved
+              (CSS-ready, collapsed) for the docked Source Explorer / side-by-side
+              comparison panes the roadmap will mount — see EVIDENCE_UI_WORKSPACE.md. */}
           <div className="ws-content" ref={scrollRef}>
-            {section === 'overview' && <OverviewPanel results={results} onOpenSection={setSection} onOpenFinding={openFinding} onOpenCode={onOpenCode} />}
-            {section === 'findings' && <FindingsPanel results={results} onOpenFinding={openFinding} onOpenCode={onOpenCode} collab={collab} />}
-            {section === 'chains' && <ChainsPanel results={results} />}
-            {section === 'secrets' && <SecretsPanel results={results} onOpenCode={onOpenCode} />}
-            {section === 'masvs' && <MasvsPanel results={results} />}
-            {section === 'askai' && <AskAiPanel results={results} scanId={scanId} />}
-            {section === 'ciso' && <CisoSummaryPanel results={results} onOpenSection={setSection} />}
-            {section === 'developer' && <DeveloperGuidePanel results={results} onOpenCode={onOpenCode} />}
-            {section === 'files' && <FilesPanel results={results} onOpenCode={onOpenCode} />}
-            {section === 'exports' && <ExportsPanel actions={actions} results={results} />}
-            {section === 'manifest' && <ManifestPanel results={results} />}
-            {section === 'permissions' && <PermissionsPanel results={results} onOpenCode={onOpenCode} />}
-            {section === 'network' && <NetworkPanel results={results} />}
-            {section === 'certificate' && <CertificatePanel results={results} />}
-            {section === 'androidsec' && <AndroidPosturePanel results={results} />}
-            {section === 'components' && <ComponentsPanel results={results} />}
-            {section === 'androidapis' && <AndroidApiPanel results={results} onOpenCode={onOpenCode} />}
-            {section === 'taint' && <TaintFlowPanel results={results} onOpenCode={onOpenCode} />}
-            {section === 'malware' && <MalwarePanel results={results} />}
-            {section === 'codebrowser' && <CodeBrowserPanel results={results} scanId={scanId} onOpenCode={onOpenCode} />}
-            {section === 'compare' && <ComparePanel results={results} />}
-            {section === 'ai' && <AiAssistantPanel results={results} />}
+            <div className="ws-workspace">
+              <section className="ws-region ws-region--primary">{renderPanel()}</section>
+            </div>
           </div>
         </div>
       </div>
 
-      {drawer ? <FindingDrawer finding={drawer} onClose={() => setDrawer(null)} onOpenCode={onOpenCode} collab={collab} /> : null}
+      {finding ? <FindingDrawer finding={finding} onClose={nav.closeFinding} onOpenCode={onOpenCode} collab={collab} /> : null}
       {searchOpen ? <SearchPalette index={searchIndex} onClose={() => setSearchOpen(false)} onPick={onPick} /> : null}
     </div>
+  )
+}
+
+export default function Workspace({ results, scanId, onOpenCode, actions }) {
+  return (
+    <WorkspaceProvider onOpenCode={onOpenCode}>
+      <WorkspaceShell results={results} scanId={scanId} actions={actions} />
+    </WorkspaceProvider>
   )
 }

@@ -250,6 +250,25 @@ class ConfidenceEngine:
             score = min(score, C.EXPLOIT_FRAMEWORK_CAP)
         return score, factors
 
+    # ── multi-engine agreement (Phase 1.95) ──────────────────────────────────
+    @staticmethod
+    def _agreement(f: CanonicalFinding) -> tuple[int, list[str]]:
+        """Bounded, explainable detection bonus from multi-engine corroboration.
+
+        Reads the Fusion Engine's ``detection_count`` (falling back to the length
+        of ``detected_by``). More independent engines ⇒ higher detection trust;
+        a documented metadata conflict damps the bonus. Returns (delta, factors).
+        """
+        count = max(int(f.detection_count or 0), len(f.detected_by or []))
+        if count <= 1:
+            return 0, []
+        bonus = min((count - 1) * C.AGREEMENT_PER_ENGINE, C.AGREEMENT_MAX)
+        conflicts = (f.fusion or {}).get("conflicts") if isinstance(f.fusion, dict) else None
+        if conflicts:
+            bonus = int(round(bonus * C.AGREEMENT_CONFLICT_DAMP))
+            return bonus, [f"corroborated by {count} engines (metadata conflict - corroboration damped)"]
+        return bonus, [f"corroborated by {count} independent engines"]
+
     # ── reason synthesis ─────────────────────────────────────────────────────
     @staticmethod
     def _reason(dims: dict, stage: str) -> str:
@@ -268,6 +287,12 @@ class ConfidenceEngine:
     # ── public classify ──────────────────────────────────────────────────────
     def classify(self, finding: CanonicalFinding) -> ConfidenceResult:
         det, det_f = self._detection(finding)
+        # Multi-engine agreement (Fusion Engine): bounded, explainable boost to the
+        # detection dimension so corroboration flows into overall via the weights.
+        agree_delta, agree_f = self._agreement(finding)
+        if agree_delta:
+            det = _clamp(det + agree_delta)
+            det_f = det_f + agree_f
         own, own_f = self._ownership(finding)
         evi, evi_f = self._evidence(finding)
         ctx, ctx_f = self._context(finding)

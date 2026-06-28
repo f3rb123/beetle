@@ -8,6 +8,7 @@ import {
   UploadCloud,
 } from 'lucide-react'
 import SeverityBadge from '../components/SeverityBadge.jsx'
+import EngineeringWorkspace from '../components/EngineeringWorkspace.jsx'
 import beetleIcon from '../assets/beetle-icon.png'
 import {
   DEFAULT_STAGE,
@@ -106,6 +107,9 @@ export default function Home() {
   const [activeScanId, setActiveScanId] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [history, setHistory] = useState([])
+  // Engineering Workspace: the currently selected Available module (Android/iOS).
+  // Drives the upload card's accept filter + hint; the scan workflow is unchanged.
+  const [selectedModule, setSelectedModule] = useState(null)
 
   useEffect(() => {
     apiFetch('/api/scans?limit=8')
@@ -131,6 +135,28 @@ export default function Home() {
 
     setFile(nextFile)
     setError('')
+  }
+
+  // Selecting an Available module (Android/iOS) launches the EXISTING upload
+  // workflow: it scrolls to + highlights the upload card and pre-filters the file
+  // dialog to the module's package type. startScan / SSE / navigation are unchanged.
+  const launchModule = module => {
+    // Investigation modules (Source / Security Explorer) navigate into a scan rather
+    // than uploading. Open the most recent scan's section; if there is no history,
+    // guide the user to run a scan first.
+    if (module.nav) {
+      const latest = history[0]?.scan_id
+      if (latest) { navigate(`/scans/${latest}/${module.nav}`); return }
+      setSelectedModule(null)
+      setError('Upload or open a scan first — the Explorer investigates a scan’s source.')
+      requestAnimationFrame(() => uploadCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }))
+      return
+    }
+    setSelectedModule(module)
+    setError('')
+    requestAnimationFrame(() => {
+      uploadCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
   }
 
   const applyStatusFrame = (data, scanId) => {
@@ -419,10 +445,14 @@ export default function Home() {
         </header>
 
         <main className="ws-home__main">
+          {/* Engineering Workspace — central entry point. Available modules launch
+              the existing upload workflow; Coming Soon modules are non-functional. */}
+          <EngineeringWorkspace activeModuleId={selectedModule?.id} onLaunch={launchModule} />
+
           {/* Upload card — login card visual language; workflow unchanged */}
           <div
             ref={uploadCardRef}
-            className={`upload-card upload-card--ws${dragging ? ' is-dragging' : ''}${loading ? ' is-loading' : ''}`}
+            className={`upload-card upload-card--ws${dragging ? ' is-dragging' : ''}${loading ? ' is-loading' : ''}${selectedModule ? ' is-module-active' : ''}`}
             onDragOver={event => {
               event.preventDefault()
               setDragging(true)
@@ -435,8 +465,18 @@ export default function Home() {
             }}
           >
             <div className="upload-intro">
-              <div className="upload-intro__title">Upload package</div>
-              <div className="upload-intro__copy">Drag an APK or IPA to begin analysis</div>
+              <div className="upload-intro__title">
+                {selectedModule ? selectedModule.name : 'Upload package'}
+              </div>
+              <div className="upload-intro__copy">
+                {selectedModule
+                  ? (selectedModule.platform === 'ios'
+                      ? 'Drag an IPA to begin analysis'
+                      : selectedModule.platform === 'android'
+                        ? 'Drag an APK to begin analysis'
+                        : 'Drag an APK or IPA to begin analysis')
+                  : 'Drag an APK or IPA to begin analysis'}
+              </div>
             </div>
 
             <button type="button" className={`upload-zone${file ? ' has-file' : ''}`} onClick={() => inputRef.current?.click()}>
@@ -448,7 +488,7 @@ export default function Home() {
               <span className="upload-zone__browse">Browse files <ArrowRight size={13} /></span>
             </button>
 
-            <input ref={inputRef} type="file" accept=".apk,.ipa" hidden onChange={event => pickFile(event.target.files?.[0])} />
+            <input ref={inputRef} type="file" accept={selectedModule?.accept || '.apk,.ipa'} hidden onChange={event => pickFile(event.target.files?.[0])} />
 
             {loading ? (
               <div className="scan-exp">

@@ -46,6 +46,9 @@ from .live_checks import (
 from .tracker_db import detect_trackers, analyze_malware_permissions
 from .api_analyzer import analyze_android_apis, extract_emails_from_app, detect_apkid_features
 from .domain_analyzer import check_domains
+from . import network_intel
+from . import flutter_analyzer
+from . import react_native_analyzer
 from .evidence_scanner import (
     scan_directory_for_secrets, scan_directory_for_ips,
     scan_directory_for_jwts, extract_urls
@@ -401,6 +404,7 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         # ── Androguard analysis ───────────────────────────────────────────────
         manifest_started = time.perf_counter()
         log.info(f"[{scan_id}] stage=manifest_analysis start")
+        apk = None
         if ANDROGUARD:
             try:
                 apk = AndroAPK(apk_path)
@@ -418,6 +422,19 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         # AXML in apk_extract) even when apktool failed or timed out.
         _persist_decoded_manifest(scan_id, results)
 
+        # ── Persist decoded resources.arsc string values for the secret walk ──
+        # String resources (res/values/strings.xml) are where Android apps embed
+        # Cognito pool ids, Firebase/API config, etc. — but they live ONLY in the
+        # compiled resources.arsc. jadx runs with --no-res and apktool's resource
+        # decoder can throw on some APKs, leaving NO decoded strings.xml, so those
+        # values never reach the unified secret walk (which scans jadx+apktool).
+        # androguard (already loaded) reconstructs them exactly like MobSF does;
+        # we write them to the canonical apktool/res/values/strings.xml location
+        # the walk already scans — only when apktool didn't produce one itself.
+        arsc_dir = _persist_decoded_resource_strings(scan_id, apk)
+        if arsc_dir and arsc_dir not in preferred_source_dirs:
+            preferred_source_dirs.append(arsc_dir)
+
         # ── Framework detection ───────────────────────────────────────────────
         _record_module_metric(results, "manifest_analysis", manifest_started, components=sum(len(results["attack_surface"].get(key, [])) for key in ("activities", "services", "receivers", "providers")))
         _stage(scan_id, "manifest_analysis", manifest_started)
@@ -431,11 +448,20 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         secrets_started = time.perf_counter()
         log.info(f"[{scan_id}] stage=secrets start")
         if preferred_source_dirs:
-            results["secrets"] = _scan_precise_source_secrets(preferred_source_dirs)
+            # Phase 1.9: single combined walk (Beetle Native + APKLeaks) sets
+            # results["secrets"] (native) and fuses APKLeaks secrets/findings/endpoints.
+            _scan_precise_source_secrets(results, preferred_source_dirs)
         else:
             results["secrets"] = scan_files_for_secrets(tmpdir)
             # Only fall back to raw DEX strings when JADX source is unavailable.
             _scan_dex_strings(tmpdir, results)
+            # No-JADX fallback: native uses the legacy text scanner above, so run
+            # the APKLeaks slice as one additional ev walk over the extract dir.
+            try:
+                from . import detection_sources
+                detection_sources.run_detection_sources(results, [tmpdir], platform="android")
+            except Exception:
+                log.exception("[detection_sources] APKLeaks fallback scan failed")
         if results.get("sdk_secrets"):
             results["secrets"].extend(results["sdk_secrets"])
         _record_module_metric(results, "secret_detection", secrets_started, findings=len(results.get("secrets", [])))
@@ -449,9 +475,26 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         # ── Network security config ───────────────────────────────────────────
         _analyze_network_security_config(tmpdir, results)
 
-        # ── React Native bundle analysis ──────────────────────────────────────
+        # ── React Native Security Intelligence (Phase 2.2) ────────────────────
+        # First-class sub-analyzer (replaces the old inline _analyze_rn_bundle),
+        # mirroring Flutter: RN-idiomatic findings (native bridge / storage / network /
+        # deep links / env) + canonical secrets/endpoints into the EXISTING streams.
         if results["framework"]["type"] == "react_native":
-            _analyze_rn_bundle(tmpdir, results)
+            try:
+                rn_roots = (preferred_source_dirs[:] or []) + [tmpdir]
+                react_native_analyzer.analyze(rn_roots, results, platform="android")
+            except Exception:
+                log.exception("[react_native] analysis failed; continuing without RN findings")
+        # ── Flutter Security Intelligence (Phase 2.1) ─────────────────────────
+        # Gated on the existing framework detection — mirrors the RN sub-analyzer.
+        # Contributes canonical findings/secrets/endpoints to the EXISTING streams,
+        # which then flow through the unchanged finalize pipeline. Never raises.
+        if results["framework"]["type"] == "flutter":
+            try:
+                flutter_roots = (preferred_source_dirs[:] or []) + [tmpdir]
+                flutter_analyzer.analyze(flutter_roots, results, platform="android")
+            except Exception:
+                log.exception("[flutter] analysis failed; continuing without Flutter findings")
         _record_module_metric(results, "resource_analysis", resource_started, endpoints=len(results.get("endpoints", [])))
         _stage(scan_id, "resource_scan", resource_started)
 
@@ -541,7 +584,7 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
                 "string_analysis": pool.submit(_timed_value, "string_analysis", analyze_strings, tmpdir, "android"),
                 "emails": pool.submit(_timed_value, "email_detection", extract_emails_from_app, tmpdir, apk_path),
                 "apkid": pool.submit(_timed_value, "apkid_detection", detect_apkid_features, tmpdir),
-                "ips": pool.submit(_timed_value, "ip_detection", scan_directory_for_ips, tmpdir, extra_dirs),
+                "ips": pool.submit(_timed_value, "ip_detection", network_intel.extract_ips, tmpdir, extra_dirs),
                 "jwts": pool.submit(_timed_value, "jwt_detection", scan_directory_for_jwts, tmpdir, extra_dirs),
             }
             for key, future in futures.items():
@@ -563,6 +606,15 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
                     }
         results["scan_metrics"]["summary"]["parallel_phase_ms"] = int((time.perf_counter() - parallel_started) * 1000)
         _stage(scan_id, "strings_parallel", parallel_started)
+
+        # ── Phase 1.99: Network Intelligence — enrich the raw IP hits (classify,
+        # owner-attribute via the Ownership Engine, suppress noise, merge duplicates,
+        # tag intelligence) BEFORE any downstream consumer (the public-IP finding
+        # below, network_workspace, UI). Additive; never touches URL extraction. ──
+        try:
+            network_intel.annotate(results, platform="android")
+        except Exception:
+            log.exception("[network_intel] IP enrichment failed; raw IPs left as-is")
 
         # ── NEW: ELF/SO Binary Analysis ───────────────────────────────────────
         binaries_started = time.perf_counter()
@@ -828,8 +880,18 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     _apply_finding_validation_layer(results)
     # sort_findings normalizes severity in-place before sorting. Recompute the
     # summary AFTER validation layer runs so counts and findings always match.
-    # Dedupe BEFORE sorting / summary / scoring so all three agree.
-    results["findings"] = dedupe_findings(results["findings"])
+    # ── Phase 1.95: Finding Fusion Engine — collapse multi-engine duplicates into
+    # ONE canonical finding "Detected By" all of them, with full provenance + a
+    # multi-engine agreement signal. Supersets the old exact-key dedupe: it also
+    # unifies cross-engine equivalents (different rule ids / small line drift) from
+    # Beetle Native + APKLeaks today and any future engine. Runs BEFORE the
+    # Confidence Engine so agreement feeds confidence. Deterministic, additive. ──
+    try:
+        from . import fusion
+        fusion.fuse(results, platform="android")
+    except Exception:
+        log.exception("[fusion] failed; falling back to exact-key dedupe")
+        results["findings"] = dedupe_findings(results["findings"])
     # ── Phase 0/1: canonical normalization + ownership (additive, non-destructive) ──
     _app_pkg = results.get("app_info", {}).get("package", "")
     finding_model.canonicalize_findings(results["findings"], _app_pkg)
@@ -888,6 +950,18 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         results["findings"] = _ac + [f for f in results["findings"] if not f.get("is_attack_chain")]
     # Severity influence (reachability) changed severities — recompute summary.
     results["severity_summary"] = compute_severity_summary(results["findings"])
+    # ── Phase 1.9: secret→finding intelligence bridge — mirror MASKED APKLeaks
+    # secrets into results["findings"] so they traverse ownership → confidence →
+    # evidence → triage → attack chains → bug-bounty. Placed AFTER severity_summary
+    # so the bridged copies are never double-counted in the user-facing severity
+    # counts, and AFTER masking so no raw value can enter the findings stream.
+    # reconcile_bridged_findings() (after bug-bounty) copies the enrichment back
+    # onto the secret and REMOVES these copies, so they never display twice. ──
+    try:
+        from .detection_sources import fusion as _ds_fusion
+        _ds_fusion.bridge_secrets_to_findings(results, platform="android")
+    except Exception:
+        log.exception("[detection_sources] secret->finding bridge failed")
     # ── Phase 1.2: Ownership Engine — enrich every finding with ownership
     # metadata (owner_type/name/confidence/reason/…). Additive only: it writes
     # new owner_* keys and never touches existing finding data, so reports/UI are
@@ -925,6 +999,18 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         triage.annotate(results)
     except Exception:
         log.exception("[triage] failed; findings left without triage decisions")
+    # ── Phase 1.96/1.97: Intelligent Evidence Selection + Report Accuracy — pick the
+    # strongest, most application-relevant primary proof per finding (demoting AndroidX
+    # / GMS / generated / framework files; preferring the manifest for declaration-
+    # driven findings), stamp the unified evidence_view every renderer consumes, and
+    # promote the chosen primary into the legacy location fields so all surfaces show
+    # the correct file. Runs BEFORE attack chains so chains reference the corrected
+    # primaries; ownership/confidence/evidence/reachability are already present. ──
+    try:
+        from . import evidence_selection
+        evidence_selection.annotate(results, platform="android")
+    except Exception:
+        log.exception("[evidence_selection] failed; findings left without proof selection")
     # ── Phase 1.7: Attack Chain Engine v2 — build realistic, evidence-backed,
     # explainable attacker journeys from the triaged findings + attack surface
     # (SAFE CHAINING: framework noise / suppressed / FP secrets / generated code
@@ -944,6 +1030,18 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         bug_bounty.annotate(results)
     except Exception:
         log.exception("[bug_bounty] failed; no reportability guidance emitted")
+    # ── Phase 1.9: reconcile the secret→finding bridge — copy the intelligence the
+    # engines computed (ownership/confidence/evidence/triage/bug-bounty/chain
+    # membership) back onto the linked secret, then REMOVE the bridged copies from
+    # results["findings"]. After this the same secret is shown once (Secrets view),
+    # carries its full intelligence, and never appears as a duplicate finding in the
+    # UI / PDF / HTML / JSON / dashboard. Runs before analyst/MASVS/workspaces/
+    # quick-summary/score so none of them see the bridged copies. ──
+    try:
+        from .detection_sources import fusion as _ds_fusion
+        _ds_fusion.reconcile_bridged_findings(results)
+    except Exception:
+        log.exception("[detection_sources] bridge reconcile failed")
     # ── Phase 10: analyst & remediation intelligence (deterministic, no LLM/network) ──
     try:
         from . import analyst_intel
@@ -962,6 +1060,14 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         workspaces.annotate(results)
     except Exception:
         log.exception("[workspaces] failed; workspace structures not emitted")
+    # ── Phase 2.3: Source / Security Explorer overlay — projects the finalized
+    # findings/secrets/IPs into file_index + security_index for the explorer UI.
+    # Reuses existing metadata only (no extraction). Additive. ──
+    try:
+        from . import source_explorer
+        source_explorer.annotate(results)
+    except Exception:
+        log.exception("[source_explorer] overlay failed; explorer metadata not emitted")
     _build_quick_summary(results)
     _record_module_metric(results, "finalize_results", finalize_started, finding_count=len(results.get("findings", [])))
 
@@ -2177,56 +2283,10 @@ def _analyze_network_security_config(tmpdir, results):
                 })
 
 
-# ─── React Native bundle analysis ─────────────────────────────────────────────
-def _analyze_rn_bundle(tmpdir, results):
-    bundle_path = None
-    for root, _, files in os.walk(tmpdir):
-        for f in files:
-            if f.endswith(".bundle") or f == "index.android.bundle":
-                bundle_path = os.path.join(root, f)
-                break
-
-    if not bundle_path:
-        return
-
-    try:
-        with open(bundle_path, "r", errors="replace") as f:
-            content = f.read()
-
-        # Scan bundle for secrets
-        bundle_secrets = scan_text_for_secrets(content, relativize_path(bundle_path, tmpdir))
-        seen = {f"{s['name']}:{s['value']}" for s in results["secrets"]}
-        for s in bundle_secrets:
-            key = f"{s['name']}:{s['value']}"
-            if key not in seen:
-                results["secrets"].append(s)
-
-        # Extract URLs
-        urls = extract_urls(content)
-        seen_urls = set(results["endpoints"])
-        results["endpoints"].extend(u for u in urls if u not in seen_urls)
-
-        # Look for API base URLs
-        api_patterns = [
-            r'(?:baseURL|apiUrl|BASE_URL|API_URL|api_base)[\'"\s:=]+[\'"]?(https?://[^\s\'"]+)',
-            r'(?:host|server|endpoint)[\'"\s:=]+[\'"]?(https?://[^\s\'"]+)',
-        ]
-        for pat in api_patterns:
-            for m in re.findall(pat, content):
-                if m and m not in seen_urls:
-                    results["endpoints"].append(m)
-                    seen_urls.add(m)
-
-        results["findings"].append({
-            "title":          "React Native JS Bundle Analysis Complete",
-            "severity":       "info",
-            "category":       "Framework",
-            "description":    f"JS bundle analyzed. Found {len(bundle_secrets)} potential secrets and {len(urls)} endpoints directly in bundle. "
-                              "Full business logic is readable without decompilation.",
-            "recommendation": "Use Hermes AOT compilation to convert bundle to bytecode. Consider additional obfuscation.",
-        })
-    except Exception:
-        pass
+# React Native bundle analysis is handled by the first-class `react_native_analyzer`
+# sub-analyzer (Phase 2.2), gated on `framework == "react_native"` above — it replaces
+# the former inline `_analyze_rn_bundle`. Generic JS dangerous-sink detection + bundle
+# inventory remain in `js_bundle_analyzer` (which runs for every app).
 
 
 # ─── DEX string scanning ──────────────────────────────────────────────────────
@@ -2394,18 +2454,16 @@ def _read_android_icon_candidate(apk, path: str):
     return {"data": f"data:{mime};base64,{encoded}"}
 
 
-def _scan_precise_source_secrets(source_dirs: list[str]) -> list:
-    """Prefer source-backed evidence from JADX/apktool over raw APK extraction.
+def _reshape_native_secrets(hits: list) -> list:
+    """Reshape raw evidence-scanner hits into native secret dicts.
 
     Dedup key is (name, value[:80]) so two different rules matching the same
     string value are NOT collapsed — they surface as distinct findings with
     different names and recommendations.
     """
-    from .evidence_scanner import scan_directory_for_secrets as ev_secrets
-
     findings = []
     seen: set[tuple[str, str]] = set()
-    for finding in ev_secrets("", source_dirs):
+    for finding in hits or []:
         name = finding.get("name") or finding.get("title", "")
         val  = finding.get("value", "")
         key  = (name, val[:80])
@@ -2430,6 +2488,27 @@ def _scan_precise_source_secrets(source_dirs: list[str]) -> list:
             "owasp":          finding.get("owasp", ""),
         })
     return findings
+
+
+def _scan_precise_source_secrets(results: dict, source_dirs: list[str]) -> None:
+    """Single combined walk (Beetle Native + APKLeaks) over JADX/apktool dirs.
+
+    Phase 1.9: ONE filesystem traversal applies the unified catalog
+    (``secret_catalog.combined()``). Native hits become ``results["secrets"]``
+    exactly as before (same reshape + dedup); APKLeaks hits are fused into
+    secrets / findings / endpoints with source attribution + cross-source merge.
+    Eliminates the separate APKLeaks walk that previously re-traversed the tree.
+    """
+    from .evidence_scanner import scan_directory_for_secrets as ev_secrets
+    from . import secret_catalog
+    from .detection_sources import routing, fusion
+
+    hits = ev_secrets("", source_dirs, patterns=secret_catalog.combined())
+    native_hits, apk = routing.extract_apkleaks(hits)
+    results["secrets"] = _reshape_native_secrets(native_hits)
+    fusion.merge_secret_streams(results, apk.secrets)
+    fusion.merge_finding_streams(results, apk.findings, platform="android")
+    fusion.merge_endpoint_streams(results, apk.endpoints)
 
 
 def _persist_extraction(tmpdir: str, scan_id: str):
@@ -2468,6 +2547,46 @@ def _persist_decoded_manifest(scan_id: str, results: dict):
         dest.write_text(manifest_xml, encoding="utf-8", errors="replace")
     except Exception:
         pass
+
+
+def _persist_decoded_resource_strings(scan_id: str, apk) -> str | None:
+    """Decode resources.arsc string values to a scannable apktool/res/values/strings.xml.
+
+    Why this exists: the AWS Cognito Identity Pool id (and most Android string-resource
+    secrets — Firebase/API config, etc.) live only inside the compiled ``resources.arsc``.
+    Beetle's secret walk scans the jadx + apktool trees, but jadx is invoked with
+    ``--no-res`` and apktool's resource decoder can throw on some APKs (it does on
+    InsecureShop) — so no ``strings.xml`` is produced and the value is never matched.
+    MobSF finds it because it reads ``resources.arsc`` directly via androguard's
+    ``ARSCParser``; we do the same, reusing the already-loaded APK object, and write the
+    reconstructed ``<string name=…>…</string>`` table to the canonical decoded location
+    the unified walk already scans. This is a FALLBACK only — if a real apktool decode
+    already produced strings.xml we never overwrite it, and there is no second matcher:
+    the value flows through the one ``secret_catalog.combined()`` walk like any other.
+
+    Returns the apktool root dir (so the caller can ensure it is scanned) or ``None``.
+    """
+    if apk is None:
+        return None
+    try:
+        dest = scan_storage.scan_root(scan_id) / "apktool" / "res" / "values" / "strings.xml"
+        apktool_root = str(scan_storage.scan_root(scan_id) / "apktool")
+        if dest.exists():
+            return apktool_root  # a real apktool decode already wrote it — keep it.
+        arsc = apk.get_android_resources()
+        if arsc is None:
+            return None
+        xml = arsc.get_strings_resources()
+        if isinstance(xml, bytes):
+            xml = xml.decode("utf-8", "replace")
+        if not xml or "<string" not in xml:
+            return None
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(xml, encoding="utf-8", errors="replace")
+        return apktool_root
+    except Exception:
+        log.exception(f"[{scan_id}] resources.arsc string reconstruction failed")
+        return None
 
 
 def _extract_strings_for_viewer(data: bytes, min_len: int = 6) -> str:

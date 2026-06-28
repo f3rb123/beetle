@@ -48,6 +48,104 @@ FRAMEWORK = "FRAMEWORK"
 UNKNOWN = "UNKNOWN"
 
 
+# ─── Secret Intelligence verdict gate (Phase 1.91) ───────────────────────────
+# The Secret Intelligence Engine (secret_intelligence.annotate, run BEFORE this
+# module) classifies every value and writes `secret_status` /
+# `secret_overall_confidence` / `secret_intelligence`. Until Phase 1.91 those were
+# advisory only — process_secrets partitioned visible vs suppressed using legacy
+# ownership + detector confidence ALONE, so a value the engine had already judged a
+# False Positive / Public Value / Generated Constant (a UUID, hash, crypto
+# parameter, library constant, or a long random string with no credential context)
+# still showed in the analyst's default view. We now consume that verdict here:
+# rejected or below-floor values are moved to the suppressed partition — kept and
+# counted, never dropped — so the FP no longer surfaces while staying auditable.
+try:
+    from .secret_intelligence import config as _si_config
+    _SUPPRESS_FLOOR = _si_config.SUPPRESS_OVERALL_FLOOR
+    _CONTEXT_STRONG_MIN = _si_config.CONTEXT_STRONG_MIN
+    _PROBABLE_STATUS = _si_config.Status.PROBABLE
+    _VALIDATED_STATUS = _si_config.Status.VALIDATED
+    _POSSIBLE_STATUS = _si_config.Status.POSSIBLE
+    _PUBLIC_STATUS = _si_config.Status.PUBLIC_VALUE
+    _DOC_EXAMPLE_STATUS = _si_config.Status.DOC_EXAMPLE
+    _FALSE_POSITIVE_STATUS = _si_config.Status.FALSE_POSITIVE
+    _GENERATED_CONSTANT_STATUS = _si_config.Status.GENERATED_CONSTANT
+except Exception:  # pragma: no cover — engine import must never break secret processing
+    _SUPPRESS_FLOOR = 45
+    _CONTEXT_STRONG_MIN = 75
+    _PROBABLE_STATUS, _VALIDATED_STATUS = "Probable Secret", "Validated Secret"
+    _POSSIBLE_STATUS = "Possible Secret"
+    _PUBLIC_STATUS, _DOC_EXAMPLE_STATUS = "Public Value", "Documentation Example"
+    _FALSE_POSITIVE_STATUS, _GENERATED_CONSTANT_STATUS = "False Positive", "Generated Constant"
+
+# Reject classes split by certainty:
+#  * DEFINITIVE — a public cert IS public; a documentation example is matched by an
+#    exact value hash. Safe to suppress even a recognized provider/structured format.
+#  * HEURISTIC  — placeholder substring / crypto-constant / unreferenced-generic
+#    signals. These must NEVER hide a value that ALSO carries a recognized provider/
+#    structured format (item 13): the recognized format outweighs a heuristic FP, so
+#    a real key that merely happens to contain a placeholder substring stays visible.
+_REJECT_DEFINITIVE = {_PUBLIC_STATUS, _DOC_EXAMPLE_STATUS}
+_REJECT_HEURISTIC = {_FALSE_POSITIVE_STATUS, _GENERATED_CONSTANT_STATUS}
+
+
+def _intelligence_supports(secret: dict) -> bool:
+    """True when the Secret Intelligence verdict vouches for this value strongly
+    enough to RESCUE it from legacy detector-centric low-confidence suppression.
+
+    This is the coverage half of Phase 1.91: an application-specific / custom
+    enterprise secret detected only by a generic ("weak") detector would otherwise
+    be hidden as low-confidence — but when the engine has corroborated it (Probable/
+    Validated, or Possible with strong credential context: a credential variable
+    name + nearby security-API usage) it is a real secret and must stay visible.
+    Conservative on purpose: a weakly-evidenced Possible without strong context is
+    NOT rescued.
+    """
+    status = secret.get("secret_status")
+    if status in (_PROBABLE_STATUS, _VALIDATED_STATUS):
+        return True
+    si = secret.get("secret_intelligence") or {}
+    if status == si.get("status") == _POSSIBLE_STATUS:
+        ctx = secret.get("secret_context_score")
+        if isinstance(ctx, (int, float)) and ctx >= _CONTEXT_STRONG_MIN:
+            return True
+    return False
+
+
+def _intelligence_rejected(secret: dict) -> bool:
+    """True when the Secret Intelligence verdict says hide this by default.
+
+    Hidden = a DEFINITIVE non-secret class (Public Value / Documentation Example),
+    a HEURISTIC reject class (False Positive / Generated Constant) ONLY when the
+    value carries no recognized provider/structured format, OR an overall confidence
+    below the floor for a value with no recognized format. Recognized-format secrets
+    (item 13) and Probable/Validated secrets are NEVER hidden by a heuristic signal
+    or the floor — a recognized key with weak corroboration is still worth showing.
+    When the engine has not annotated the secret (no status present), this returns
+    False — behavior is unchanged.
+    """
+    status = secret.get("secret_status")
+    if not status:
+        return False  # not assessed → preserve legacy behavior
+    if status in (_PROBABLE_STATUS, _VALIDATED_STATUS):
+        return False
+    si = secret.get("secret_intelligence") or {}
+    # An UNAMBIGUOUS provider/structured format (not a bare-UUID "provider" the engine
+    # already judged needs-context). Falls back to format_valid for pre-1.91 data.
+    recognized = si.get("recognized_format")
+    if recognized is None:
+        recognized = si.get("format_valid") is True
+    if status in _REJECT_DEFINITIVE:
+        return True   # public cert / known doc example — suppress even if recognized
+    if status in _REJECT_HEURISTIC:
+        # Item 13: a recognized provider/structured format outweighs a heuristic FP.
+        return not recognized
+    if recognized:
+        return False  # Possible/Unknown with a recognized format — keep visible
+    conf = secret.get("secret_overall_confidence")
+    return isinstance(conf, (int, float)) and conf < _SUPPRESS_FLOOR
+
+
 # ─── Provider / type tagging (Task 3) ────────────────────────────────────────
 # Keyed on the detector's `name` (the string the existing patterns already emit).
 # This reuses the existing detections — it does NOT add new ones.
@@ -663,10 +761,21 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
             scrub_pairs.append((raw_value, canonical["masked_value"]))
         providers.add(canonical["provider"])
         # Provisional bucket (pairing may move a visible member to "paired").
-        if canonical["ownership"] in (THIRD_PARTY_LIBRARY, FRAMEWORK):
+        # Intelligence verdict is checked FIRST: a value the Secret Intelligence
+        # Engine judged a non-secret (FP / public / constant / below-floor generic)
+        # is suppressed regardless of ownership/detector confidence — this is the
+        # Phase 1.91 fix that stops UUIDs / hashes / crypto constants / long random
+        # strings from surfacing in the analyst's default view.
+        if _intelligence_rejected(canonical):
+            canonical["_bucket"] = "intel_fp"
+            canonical["suppressed_reason"] = "intelligence_fp"
+        elif canonical["ownership"] in (THIRD_PARTY_LIBRARY, FRAMEWORK):
             canonical["_bucket"] = "sdk"
             canonical["suppressed_reason"] = "third_party_sdk"
-        elif canonical["confidence"] == LOW:
+        elif canonical["confidence"] == LOW and not _intelligence_supports(canonical):
+            # Legacy detector-centric low-confidence suppression — unless the Secret
+            # Intelligence verdict rescues it as a corroborated application-specific
+            # secret (Phase 1.91 coverage half).
             canonical["_bucket"] = "low"
             canonical["suppressed_reason"] = "low_confidence"
         else:
@@ -704,7 +813,7 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
 
     # ── Assemble final partitions. ──────────────────────────────────────────
     visible = pairs + [c for c in canon if c["_bucket"] == "visible"]
-    suppressed = [c for c in canon if c["_bucket"] in ("sdk", "low", "paired")]
+    suppressed = [c for c in canon if c["_bucket"] in ("sdk", "low", "paired", "intel_fp")]
     for c in canon + pairs:
         c.pop("_bucket", None)
 
@@ -755,6 +864,7 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
     suppressed_sdk = sum(1 for c in suppressed if c.get("suppressed_reason") == "third_party_sdk")
     low_conf = sum(1 for c in suppressed if c.get("suppressed_reason") == "low_confidence")
     paired_members = sum(1 for c in suppressed if c.get("suppressed_reason") == "paired")
+    intel_fp = sum(1 for c in suppressed if c.get("suppressed_reason") == "intelligence_fp")
     unpaired = sum(1 for c in visible if not c.get("is_pair"))
     candidates = sum(1 for c in visible if c.get("can_validate"))
     validated = sum(1 for s in visible if s["validation_result"] == ST_VALID)
@@ -773,6 +883,7 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
         "paired_members_hidden":     paired_members,
         "suppressed_sdk_secrets":    suppressed_sdk,
         "low_confidence_suppressed": low_conf,
+        "intelligence_fp_suppressed": intel_fp,
         "dropped_no_evidence":       dropped_no_evidence,
         "total_application_secrets": len(visible),
         "providers":                 sorted(providers),
@@ -792,9 +903,9 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
     results["secrets_summary"] = summary
     log.info(
         "[secret_intel] app_pkg=%s | visible=%d pairs=%d unpaired=%d candidates=%d "
-        "suppressed_sdk=%d low_conf=%d paired_hidden=%d dropped=%d providers=%s",
+        "suppressed_sdk=%d low_conf=%d intel_fp=%d paired_hidden=%d dropped=%d providers=%s",
         app_package or "?", len(visible), len(pairs), unpaired, candidates,
-        suppressed_sdk, low_conf, paired_members, dropped_no_evidence,
+        suppressed_sdk, low_conf, intel_fp, paired_members, dropped_no_evidence,
         ",".join(sorted(providers)) or "-",
     )
     return summary

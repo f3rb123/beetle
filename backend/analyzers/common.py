@@ -520,11 +520,32 @@ def _get_compiled_secret_patterns():
     global _COMPILED_SECRET_PATTERNS
     if _COMPILED_SECRET_PATTERNS is None:
         compiled = []
+        seen_names = set()
         for p in SECRET_PATTERNS:
             try:
                 compiled.append((re.compile(p["pattern"], re.IGNORECASE | re.MULTILINE), p))
+                seen_names.add(p["name"])
             except re.error:
                 continue
+        # Phase 1.98 consolidation (reachability): extend this scanner with the
+        # unified catalog's SECRET-kind patterns from the apkleaks + coverage
+        # provenances that `common` does not already define (deduped by name). This
+        # makes the JS-bundle / DEX-string / no-JADX-fallback paths — which use this
+        # scanner — reach the SAME secrets as the main evidence walk (e.g. AWS
+        # Cognito Identity Pool in a React Native bundle), without maintaining a
+        # second pattern database. `common`'s false-positive filtering still applies.
+        try:
+            from .secret_catalog import patterns as _catalog_patterns
+            for p in _catalog_patterns("apkleaks", "coverage"):
+                if p.get("kind", "secret") != "secret" or p.get("name") in seen_names:
+                    continue
+                try:
+                    compiled.append((re.compile(p["pattern"], re.IGNORECASE | re.MULTILINE), p))
+                    seen_names.add(p["name"])
+                except re.error:
+                    continue
+        except Exception:  # noqa: BLE001 — never let catalog wiring break the base scanner
+            pass
         _COMPILED_SECRET_PATTERNS = compiled
     return _COMPILED_SECRET_PATTERNS
 
