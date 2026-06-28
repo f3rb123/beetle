@@ -187,6 +187,16 @@ OVERALL_WEIGHTS = {
     "exploitability": 0.10,
 }
 
+# ── Multi-engine agreement (Phase 1.95 — Finding Fusion Engine) ───────────────
+# Confidence is no longer pure per-finding heuristics: independent corroboration
+# raises detection trust, engine disagreement damps it. Applied as a BOUNDED,
+# explainable bonus to the detection dimension (so it flows through the existing
+# weights into overall and into the reason). detection_count comes from the Fusion
+# Engine; conflicts come from finding["fusion"]["conflicts"].
+AGREEMENT_PER_ENGINE = 12        # + detection-confidence per ADDITIONAL engine
+AGREEMENT_MAX = 24               # cap on the agreement bonus
+AGREEMENT_CONFLICT_DAMP = 0.5    # multiply the bonus when engines conflict on metadata
+
 # Decision-path short-circuits (applied after the weighted score; breakdown is
 # always retained). Each sets a floor/cap and a `confidence_stage` label.
 OVERALL_VALIDATED_FLOOR = 95     # validation_status == valid

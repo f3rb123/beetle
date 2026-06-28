@@ -837,8 +837,18 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     _apply_finding_validation_layer(results)
     # sort_findings normalizes severity in-place before sorting. Recompute the
     # summary AFTER validation layer runs so counts and findings always match.
-    # Dedupe BEFORE sorting / summary / scoring so all three agree.
-    results["findings"] = dedupe_findings(results["findings"])
+    # ── Phase 1.95: Finding Fusion Engine — collapse multi-engine duplicates into
+    # ONE canonical finding "Detected By" all of them, with full provenance + a
+    # multi-engine agreement signal. Supersets the old exact-key dedupe: it also
+    # unifies cross-engine equivalents (different rule ids / small line drift) from
+    # Beetle Native + APKLeaks today and any future engine. Runs BEFORE the
+    # Confidence Engine so agreement feeds confidence. Deterministic, additive. ──
+    try:
+        from . import fusion
+        fusion.fuse(results, platform="android")
+    except Exception:
+        log.exception("[fusion] failed; falling back to exact-key dedupe")
+        results["findings"] = dedupe_findings(results["findings"])
     # ── Phase 0/1: canonical normalization + ownership (additive, non-destructive) ──
     _app_pkg = results.get("app_info", {}).get("package", "")
     finding_model.canonicalize_findings(results["findings"], _app_pkg)

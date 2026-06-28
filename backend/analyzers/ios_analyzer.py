@@ -368,8 +368,17 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         results.setdefault("virustotal", {})
 
     # ── Severity summary ──────────────────────────────────────────────────────
-    # Dedupe BEFORE sorting / summary / scoring so all three agree.
-    results["findings"] = dedupe_findings(results["findings"])
+    # ── Phase 1.95: Finding Fusion Engine — collapse multi-engine duplicates into
+    # ONE canonical finding "Detected By" all of them, with full provenance + a
+    # multi-engine agreement signal. Supersets the old exact-key dedupe (also
+    # unifies cross-engine equivalents). Runs BEFORE the Confidence Engine so
+    # agreement feeds confidence. Deterministic, additive. Mirror of Android. ──
+    try:
+        from . import fusion
+        fusion.fuse(results, platform="ios")
+    except Exception:
+        log.exception("[fusion] failed; falling back to exact-key dedupe")
+        results["findings"] = dedupe_findings(results["findings"])
     # ── Phase 0/1: canonical normalization + ownership (additive, non-destructive) ──
     _app_pkg = results.get("app_info", {}).get("bundle_id", "")
     # ── Phase 1.9: APKLeaks Detection Source — already applied. The APKLeaks

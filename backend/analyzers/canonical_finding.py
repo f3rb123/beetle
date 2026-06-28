@@ -214,6 +214,18 @@ class CanonicalFinding:
     detected_by: list[str] = field(default_factory=list)  # engine display names
     sources: list[dict] = field(default_factory=list)     # [{engine, rule_id, confidence, evidence_ref}]
 
+    # ── Fusion provenance (Phase 1.95 — Finding Fusion Engine) ─────────────────
+    # Computed by analyzers.fusion when ≥1 detection of a logical issue is folded
+    # into this one canonical finding. ``detection_count`` is the number of distinct
+    # engines that detected it; ``fusion_score`` (0-100) summarizes corroboration
+    # strength; ``fusion`` carries the full explainable record (engines, conflicts,
+    # resolutions, merged files/locations, reason). All additive — a finding that
+    # never passes through the engine simply has count 0 / empty fusion and behaves
+    # exactly as before.
+    detection_count: int = 0
+    fusion_score: int = 0
+    fusion: dict = field(default_factory=dict)
+
     # ── Knowledge / standards mapping ─────────────────────────────────────────
     references: list[str] = field(default_factory=list)  # external URLs / advisory links
     tags: list[str] = field(default_factory=list)        # free-form labels for filtering
@@ -338,6 +350,8 @@ class CanonicalFinding:
         "bug_bounty",
         # Source attribution (Phase 1.9)
         "detected_by", "sources",
+        # Fusion provenance (Phase 1.95)
+        "detection_count", "fusion_score", "fusion",
     )
 
     # ── Validation / normalization ───────────────────────────────────────────
@@ -371,6 +385,10 @@ class CanonicalFinding:
             self.sources = []
         else:
             self.sources = [s for s in self.sources if isinstance(s, dict)]
+        self.detection_count = max(0, int(self.detection_count or 0))
+        self.fusion_score = normalize_confidence(self.fusion_score)
+        if not isinstance(self.fusion, dict):
+            self.fusion = {}
         self.references = _as_str_list(self.references)
         self.tags = _as_str_list(self.tags)
         self.masvs = _as_str_list(self.masvs)
@@ -528,6 +546,9 @@ class CanonicalFinding:
             bug_bounty=d.get("bug_bounty") if isinstance(d.get("bug_bounty"), dict) else {},
             detected_by=_first(d, "detected_by") or [],
             sources=d.get("sources") if isinstance(d.get("sources"), list) else [],
+            detection_count=d.get("detection_count") or 0,
+            fusion_score=d.get("fusion_score") or 0,
+            fusion=d.get("fusion") if isinstance(d.get("fusion"), dict) else {},
             ownership_label=_opt_str(d.get("ownership_label")),
             exploitability=d.get("exploitability"),
             validation_status=str(d.get("validation_status") or ""),
