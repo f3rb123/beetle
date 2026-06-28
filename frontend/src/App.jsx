@@ -1,6 +1,7 @@
 import { Component } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import Home from './pages/Home.jsx'
+import ScanApp from './pages/ScanApp.jsx'
 import Results from './pages/Results.jsx'
 import Login from './pages/Login.jsx'
 import Webhooks from './pages/Webhooks.jsx'
@@ -69,6 +70,22 @@ export default function App() {
             element={
               <RequireAuth>
                 <Home />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/scan"
+            element={
+              <RequireAuth>
+                <ScanApp />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/scan/:moduleId"
+            element={
+              <RequireAuth>
+                <ScanApp />
               </RequireAuth>
             }
           />
