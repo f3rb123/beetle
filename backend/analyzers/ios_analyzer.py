@@ -26,6 +26,7 @@ from .string_analyzer import analyze_strings
 from .scoring import calculate_score
 from .path_utils import relativize_path
 from .virustotal import run_virustotal
+from . import network_intel
 from .evidence_scanner import (
     scan_directory_for_secrets as ev_scan_secrets,
     scan_directory_for_jwts,
@@ -159,7 +160,7 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                 ".m", ".h", ".txt", ".yml", ".yaml", ".cfg",
             ])
             _fut_jwts = _pool.submit(scan_directory_for_jwts, tmpdir)
-            _fut_ips  = _pool.submit(scan_directory_for_ips, tmpdir)
+            _fut_ips  = _pool.submit(network_intel.extract_ips, tmpdir)
             _fut_endpoints = _pool.submit(_extract_endpoints, tmpdir, results)
             _fut_strings = _pool.submit(analyze_strings, tmpdir, "ios")
             _fut_sast = _pool.submit(run_ios_sast, tmpdir, results)
@@ -193,6 +194,13 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
 
             results["jwts"] = _fut_jwts.result() or []
             results["ips"]  = _fut_ips.result() or []
+            # Phase 1.99: enrich raw IP hits (classify / owner / suppress / merge /
+            # intelligence) using the SAME canonical model as Android, BEFORE the
+            # public-IP finding and UI consume them. Additive; URLs untouched.
+            try:
+                network_intel.annotate(results, platform="ios")
+            except Exception:
+                log.exception("[network_intel] iOS IP enrichment failed; raw IPs left as-is")
             _fut_endpoints.result()
             results["string_analysis"] = _fut_strings.result() or {}
             _fut_sast.result()

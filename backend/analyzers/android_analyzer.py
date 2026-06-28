@@ -46,6 +46,7 @@ from .live_checks import (
 from .tracker_db import detect_trackers, analyze_malware_permissions
 from .api_analyzer import analyze_android_apis, extract_emails_from_app, detect_apkid_features
 from .domain_analyzer import check_domains
+from . import network_intel
 from .evidence_scanner import (
     scan_directory_for_secrets, scan_directory_for_ips,
     scan_directory_for_jwts, extract_urls
@@ -564,7 +565,7 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
                 "string_analysis": pool.submit(_timed_value, "string_analysis", analyze_strings, tmpdir, "android"),
                 "emails": pool.submit(_timed_value, "email_detection", extract_emails_from_app, tmpdir, apk_path),
                 "apkid": pool.submit(_timed_value, "apkid_detection", detect_apkid_features, tmpdir),
-                "ips": pool.submit(_timed_value, "ip_detection", scan_directory_for_ips, tmpdir, extra_dirs),
+                "ips": pool.submit(_timed_value, "ip_detection", network_intel.extract_ips, tmpdir, extra_dirs),
                 "jwts": pool.submit(_timed_value, "jwt_detection", scan_directory_for_jwts, tmpdir, extra_dirs),
             }
             for key, future in futures.items():
@@ -586,6 +587,15 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
                     }
         results["scan_metrics"]["summary"]["parallel_phase_ms"] = int((time.perf_counter() - parallel_started) * 1000)
         _stage(scan_id, "strings_parallel", parallel_started)
+
+        # ── Phase 1.99: Network Intelligence — enrich the raw IP hits (classify,
+        # owner-attribute via the Ownership Engine, suppress noise, merge duplicates,
+        # tag intelligence) BEFORE any downstream consumer (the public-IP finding
+        # below, network_workspace, UI). Additive; never touches URL extraction. ──
+        try:
+            network_intel.annotate(results, platform="android")
+        except Exception:
+            log.exception("[network_intel] IP enrichment failed; raw IPs left as-is")
 
         # ── NEW: ELF/SO Binary Analysis ───────────────────────────────────────
         binaries_started = time.perf_counter()
