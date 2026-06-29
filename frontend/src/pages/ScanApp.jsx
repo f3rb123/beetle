@@ -9,7 +9,7 @@ import {
   UploadCloud,
 } from 'lucide-react'
 import SeverityBadge from '../components/SeverityBadge.jsx'
-import beetleIcon from '../assets/beetle-icon.png'
+import { whiteMark as beetleIcon } from '../assets/brandLogos.js'
 import { ENGINEERING_MODULES, isModuleAvailable } from '../lib/engineering-modules.js'
 import {
   DEFAULT_STAGE,

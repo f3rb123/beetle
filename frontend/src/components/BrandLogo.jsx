@@ -1,5 +1,4 @@
-import beetleLogo from '../assets/beetle_black_logo.png'
-import beetleIcon from '../assets/beetle-icon.png'
+import { blackMark as beetleLogo, whiteMark as beetleIcon } from '../assets/brandLogos.js'
 
 export default function BrandLogo({ animated = false, size = 'default', showWordmark = true, subtitle = 'Mobile Static Security Workspace' }) {
   // beetle_black_logo.png is the full lockup (wordmark + tagline) on the BLACK

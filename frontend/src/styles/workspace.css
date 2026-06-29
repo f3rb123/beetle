@@ -38,6 +38,10 @@
   --ws-shadow-hover: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 30px rgba(0, 0, 0, 0.10);
   --ws-shadow-lg: 0 16px 40px rgba(24, 24, 27, 0.12);
   --ws-sidebar-w: 232px;
+  /* Brand mark sizing — sized to ~match the combined height of the two-line
+     title+app-name block so the logo and text read as one cohesive lockup
+     (≈30% larger than the legacy 24px mark). Responsive clamp retained. */
+  --ws-brand-mark: clamp(30px, 2.2vw, 34px);
 
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
   color: var(--ws-ink);
@@ -59,8 +63,28 @@
   border-right: 1px solid var(--ws-line); background: var(--ws-bg-soft); padding: 18px 12px;
   overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain;
 }
-.ws-sidebar__brand { display: flex; align-items: center; gap: 9px; padding: 4px 8px 16px; }
-.ws-sidebar__brand img { width: 24px; height: 24px; border-radius: 6px; }
+.ws-sidebar__brand { display: flex; align-items: center; gap: 5px; padding: 6px 8px 20px; }
+/* Logo + title + subtitle are one flex lockup, vertically centered. The mark is
+   sized via --ws-brand-mark to match the two-line text height; the tight gap keeps
+   the text at its original horizontal position. Square + object-fit:contain keeps
+   the PNG aspect ratio with no stretching; flex-shrink:0 stops it collapsing when
+   the app name is long.
+   The mark is then scaled up ~88% for stronger visual weight against the title
+   (a further ~37% bump on top of the previous 1.375 — the logo was reading too
+   small next to the wordmark).
+   Using transform (not a larger width) means the layout box is unchanged, so the
+   text position and the logo↔text gap stay exactly as they are; scaling from the
+   centre preserves both the aspect ratio and the vertical centring. */
+.ws-sidebar__brand img {
+  width: var(--ws-brand-mark); height: var(--ws-brand-mark);
+  object-fit: contain; flex-shrink: 0;
+  transform: scale(1.875); transform-origin: center;
+}
+/* Nudge the two-line text block up ~1.5px so its visual centre lines up with the
+   enlarged logo. translateY moves it visually only — no margin/padding change,
+   so the logo position, the logo↔text gap, and horizontal alignment are all
+   untouched. */
+.ws-sidebar__brand > div { transform: translateY(-1.5px); }
 .ws-sidebar__brand b { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
 .ws-sidebar__brand span { display: block; font-size: 11px; color: var(--ws-ink-3); font-weight: 500; }
 

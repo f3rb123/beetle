@@ -15,7 +15,7 @@ import {
   Boxes, Cpu, Bug, GitCompare, Sparkles, FolderTree, Lock, ShieldHalf, Workflow,
   Briefcase, Wrench, MessageSquare, Binary, Rocket,
 } from 'lucide-react'
-import beetleIcon from '../../assets/beetle-icon.png'
+import { blackMark as beetleIcon } from '../../assets/brandLogos.js'
 import {
   OverviewPanel, FindingsPanel, FindingDrawer, ChainsPanel, SecretsPanel,
   MasvsPanel, FilesPanel, ExportsPanel,

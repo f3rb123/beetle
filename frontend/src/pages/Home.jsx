@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom'
 import EngineeringWorkspace from '../components/EngineeringWorkspace.jsx'
-import beetleIcon from '../assets/beetle-icon.png'
+import { whiteMark as beetleIcon } from '../assets/brandLogos.js'
 import { clearAuth, getToken, getUser, isAdmin } from '../lib/auth.js'
 
 export default function Home() {

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { login, getToken } from '../lib/auth.js'
-import beetleIcon from '../assets/beetle-icon.png'
+import { whiteMark as beetleIcon } from '../assets/brandLogos.js'
 
 export default function Login() {
   const navigate  = useNavigate()
