@@ -1155,12 +1155,28 @@ export function SecretsPanel({ results, onOpenCode }) {
     return <EmptyState title="No secrets detected" body="No embedded credentials, keys, or tokens were found in application-owned code." />
   }
 
+  const total = sum.total_application_secrets ?? secrets.length
+  // Primary categories partition the visible secrets: every secret has exactly one,
+  // so the counts always sum to Total Secrets (Phase 2.5.1). Prefer the backend
+  // breakdown; fall back to grouping by each secret's primary_category for older scans.
+  const byCategory = (sum.secrets_by_category && sum.secrets_by_category.length)
+    ? sum.secrets_by_category
+    : Object.entries(secrets.reduce((acc, s) => {
+        const c = s.primary_category || (s.is_pair ? 'Credential Pairs' : 'Other Secrets')
+        acc[c] = (acc[c] || 0) + 1
+        return acc
+      }, {})).map(([category, count]) => ({ category, count }))
+
   return (
     <div>
       <div className="ws-section__head"><h1>Secrets</h1></div>
+      {/* Primary categories — these counts always sum to Total Secrets. */}
       <div className="ws-metrics ws-section">
-        <Metric label="Application Secrets" value={sum.total_application_secrets ?? singles.length} />
-        <Metric label="Credential Pairs" value={sum.paired_credentials ?? pairs.length} />
+        <Metric label="Total Secrets" value={total} />
+        {byCategory.map(c => <Metric key={c.category} label={c.category} value={c.count} />)}
+      </div>
+      {/* Context facets — these overlap the total and are NOT part of the partition. */}
+      <div className="ws-metrics ws-section">
         <Metric label="Validation Candidates" value={sum.validation_candidates ?? 0} />
         <Metric label="SDK Suppressed" value={sum.suppressed_sdk_secrets ?? suppressed.filter(s => s.suppressed_reason === 'third_party_sdk').length} />
         <Metric label="Cloud Exposures" value={sum.public_cloud_exposures ?? exposures.length} />

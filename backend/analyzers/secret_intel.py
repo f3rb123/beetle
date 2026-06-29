@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections import Counter
 
 from . import cloud_correlation as _cloud_correlation
 from . import cloud_intel as _cloud_intel
@@ -46,6 +47,63 @@ APPLICATION = "APPLICATION"
 THIRD_PARTY_LIBRARY = "THIRD_PARTY_LIBRARY"
 FRAMEWORK = "FRAMEWORK"
 UNKNOWN = "UNKNOWN"
+
+
+# ─── Canonical primary categories (Phase 2.5.1) ──────────────────────────────
+# Every VISIBLE secret maps to EXACTLY ONE primary category, so the per-category
+# counts always sum to the visible total (len(results["secrets"])). A secret may
+# still carry secondary classifications (provider, type, detected_by, cloud-exposure
+# cross-refs) — those are facets and never affect the primary partition. The tuple
+# order is the canonical display order.
+PRIMARY_CATEGORIES = (
+    "Credential Pairs",
+    "Cloud Credentials",
+    "Private Keys",
+    "API Keys & Tokens",
+    "Passwords & Logins",
+    "Other Secrets",
+)
+
+_CLOUD_PROVIDERS = {"AWS", "GCP", "GOOGLE", "AZURE", "FIREBASE", "CLOUDFLARE", "SUPABASE"}
+_PRIVATE_KEY_TYPES = {"PEM_PRIVATE_KEY", "GCP_SERVICE_ACCOUNT_KEY", "APNS_AUTH_KEY"}
+_PASSWORD_TYPES = {"HARDCODED_PASSWORD", "HARDCODED_USERNAME", "BASIC_AUTH_URL"}
+
+
+def primary_category(secret: dict) -> str:
+    """Resolve a secret's ONE canonical primary category (Phase 2.5.1).
+
+    Mutually exclusive + exhaustive: the return value is always one of
+    PRIMARY_CATEGORIES, so summing per-category counts over the visible secrets
+    always reproduces the total. Precedence is deliberate — a composite pair is a
+    pair first; a private key is a private key before its provider's cloud bucket.
+    """
+    if secret.get("is_pair"):
+        return "Credential Pairs"
+    provider = str(secret.get("provider") or "").upper()
+    stype = str(secret.get("type") or "").upper()
+    if provider == "PRIVATE_KEY" or stype in _PRIVATE_KEY_TYPES:
+        return "Private Keys"
+    if provider in _CLOUD_PROVIDERS:
+        return "Cloud Credentials"
+    if stype in _PASSWORD_TYPES:
+        return "Passwords & Logins"
+    if (provider and provider != "GENERIC") or any(
+        tok in stype for tok in ("KEY", "TOKEN", "SECRET", "API", "WEBHOOK", "PAT")
+    ):
+        return "API Keys & Tokens"
+    return "Other Secrets"
+
+
+def categorize_secrets(visible: list[dict]) -> list[dict]:
+    """Tag each visible secret with its primary_category and return an ordered,
+    partition-complete breakdown [{category, count}] whose counts sum to
+    len(visible). Mutates each secret in place (adds `primary_category`)."""
+    counter: Counter = Counter()
+    for s in visible:
+        pc = primary_category(s)
+        s["primary_category"] = pc
+        counter[pc] += 1
+    return [{"category": c, "count": counter[c]} for c in PRIMARY_CATEGORIES if counter[c]]
 
 
 # ─── Secret Intelligence verdict gate (Phase 1.91) ───────────────────────────
@@ -871,6 +929,12 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
     invalid = sum(1 for s in visible if s["validation_result"] == ST_INVALID)
     high_risk = sum(1 for s in visible if s["severity"] in ("critical", "high"))
 
+    # ── Canonical primary-category partition (Phase 2.5.1). ──────────────────
+    # Tag every visible secret with its single primary category and emit a
+    # breakdown whose counts ALWAYS sum to total_application_secrets, so the UI
+    # category counters can never disagree with the total again.
+    secrets_by_category = categorize_secrets(visible)
+
     results["secrets"] = visible
     results["suppressed_secrets"] = suppressed
     summary = {
@@ -879,6 +943,7 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
         "high_risk_credentials":     high_risk,
         "paired_credentials":        len(pairs),
         "unpaired_credentials":      unpaired,
+        "secrets_by_category":       secrets_by_category,
         "validation_candidates":     candidates,
         "paired_members_hidden":     paired_members,
         "suppressed_sdk_secrets":    suppressed_sdk,
