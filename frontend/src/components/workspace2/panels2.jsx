@@ -524,6 +524,7 @@ export function NetworkPanel({ results }) {
   const ipsRaw = nw.ips || results.ips || []
   const ips = ipsRaw.map(ip => (ip && typeof ip === 'object') ? ip : { ip })
   const findings = results.findings || []
+  const cloudConfig = results.cloud_config || []   // Phase 2.5.5 — Firebase/GCS buckets + endpoints
   const allUrls = [...new Set([...(nw.urls || []), ...(nw.websockets || []), ...endpoints])]
   const domains = nw.domains || []
   const hosts = [...new Set(allUrls.map(urlHost).filter(Boolean))]
@@ -560,6 +561,7 @@ export function NetworkPanel({ results }) {
         <Metric label="URLs" value={allUrls.length} />
         <Metric label="Hosts" value={hosts.length} />
         <Metric label="IPs" value={ips.length} />
+        <Metric label="Cloud Config" value={cloudConfig.length} />
       </div>
 
       <div className="ws-two ws-section">
@@ -594,6 +596,7 @@ export function NetworkPanel({ results }) {
             { id: 'hosts', label: 'Hosts', count: hosts.length },
             { id: 'domains', label: 'Domains', count: domains.length },
             { id: 'ips', label: 'IPs', count: ips.length },
+            { id: 'cloud', label: 'Cloud Config', count: cloudConfig.length },
           ]} />
         </div>
 
@@ -667,6 +670,28 @@ export function NetworkPanel({ results }) {
                 <button type="button" className="ws-btn ws-btn--sm" style={{ margin: 10 }}
                   onClick={() => setShowSuppressedIps(false)}>Hide noise</button>
               ) : null}
+            </div>
+          )
+        })() : null}
+
+        {tab === 'cloud' ? (() => {
+          const rows = cloudConfig.filter(c => !ql ||
+            `${c.value} ${c.label} ${c.provider} ${c.project_id || ''}`.toLowerCase().includes(ql))
+          if (!rows.length) return <EmptyState title="No cloud configuration" body={cloudConfig.length ? 'No cloud config matches your search.' : 'No Firebase / Google Cloud storage buckets or endpoints were found.'} />
+          return (
+            <div className="ws-card" style={{ overflow: 'hidden' }}>
+              {rows.slice(0, limit).map((c, i) => (
+                <div key={i} className="ws-file" style={{ flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
+                  <span className={`ws-pill ws-pill--${c.severity === 'low' ? 'risk' : 'ok'}`}>{c.provider}</span>
+                  <SoftTag title="Cloud configuration type">{c.label}</SoftTag>
+                  <span className="ws-file__path ws-mono" title={c.value}>{c.value}</span>
+                  {c.project_id ? <SoftTag title="Project identifier">project: {c.project_id}</SoftTag> : null}
+                  {c.owner_type && c.owner_type !== 'Unknown' ? <span className="ws-muted" style={{ fontSize: 12 }} title="Owner">{c.owner_type}</span> : null}
+                  {c.file_path ? <span className="ws-muted ws-mono" style={{ fontSize: 12 }} title={c.file_path}>{String(c.file_path).split('/').pop()}{c.line ? `:${c.line}` : ''}</span> : null}
+                  {c.occurrences > 1 ? <span className="ws-muted" style={{ fontSize: 12 }} title="Occurrences">×{c.occurrences}</span> : null}
+                </div>
+              ))}
+              <Pager count={rows.length} limit={limit} setLimit={setLimit} />
             </div>
           )
         })() : null}

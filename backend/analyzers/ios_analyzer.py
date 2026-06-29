@@ -27,6 +27,7 @@ from .scoring import calculate_score
 from .path_utils import relativize_path
 from .virustotal import run_virustotal
 from . import network_intel
+from . import cloud_config
 from . import flutter_analyzer
 from . import react_native_analyzer
 from .evidence_scanner import (
@@ -163,6 +164,7 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
             ])
             _fut_jwts = _pool.submit(scan_directory_for_jwts, tmpdir)
             _fut_ips  = _pool.submit(network_intel.extract_ips, tmpdir)
+            _fut_cc   = _pool.submit(cloud_config.scan, tmpdir)
             _fut_endpoints = _pool.submit(_extract_endpoints, tmpdir, results)
             _fut_strings = _pool.submit(analyze_strings, tmpdir, "ios")
             _fut_sast = _pool.submit(run_ios_sast, tmpdir, results)
@@ -204,6 +206,14 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
             except Exception:
                 log.exception("[network_intel] iOS IP enrichment failed; raw IPs left as-is")
             _fut_endpoints.result()
+            # Phase 2.5.5: Cloud Configuration discovery (parity with Android) —
+            # classify Firebase/GCS buckets + endpoints and emit findings BEFORE
+            # fusion so they traverse the same pipeline.
+            results["_cloud_config_hits"] = _fut_cc.result() or []
+            try:
+                cloud_config.annotate(results, platform="ios")
+            except Exception:
+                log.exception("[cloud_config] iOS cloud configuration discovery failed")
             results["string_analysis"] = _fut_strings.result() or {}
             _fut_sast.result()
             _fut_framework.result()
