@@ -202,14 +202,14 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCod
 
       {/* Workspace launcher */}
       <div className="ws-section">
-        <h2>Deep Analysis</h2>
+        <h2>Jump to Analysis</h2>
         <div className="ws-launcher">
           {[
-            ['ciso', 'CISO Summary', Briefcase], ['developer', 'Developer Guide', Wrench],
+            ['ciso', 'CISO Summary', Briefcase], ['developer', 'Developer Report', Wrench],
             ['manifest', 'Manifest', ScrollText], ['network', 'Network', Network],
-            ['certificate', 'Certificate', Fingerprint], ['components', 'Components', Boxes],
+            ['certificate', 'Certificates', Fingerprint], ['components', 'Application Components', Boxes],
             ['androidapis', 'Android APIs', Cpu], ['malware', 'Malware', Bug],
-            ['ai', 'AI Assistant', Sparkles], ['compare', 'Compare', GitCompare],
+            ['ai', 'AI Actions', Sparkles], ['compare', 'Scan Compare', GitCompare],
           ].map(([id, label, Icon]) => (
             <button key={id} type="button" className="ws-launch" onClick={() => onOpenSection(id)}>
               <Icon size={18} className="ws-muted" />

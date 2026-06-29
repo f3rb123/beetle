@@ -42,35 +42,15 @@ const ICON_MAP = {
 }
 const iconFor = name => ICON_MAP[name] || ShieldAlert
 
-// Deep-analysis panels keep their existing nav group; they're appended to the
-// registry-derived groups so the (large) list stays where analysts expect it.
-const DEEP_ANALYSIS = [
-  { id: 'manifest', label: 'Manifest', icon: ScrollText },
-  { id: 'permissions', label: 'Permissions', icon: Lock },
-  { id: 'network', label: 'Network', icon: Network },
-  { id: 'certificate', label: 'Certificate', icon: Fingerprint },
-  { id: 'androidsec', label: 'Android Security', icon: ShieldHalf },
-  { id: 'components', label: 'Components', icon: Boxes },
-  { id: 'androidapis', label: 'Android APIs', icon: Cpu },
-  { id: 'taint', label: 'Taint Flows', icon: Workflow },
-  { id: 'malware', label: 'Malware Analysis', icon: Bug },
-  { id: 'codebrowser', label: 'Source Explorer', icon: FolderTree },
-  { id: 'compare', label: 'Compare', icon: GitCompare },
-  { id: 'ai', label: 'AI Assistant', icon: Sparkles },
-]
-
-// Build the sidebar groups: registry groups (Workspace / Audience / Source /
-// Reviewer) with resolved icons, then the Deep Analysis group.
+// Build the sidebar groups straight from the registry (single source of truth —
+// Phase 2.5.8 folded the old hardcoded Deep Analysis list into the registry, so the
+// whole workflow hierarchy lives in workspace-registry.js).
 function useNavGroups() {
-  return useMemo(() => {
-    const groups = navGroups({ includePlanned: true }).map(g => ({
-      label: g.label,
-      items: g.items.map(p => ({ id: p.id, label: p.label, icon: iconFor(p.icon),
-        count: p.count, planned: p.status === 'planned' })),
-    }))
-    groups.push({ label: 'Deep Analysis', items: DEEP_ANALYSIS })
-    return groups
-  }, [])
+  return useMemo(() => navGroups({ includePlanned: true }).map(g => ({
+    label: g.label,
+    items: g.items.map(p => ({ id: p.id, label: p.label, icon: iconFor(p.icon),
+      count: p.count, planned: p.status === 'planned' })),
+  })), [])
 }
 
 // Roadmap placeholder for a planned panel — proves routing reaches it before the
@@ -196,11 +176,8 @@ function WorkspaceShell({ results, scanId, actions, deepLink }) {
   // Section dispatch — ready panels render their component; planned panels render
   // the roadmap placeholder. A future panel adds one case (or we move to a map).
   const renderPanel = () => {
-    if (!isReady(section)) {
-      const known = getPanel(section)
-      const deep = DEEP_ANALYSIS.find(d => d.id === section)
-      if (known && !deep) return <ComingSoonPanel panelId={section} />
-    }
+    // A known-but-not-ready section is a roadmap (planned) panel → placeholder.
+    if (!isReady(section) && getPanel(section)) return <ComingSoonPanel panelId={section} />
     switch (section) {
       case 'overview': return <OverviewPanel results={results} onOpenSection={goSection} onOpenFinding={nav.openFinding} onOpenCode={onOpenCode} />
       case 'findings': return <FindingsPanel results={results} onOpenFinding={nav.openFinding} onOpenCode={onOpenCode} collab={collab} initialDetectionSource={deepLink?.detectionSource} />

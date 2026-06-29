@@ -16,22 +16,26 @@ t('ready panels include the current workspace sections', () => {
 })
 
 t('all roadmap items are declared as planned', () => {
+  // Java/Smali Explorers were folded into Source Explorer (Phase 2.5.8) — they are
+  // viewing modes, not separate roadmap pages.
   const ids = plannedPanels().map(p => p.id)
-  for (const id of ['source-java', 'source-smali', 'evidence-compare', 'ai-reviewer', 'security-controls', 'framework-view'])
+  for (const id of ['evidence-compare', 'ai-reviewer', 'security-controls', 'framework-view'])
     assert.ok(ids.includes(id), `roadmap item ${id} not declared`)
+  for (const gone of ['source-java', 'source-smali'])
+    assert.ok(!ids.includes(gone), `${gone} should no longer be a separate page`)
 })
 
 t('status helpers are correct', () => {
   assert.equal(isReady('findings'), true)
   assert.equal(isPlanned('findings'), false)
-  assert.equal(isPlanned('source-java'), true)
-  assert.equal(isReady('source-java'), false)
+  assert.equal(isPlanned('framework-view'), true)
+  assert.equal(isReady('framework-view'), false)
   assert.equal(isReady('nonexistent'), false)
 })
 
 t('getPanel returns metadata incl. roadmap blurb', () => {
-  const p = getPanel('source-java')
-  assert.equal(p.roadmap, 'Java Source Explorer')
+  const p = getPanel('evidence-compare')
+  assert.equal(p.roadmap, 'Side-by-side Evidence Comparison')
   assert.ok(p.blurb && p.blurb.length > 10)
   assert.equal(getPanel('nope'), null)
 })
@@ -42,10 +46,11 @@ t('navGroups follows GROUP_ORDER and can hide planned', () => {
   // groups appear in declared order (subset of GROUP_ORDER that has items)
   let last = -1
   for (const l of labels) { const i = GROUP_ORDER.indexOf(l); assert.ok(i > last, `group ${l} out of order`); last = i }
-  assert.ok(withPlanned.some(g => g.label === 'Source'), 'Source group should appear with planned items')
+  // 'Advanced' holds only planned panels → present with planned, gone without.
+  assert.ok(withPlanned.some(g => g.label === 'Advanced'), 'Advanced group should appear with planned items')
 
   const readyOnly = navGroups({ includePlanned: false })
-  assert.ok(!readyOnly.some(g => g.label === 'Source'), 'Source group should vanish when planned hidden')
+  assert.ok(!readyOnly.some(g => g.label === 'Advanced'), 'Advanced group should vanish when planned hidden')
 })
 
 t('every panel has id/label/group/icon/status', () => {

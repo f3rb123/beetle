@@ -5,8 +5,9 @@
 // /scans/:id/codebrowser must resolve to a real panel instead of always Overview.
 import { PANELS } from './workspace-registry.js'
 
-// Deep-analysis section ids the shell renders in addition to the registry panels.
-// MUST stay in sync with the DEEP_ANALYSIS array in Workspace.jsx (same ids).
+// Section ids that historically lived in the shell's hardcoded "Deep Analysis"
+// list; Phase 2.5.8 folded them into the registry (so PANELS already covers them).
+// Kept as an explicit fallback set so URL resolution stays correct regardless.
 export const DEEP_ANALYSIS_IDS = [
   'manifest', 'permissions', 'network', 'certificate', 'androidsec',
   'components', 'androidapis', 'taint', 'malware', 'codebrowser', 'compare', 'ai',

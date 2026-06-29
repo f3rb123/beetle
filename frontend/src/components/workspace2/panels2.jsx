@@ -257,7 +257,7 @@ export function TaintFlowPanel({ results, onOpenCode }) {
 
   return (
     <div>
-      <div className="ws-section__head"><h1>Taint Flows</h1><span className="ws-muted">{flows.length} flow{flows.length !== 1 ? 's' : ''}</span></div>
+      <div className="ws-section__head"><h1>Data Flow Analysis</h1><span className="ws-muted">{flows.length} flow{flows.length !== 1 ? 's' : ''}</span></div>
       <div className="ws-metrics ws-section">
         <Metric label="Total flows" value={flows.length} />
         <Metric label="High" value={(riskCounts.high || 0) + (riskCounts.critical || 0)} />
@@ -378,7 +378,7 @@ export function CertificatePanel({ results }) {
 
   return (
     <div>
-      <div className="ws-section__head"><h1>Certificate</h1><Verdict level={level} /></div>
+      <div className="ws-section__head"><h1>Certificates</h1><Verdict level={level} /></div>
 
       <div className="ws-card ws-card--pad ws-section">
         <h2>Signature Schemes</h2>
@@ -952,7 +952,7 @@ export function ComponentsPanel({ results }) {
 
   return (
     <div>
-      <div className="ws-section__head"><h1>Components</h1><span className="ws-muted">{inv.exported_total ?? '—'} exported of {inv.total ?? '—'}</span></div>
+      <div className="ws-section__head"><h1>Application Components</h1><span className="ws-muted">{inv.exported_total ?? '—'} exported of {inv.total ?? '—'}</span></div>
       <div className="ws-toolbar">
         <Chips value={type} onChange={t => { setType(t); setLimit(50) }} options={COMP_TYPES.map(t => ({ ...t, count: (surface[t.id] || []).length }))} />
       </div>
@@ -1264,7 +1264,7 @@ export function ComparePanel({ results }) {
 
   return (
     <div>
-      <div className="ws-section__head"><h1>Compare</h1></div>
+      <div className="ws-section__head"><h1>Scan Compare</h1></div>
       <div className="ws-toolbar">
         <span className="ws-muted">Compare against:</span>
         <select className="ws-input" value={otherId} onChange={e => setOtherId(e.target.value)}>
@@ -1355,7 +1355,7 @@ export function AiAssistantPanel({ results }) {
 
   return (
     <div>
-      <div className="ws-section__head"><h1>AI Assistant</h1><SoftTag>provider-agnostic</SoftTag></div>
+      <div className="ws-section__head"><h1>AI Actions</h1><SoftTag>provider-agnostic</SoftTag></div>
       <div className="ws-card ws-card--pad ws-section">
         <div className="ws-aiform">
           <label>Provider
@@ -1577,7 +1577,7 @@ export function DeveloperGuidePanel({ results, onOpenCode }) {
 
   return (
     <div>
-      <div className="ws-section__head"><h1>Developer Guide</h1>
+      <div className="ws-section__head"><h1>Developer Report</h1>
         <span className="ws-muted">{dev.covered_findings || 0} findings · {groups.length} areas</span></div>
       <p className="ws-muted" style={{ fontSize: 13, marginBottom: 14 }}>
         Findings grouped by engineering area. Each group explains what was found, why it is dangerous, and how to fix it — ordered by priority.
@@ -1824,7 +1824,7 @@ export function AskAiPanel({ results, scanId }) {
           {messages.length ? messages.map((m, i) => <AiMessage key={i} m={m} />) : (
             <div className="ws-askai__welcome">
               <Sparkles size={26} className="ws-muted" />
-              <h3>Ask AI about this scan</h3>
+              <h3>Ask the AI Assistant about this scan</h3>
               <p>Questions are answered from the analyzer evidence only — never fabricated. Select findings to reason across them.</p>
               <div className="ws-askai__suggest">
                 {ASKAI_SUGGESTIONS.map(s => <button key={s} type="button" className="ws-chip" onClick={() => send(s)}>{s}</button>)}
