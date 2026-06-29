@@ -133,6 +133,7 @@ export function SourceExplorerPanel({ results, scanId, onOpenCode, extensions, i
   const overlay = useMemo(() => buildOverlay(fileIndex), [fileIndex])
 
   const [manifest, setManifest] = useState(null)
+  const [manifestLoading, setManifestLoading] = useState(true)
   const [err, setErr] = useState('')
   const [q, setQ] = useState('')
   // The ONE filter selection, shared by the Quick Filters row and the Security
@@ -150,10 +151,12 @@ export function SourceExplorerPanel({ results, scanId, onOpenCode, extensions, i
   // ── Fetch the file manifest once (lazy RENDER below handles large trees) ──────
   useEffect(() => {
     let cancelled = false
+    setManifestLoading(true)
     apiFetch(`/api/scans/${scanId}/files`)
       .then(r => r.json())
       .then(d => { if (!cancelled) setManifest(flattenManifest(d.files || [])) })
       .catch(() => { if (!cancelled) setErr('File listing unavailable for this scan.') })
+      .finally(() => { if (!cancelled) setManifestLoading(false) })
     return () => { cancelled = true }
   }, [scanId])
 
@@ -223,6 +226,18 @@ export function SourceExplorerPanel({ results, scanId, onOpenCode, extensions, i
 
   const fileCount = paths.filter(p => !p.endsWith('/')).length
   const breadcrumb = selected ? normalizePath(selected).split('/') : []
+
+  // Count files that survive the active search/category filter, so we can show an
+  // explicit "no matches" state instead of a silently-empty tree.
+  const queryLc = q.trim().toLowerCase()
+  const visibleFileCount = (queryLc || filtered)
+    ? paths.filter(p => !p.endsWith('/')).filter(p => {
+        const np = normalizePath(p)
+        if (catSet && !catSet.has(np)) return false
+        if (queryLc && !np.split('/').pop().toLowerCase().includes(queryLc)) return false
+        return true
+      }).length
+    : fileCount
 
   return (
     <div className="ws-ex">
@@ -309,16 +324,28 @@ export function SourceExplorerPanel({ results, scanId, onOpenCode, extensions, i
             ) : null}
           </div>
 
-          {err && !paths.length ? <EmptyState title="Source unavailable" body={err} /> : null}
-          {!err && !paths.length ? <EmptyState title="No source files" body="No decompiled source is available for this scan." /> : null}
+          {manifestLoading && !paths.length
+            ? <div className="ws-ex-loading ws-muted" style={{ padding: '24px 4px', fontSize: 13 }}>Loading project files…</div> : null}
+          {!manifestLoading && err && !paths.length ? <EmptyState title="Source unavailable" body={err} /> : null}
+          {!manifestLoading && !err && !paths.length ? <EmptyState title="No source files" body="No decompiled source is available for this scan." /> : null}
+          {paths.length > 0 && visibleFileCount === 0 ? (
+            <EmptyState
+              title="No files match"
+              body={queryLc
+                ? `No files match “${q.trim()}”${filtered ? ` in ${activeCat}` : ''}.`
+                : `No files in the ${activeCat} category.`}
+            />
+          ) : null}
 
-          <div className="ws-ex-tree">
-            {(tree.children || []).map((c, i) => (
-              <TreeNode key={c.path || i} node={c} depth={0} expanded={expanded}
-                toggle={toggle} onOpen={open} overlay={overlay}
-                filters={{ catSet, query: q }} selected={selected} />
-            ))}
-          </div>
+          {visibleFileCount > 0 ? (
+            <div className="ws-ex-tree">
+              {(tree.children || []).map((c, i) => (
+                <TreeNode key={c.path || i} node={c} depth={0} expanded={expanded}
+                  toggle={toggle} onOpen={open} overlay={overlay}
+                  filters={{ catSet, query: q }} selected={selected} />
+              ))}
+            </div>
+          ) : null}
           <p className="ws-muted" style={{ marginTop: 10, fontSize: 12 }}>
             Click a file to open it in the viewer (search within, jump between matches, copy).
             Finding evidence links auto-expand the tree and jump to the exact line.
