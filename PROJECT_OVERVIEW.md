@@ -1,6 +1,6 @@
 # Beetle — Project Overview
 
-**Version:** 3.2.0  
+**Applies to:** Beetle v1.2.0  
 **Type:** Mobile Application Security Testing (MAST) platform  
 **Targets:** Android APKs, iOS IPAs  
 **Deployment:** Self-hosted via Docker Compose  

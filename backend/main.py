@@ -152,7 +152,7 @@ log = logging.getLogger("cortex")
 app = FastAPI(
     title="Beetle API",
     description="Mobile Recon Framework",
-    version="3.2.0",
+    version="1.2.0",
 )
 
 # CORS — explicit allow-list when credentials are on. The old `["*"]` combined
@@ -948,7 +948,7 @@ async def health():
         content={
             "status": "ok",
             "tool": "Beetle",
-            "version": "3.2.0",
+            "version": "1.2.0",
             "db": DB_AVAILABLE,
             "tools": tools,
         }

@@ -382,7 +382,7 @@ def generate_sbom(results: dict) -> dict:
             "tools": [{
                 "vendor":  "Beetle",
                 "name":    "Beetle Mobile Security Scanner",
-                "version": "3.2.0",
+                "version": "1.2.0",
                 "externalReferences": [
                     {"type": "website", "url": "https://github.com/f3rb123/beetle"}
                 ],

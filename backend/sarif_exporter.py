@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 SARIF_VERSION  = "2.1.0"
 SARIF_SCHEMA   = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
 TOOL_NAME      = "Beetle Mobile Security Scanner"
-TOOL_VERSION   = "3.2.0"
+TOOL_VERSION   = "1.2.0"
 TOOL_URI       = "https://github.com/f3rb123/beetle"
 
 _LEVEL_MAP = {

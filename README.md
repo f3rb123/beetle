@@ -412,12 +412,6 @@ Please open an issue before submitting large feature changes so the implementati
 
 ---
 
-## License
-
-See the **LICENSE** file.
-
----
-
 ## Acknowledgements
 
 Beetle builds upon and benefits from the open-source mobile security ecosystem, including projects such as:
