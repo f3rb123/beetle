@@ -833,18 +833,10 @@ def _scan_binary_strings(binary_path: str, results: dict, base_dir: str = ""):
 
 # ─── Endpoint extraction ──────────────────────────────────────────────────────
 def _extract_endpoints(tmpdir: str, results: dict):
-    all_urls = set()
-    for root, _, files in os.walk(tmpdir):
-        for fname in files:
-            fpath = os.path.join(root, fname)
-            try:
-                with open(fpath, "r", errors="replace") as f:
-                    content = f.read()
-                for url in extract_urls(content):
-                    all_urls.add(url)
-            except Exception:
-                continue
-    results["endpoints"] = sorted(list(all_urls))[:200]
+    # Phase 2.5.6: broad, multi-source extraction shared with Android via
+    # endpoint_intel (Swift/ObjC/plist/json/js + ws/wss + custom-scheme deep links).
+    from . import endpoint_intel
+    results["endpoints"] = endpoint_intel.extract_endpoints(tmpdir)
 
 
 # ─── Framework detection ──────────────────────────────────────────────────────

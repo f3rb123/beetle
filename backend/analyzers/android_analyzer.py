@@ -471,7 +471,7 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         # ── Endpoint extraction ───────────────────────────────────────────────
         resource_started = time.perf_counter()
         log.info(f"[{scan_id}] stage=resource_scan start")
-        _extract_endpoints(tmpdir, results)
+        _extract_endpoints(tmpdir, results, preferred_source_dirs)
 
         # ── Network security config ───────────────────────────────────────────
         _analyze_network_security_config(tmpdir, results)
@@ -2326,21 +2326,12 @@ def _scan_dex_strings(tmpdir, results):
 
 
 # ─── Endpoint extraction ──────────────────────────────────────────────────────
-def _extract_endpoints(tmpdir, results):
-    all_urls = set()
-    for root, _, files in os.walk(tmpdir):
-        for fname in files:
-            if fname.endswith((".xml", ".json", ".properties", ".js", ".bundle", ".txt")):
-                fpath = os.path.join(root, fname)
-                try:
-                    with open(fpath, "r", errors="replace") as f:
-                        content = f.read()
-                    for url in extract_urls(content):
-                        all_urls.add(url)
-                except Exception:
-                    continue
-
-    results["endpoints"] = sorted(list(all_urls))[:200]  # cap at 200
+def _extract_endpoints(tmpdir, results, extra_dirs=None):
+    # Phase 2.5.6: broad, multi-source extraction (Java/Kotlin/Smali/Dart/TS/HTML/
+    # config + ws/wss/ftp + custom-scheme deep links), shared with iOS via
+    # endpoint_intel. Replaces the previous narrow http(s)-only resource scan.
+    from . import endpoint_intel
+    results["endpoints"] = endpoint_intel.extract_endpoints(tmpdir, extra_dirs)
 
 
 # ─── APK Protection Checks ────────────────────────────────────────────────────
