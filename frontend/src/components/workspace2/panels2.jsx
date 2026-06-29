@@ -8,6 +8,7 @@ import {
   MessageSquare, Plus, Trash2, Pencil, Send, ChevronDown,
 } from 'lucide-react'
 import { SEV_COLOR, normSev, SeverityTag, SoftTag, EmptyState, Metric } from './ui.jsx'
+import { useWorkspaceNav } from './workspace-context.jsx'
 import { fetchAiProviders, runFindingAction } from '../../lib/ai-providers.js'
 import { apiFetch } from '../../lib/auth.js'
 import { loadLocalHistory, getStoredScan } from '../../lib/scan-data.js'
@@ -1705,6 +1706,7 @@ function AiMessage({ m }) {
 }
 
 export function AskAiPanel({ results, scanId }) {
+  const nav = useWorkspaceNav()
   const findings = results.findings || []
   const [providers, setProviders] = useState([])
   const [provider, setProvider] = useState('')
@@ -1716,6 +1718,7 @@ export function AskAiPanel({ results, scanId }) {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const threadRef = useRef(null)
+  const seedTokenRef = useRef(null)
 
   const loadConvos = useCallback(() => {
     apiFetch(`/api/ai/chats?scan_id=${scanId}`).then(r => (r.ok ? r.json() : { conversations: [] }))
@@ -1727,6 +1730,21 @@ export function AskAiPanel({ results, scanId }) {
   useEffect(() => { threadRef.current?.scrollTo({ top: 9e9 }) }, [messages])
 
   const fid = f => f.id || f.canonical_id || `${f.title || f.name || ''}|${f.file_path || ''}|${f.line || ''}`
+
+  // "Review with AI": a finding seeded from its drawer preselects it as context and
+  // prefills an explain prompt, so the Assistant opens with the finding loaded.
+  useEffect(() => {
+    const seed = nav.aiSeed
+    if (!seed || seed.token === seedTokenRef.current) return
+    seedTokenRef.current = seed.token
+    const f = seed.finding || {}
+    setSelected(new Set([fid(f)]))
+    setChatId(null)
+    setMessages([])
+    setInput(`Review this finding — explain the risk and how to remediate it: ${f.title || f.name || ''}`.trim())
+    nav.clearAiSeed?.()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nav.aiSeed])
 
   const openConvo = async cid => {
     const r = await apiFetch(`/api/ai/chats/${cid}`)

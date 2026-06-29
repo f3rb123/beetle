@@ -784,6 +784,20 @@ def _build_canonical(secret: dict, app_package: str, keep_raw: bool = False) -> 
     return secret
 
 
+def _merge_detection(into: dict, frm: dict) -> None:
+    """Union detection attribution from a duplicate secret into the kept one, so a
+    secret found by multiple producers is counted once but credited to all."""
+    for field in ("detected_by", "sources"):
+        a = into.get(field) or []
+        seen = set(a)
+        for e in (frm.get(field) or []):
+            if e not in seen:
+                a.append(e)
+                seen.add(e)
+        if a:
+            into[field] = a
+
+
 # ─── Public entry point ──────────────────────────────────────────────────────
 def process_secrets(results: dict, app_package: str = "") -> dict:
     """Canonicalize + mask + partition results["secrets"] (runs once in finalize).
@@ -798,8 +812,10 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
     raw = results.get("secrets") or []
     canon: list[dict] = []
     dropped_no_evidence = 0
+    deduped = 0
     providers: set[str] = set()
     scrub_pairs: list[tuple[str, str]] = []  # (raw_value, masked_value) for cross-scrub
+    seen_ids: dict[str, dict] = {}  # canonical id → kept secret (single source of truth)
 
     # Live validation (9.3) and cloud exposure (9.4) are opt-in only. When either
     # is on, raw values are kept transiently and stripped before this returns.
@@ -815,6 +831,17 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
         if canonical is None:
             dropped_no_evidence += 1
             continue
+        # Deduplicate identical secrets BEFORE counting (Phase 2.5.10): the same
+        # credential can arrive from multiple producers (evidence scanner, APKLeaks,
+        # legacy) and share a canonical id (provider+type+value+path:line). Keep the
+        # first, union its detection attribution, and never double-count it.
+        sid = canonical.get("id")
+        if sid and sid in seen_ids:
+            _merge_detection(seen_ids[sid], canonical)
+            deduped += 1
+            continue
+        if sid:
+            seen_ids[sid] = canonical
         if raw_value and len(raw_value) >= 6:
             scrub_pairs.append((raw_value, canonical["masked_value"]))
         providers.add(canonical["provider"])
@@ -950,6 +977,7 @@ def process_secrets(results: dict, app_package: str = "") -> dict:
         "low_confidence_suppressed": low_conf,
         "intelligence_fp_suppressed": intel_fp,
         "dropped_no_evidence":       dropped_no_evidence,
+        "deduplicated_secrets":      deduped,
         "total_application_secrets": len(visible),
         "providers":                 sorted(providers),
         "relationship_types":        sorted({p["relationship_type"] for p in pairs}),

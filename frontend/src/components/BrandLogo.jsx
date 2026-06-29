@@ -1,9 +1,11 @@
-import beetleLogo from '../assets/beetle-logo.png'
+import beetleLogo from '../assets/beetle_black_logo.png'
 import beetleIcon from '../assets/beetle-icon.png'
 
 export default function BrandLogo({ animated = false, size = 'default', showWordmark = true, subtitle = 'Mobile Static Security Workspace' }) {
-  // beetle-logo.png is the full lockup (wordmark + tagline baked in) — used for
-  // primary/full branding. beetle-icon.png is the standalone mark used for
+  // beetle_black_logo.png is the full lockup (wordmark + tagline) on the BLACK
+  // wordmark variant so it stays visible on Beetle's light surfaces (the white
+  // lockup was invisible on the dashboard/header light background). beetle-icon.png
+  // is the standalone mark used for
   // compact / sidebar / icon-only contexts, where the wordmark and subtitle are
   // rendered as text beside it to preserve the existing layout.
   const useFullLockup = size === 'default' && showWordmark

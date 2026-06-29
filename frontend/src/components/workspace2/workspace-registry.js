@@ -61,10 +61,9 @@ export const PANELS = [
   { id: 'ai', label: 'AI Actions', group: 'AI', icon: 'Sparkles', status: STATUS_READY },
 
   // ── Advanced — roadmap surfaces (navigable placeholders) ────────────────────
-  { id: 'evidence-compare', label: 'Evidence Compare', group: 'Advanced', icon: 'GitCompare', status: STATUS_PLANNED,
-    roadmap: 'Side-by-side Evidence Comparison', blurb: 'Pin two findings or two proofs side by side to compare evidence, ownership and confidence.' },
-  { id: 'ai-reviewer', label: 'AI Reviewer', group: 'Advanced', icon: 'Sparkles', status: STATUS_PLANNED,
-    roadmap: 'AI Reviewer Panel', blurb: 'A dedicated reviewer surface where an AI agent triages findings against the selected evidence.' },
+  // Evidence Compare was removed (Phase 2.5.10): it overlapped Scan Compare, which
+  // already diffs complete scans. AI Reviewer is no longer a standalone page —
+  // "Review with AI" on a finding opens the AI Assistant with that finding loaded.
   { id: 'security-controls', label: 'Security Controls', group: 'Advanced', icon: 'ShieldHalf', status: STATUS_PLANNED,
     roadmap: 'Security Controls Dashboard', blurb: 'A controls posture board (crypto, network, storage, platform) rolled up from coverage + findings.' },
   { id: 'framework-view', label: 'Framework Analysis', group: 'Advanced', icon: 'Boxes', status: STATUS_PLANNED,

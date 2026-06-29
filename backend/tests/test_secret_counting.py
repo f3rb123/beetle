@@ -88,6 +88,25 @@ def test_category_counts_sum_to_total():
     assert pair_rows and pair_rows[0]["count"] == 1
 
 
+def test_identical_secrets_deduped_before_counting():
+    # The SAME secret arrives from two producers (same provider/type/value/path:line).
+    dup = lambda src: {  # noqa: E731
+        "name": "Google API Key", "value": "AIza" + "SyBkMxQvRtWnZpLcHdGfJsAuYbXeWvQrTaP",
+        "file_path": f"{_APP}/Net.java", "line": 7, "snippet": 'k = "AIza...";',
+        "severity": "high", "confidence": 90, "detected_by": [src], "source": src,
+    }
+    results = {"secrets": [dup("Beetle Native"), dup("APKLeaks")]}
+    summary = process_secrets(results, app_package=APP_PKG)
+
+    assert len(results["secrets"]) == 1, "identical secret must be counted once"
+    assert summary["total_application_secrets"] == 1
+    assert summary["deduplicated_secrets"] == 1
+    # Attribution from both producers is preserved on the single kept secret.
+    assert set(results["secrets"][0].get("detected_by", [])) >= {"Beetle Native", "APKLeaks"}
+    # Partition still sums to the (deduped) total.
+    assert sum(c["count"] for c in summary["secrets_by_category"]) == 1
+
+
 def test_empty_secrets_partition_is_consistent():
     results = {"secrets": []}
     summary = process_secrets(results, app_package=APP_PKG)

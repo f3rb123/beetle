@@ -35,6 +35,19 @@ export function WorkspaceProvider({ children, initialSection = 'overview', onOpe
   const openFinding = useCallback((f) => setFinding(f), [])
   const closeFinding = useCallback(() => setFinding(null), [])
 
+  // "Review with AI" (Phase 2.5.10): replaces the standalone AI Reviewer page.
+  // A finding row/drawer seeds a finding here and jumps to the AI Assistant, which
+  // opens with that finding preloaded as context. token makes repeat-reviews fire.
+  const [aiSeed, setAiSeed] = useState(null)
+  const reviewWithAI = useCallback((f) => {
+    if (!f) return
+    setAiSeed({ finding: f, token: Date.now() })
+    setFinding(null)
+    setSection('askai')
+    onScrollTop?.()
+  }, [onScrollTop])
+  const clearAiSeed = useCallback(() => setAiSeed(null), [])
+
   // Source seam — the single place "jump to source/smali" is defined. The `view`
   // hint is forward-compatible. Phase 2.3: these ALSO record an explorerTarget so the
   // Source Explorer's tree follows the same jump (non-disruptive: no section switch).
@@ -59,13 +72,14 @@ export function WorkspaceProvider({ children, initialSection = 'overview', onOpe
   const clearComparison = useCallback(() => setComparison([]), [])
 
   const value = useMemo(() => ({
-    section, finding, comparison, explorerTarget,
+    section, finding, comparison, explorerTarget, aiSeed,
     openSection, openFinding, closeFinding, openSource, openSmali, openInExplorer,
-    addToComparison, removeFromComparison, clearComparison,
+    addToComparison, removeFromComparison, clearComparison, reviewWithAI, clearAiSeed,
     // Raw host hook for the rare consumer that needs it directly (kept internal).
     _onOpenCode: onOpenCode,
-  }), [section, finding, comparison, explorerTarget, openSection, openFinding, closeFinding,
-       openSource, openSmali, openInExplorer, addToComparison, removeFromComparison, clearComparison, onOpenCode])
+  }), [section, finding, comparison, explorerTarget, aiSeed, openSection, openFinding, closeFinding,
+       openSource, openSmali, openInExplorer, addToComparison, removeFromComparison, clearComparison,
+       reviewWithAI, clearAiSeed, onOpenCode])
 
   return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>
 }
@@ -77,10 +91,11 @@ export function useWorkspaceNav() {
   if (ctx) return ctx
   const noop = () => {}
   return {
-    section: 'overview', finding: null, comparison: [], explorerTarget: null,
+    section: 'overview', finding: null, comparison: [], explorerTarget: null, aiSeed: null,
     openSection: noop, openFinding: noop, closeFinding: noop,
     openSource: noop, openSmali: noop, openInExplorer: noop,
     addToComparison: noop, removeFromComparison: noop, clearComparison: noop,
+    reviewWithAI: noop, clearAiSeed: noop,
     _onOpenCode: null,
   }
 }

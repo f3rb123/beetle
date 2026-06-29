@@ -19,9 +19,11 @@ t('all roadmap items are declared as planned', () => {
   // Java/Smali Explorers were folded into Source Explorer (Phase 2.5.8) — they are
   // viewing modes, not separate roadmap pages.
   const ids = plannedPanels().map(p => p.id)
-  for (const id of ['evidence-compare', 'ai-reviewer', 'security-controls', 'framework-view'])
+  for (const id of ['security-controls', 'framework-view'])
     assert.ok(ids.includes(id), `roadmap item ${id} not declared`)
-  for (const gone of ['source-java', 'source-smali'])
+  // Folded/removed in 2.5.8/2.5.10: Java/Smali → Source Explorer modes;
+  // Evidence Compare → Scan Compare; AI Reviewer → "Review with AI" on findings.
+  for (const gone of ['source-java', 'source-smali', 'evidence-compare', 'ai-reviewer'])
     assert.ok(!ids.includes(gone), `${gone} should no longer be a separate page`)
 })
 
@@ -34,8 +36,8 @@ t('status helpers are correct', () => {
 })
 
 t('getPanel returns metadata incl. roadmap blurb', () => {
-  const p = getPanel('evidence-compare')
-  assert.equal(p.roadmap, 'Side-by-side Evidence Comparison')
+  const p = getPanel('security-controls')
+  assert.equal(p.roadmap, 'Security Controls Dashboard')
   assert.ok(p.blurb && p.blurb.length > 10)
   assert.equal(getPanel('nope'), null)
 })

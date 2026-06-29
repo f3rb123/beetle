@@ -647,6 +647,7 @@ function ConfidencePanel({ finding }) {
 // ───────────────────────── Finding details drawer ────────────────────────
 export function FindingDrawer({ finding, onClose, onOpenCode, collab }) {
   useEscape(onClose)
+  const nav = useWorkspaceNav()
   const [providers, setProviders] = useState([])
   const [provider, setProvider] = useState('')
   const [busy, setBusy] = useState('')
@@ -686,6 +687,15 @@ export function FindingDrawer({ finding, onClose, onOpenCode, collab }) {
               {ownershipLabel(f) ? <SoftTag>{ownershipLabel(f)}</SoftTag> : null}
             </div>
             <h3>{f.title || f.name || 'Finding'}</h3>
+            <button
+              type="button"
+              className="ws-btn ws-btn--sm"
+              style={{ marginTop: 10 }}
+              title="Open the AI Assistant with this finding loaded as context"
+              onClick={() => nav.reviewWithAI(f)}
+            >
+              ✨ Review with AI
+            </button>
           </div>
           <button type="button" className="ws-drawer__close" onClick={onClose}>×</button>
         </div>
