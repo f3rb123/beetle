@@ -30,6 +30,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from analyzers.android_analyzer import analyze_apk
 from analyzers.ios_analyzer import analyze_ipa
+from analyzers.repo_analyzer import analyze_repository
 from json_utils import safe_results
 from report.pdf_generator import generate_pdf
 from report.compliance_pdf import generate_compliance_pdf, FRAMEWORKS as COMPLIANCE_FRAMEWORKS
@@ -776,7 +777,7 @@ def _run_scan_job(
             progress=10,
             message="Preparing package",
             filename=filename,
-            platform="ios" if ext == ".ipa" else "android",
+            platform=("cicd" if ext == ".zip" else "ios" if ext == ".ipa" else "android"),
         )
 
         jadx_dir = None
@@ -816,6 +817,8 @@ def _run_scan_job(
                 jadx_dir=jadx_dir,
                 apktool_dir=apktool_dir,
             )
+        elif ext == ".zip":
+            results = analyze_repository(str(file_path), scan_id, filename)
         else:
             results = analyze_ipa(str(file_path), scan_id, filename)
 
@@ -970,8 +973,8 @@ async def analyze(
         raise HTTPException(400, detail="No file provided")
 
     ext = Path(file.filename).suffix.lower()
-    if ext not in [".apk", ".ipa"]:
-        raise HTTPException(400, detail="Only APK and IPA files are supported")
+    if ext not in [".apk", ".ipa", ".zip"]:
+        raise HTTPException(400, detail="Only APK, IPA, and repository .zip files are supported")
 
     scan_id = str(uuid.uuid4())
     file_path = UPLOAD_DIR / f"{scan_id}{ext}"
@@ -994,7 +997,7 @@ async def analyze(
             progress=6,
             message="Upload received",
             filename=file.filename,
-            platform="ios" if ext == ".ipa" else "android",
+            platform=("cicd" if ext == ".zip" else "ios" if ext == ".ipa" else "android"),
         )
 
         _submit_scan(scan_id, file_path, file.filename, ext, use_jadx, use_apktool)

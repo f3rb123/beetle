@@ -233,7 +233,7 @@ def resolve_source_file(scan_id: str, rel_path: str) -> Path | None:
         if clean.startswith(prefix):
             clean = clean[len(prefix):]
 
-    subdirs = ("jadx", "apktool", "apk_extract", "ipa_extract", ".")
+    subdirs = ("jadx", "apktool", "apk_extract", "ipa_extract", "repo", ".")
     basename = os.path.basename(clean)
     ext = os.path.splitext(clean)[1].lower()
     # Treat anything that isn't a well-known text extension as potentially

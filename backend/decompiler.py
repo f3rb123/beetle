@@ -445,4 +445,22 @@ def list_source_files(scan_id: str, max_files: int = 10000) -> dict:
         if files:
             result["apk_extract"] = sorted(files)
 
+    # repo - CI/CD repository scan (pipeline + source files, incl. extensionless
+    # well-known files like Jenkinsfile / Dockerfile that have no suffix).
+    repo_base = scan_work / "repo"
+    if repo_base.exists():
+        files = []
+        for path in repo_base.rglob("*"):
+            if path.is_file() and len(files) < max_files:
+                rel = str(path.relative_to(repo_base))
+                ext = path.suffix.lower()
+                name = path.name.lower()
+                if ext in (".yml", ".yaml", ".json", ".xml", ".txt", ".sh", ".py",
+                           ".js", ".ts", ".gradle", ".properties", ".toml", ".cfg",
+                           ".ini", ".md", ".tf", ".groovy") or name in (
+                           "jenkinsfile", "dockerfile", "makefile"):
+                    files.append(rel)
+        if files:
+            result["repo"] = sorted(files)
+
     return result
