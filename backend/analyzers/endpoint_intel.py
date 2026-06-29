@@ -43,6 +43,19 @@ _EP_EXTENSIONS = (
 _URL_RE = re.compile(r"(?:https?|wss?|ftps?)://[^\s\"'<>\\)\]}]+", re.I)
 # Any scheme:// URI — used to harvest app custom-scheme deep links (myapp://…).
 _SCHEME_RE = re.compile(r"\b([a-zA-Z][a-zA-Z0-9+.\-]{1,28})://([^\s\"'<>\\)\]}]+)")
+# Bare API base-URL hosts assigned to a base-url-like constant WITHOUT a scheme —
+# the Retrofit/OkHttp/Volley/BuildConfig case the URL regex misses (e.g.
+# BASE_URL = "api.example.com"). Gated on the key + a real alpha TLD to keep FP low.
+_BASEURL_RE = re.compile(
+    r"""(?ix)
+    \b(?:base[_-]?url|api[_-]?url|api[_-]?host|api[_-]?base|endpoint|server[_-]?url|host)\b
+    \s*[:=]\s*["']
+    ([a-z0-9][a-z0-9.\-]+\.[a-z]{2,})        # bare host with an alpha TLD
+    (?:[:/][^\s"']*)?["']
+    """)
+# Build-time literal hint substrings — keep a file in the scan even with no "://".
+_BAREURL_HINTS = ("baseurl", "base_url", "api_url", "apiurl", "api_host",
+                  "apihost", "endpoint", "server_url")
 
 # Substrings that mark a spec / framework / store URL, not an app endpoint.
 _NOISE_SUBSTR = (
@@ -131,8 +144,9 @@ def extract_endpoints(base_dir: str, extra_dirs: list | None = None) -> list[str
                 except OSError:
                     continue
                 files_scanned += 1
-                if "://" not in content:
-                    continue  # fast reject — no URI in this file at all
+                low = content.lower()
+                if "://" not in content and not any(h in low for h in _BAREURL_HINTS):
+                    continue  # fast reject — no URI and no base-url constant here
                 for m in _URL_RE.finditer(content):
                     url = _clean(m.group(0))
                     if _accept(url):
@@ -144,5 +158,10 @@ def extract_endpoints(base_dir: str, extra_dirs: list | None = None) -> list[str
                     uri = _clean(m.group(0))
                     if _accept_deeplink(scheme, rest) and not any(n in uri.lower() for n in _NOISE_SUBSTR):
                         found.add(uri)
+                # Bare base-URL hosts (no scheme) → normalize to https for the inventory.
+                for m in _BASEURL_RE.finditer(content):
+                    host = m.group(1).strip().rstrip("/").lower()
+                    if "." in host and not any(n in host for n in _NOISE_SUBSTR):
+                        found.add(f"https://{host}")
 
     return sorted(found)[:_MAX_ENDPOINTS]

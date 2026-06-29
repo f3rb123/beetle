@@ -60,6 +60,18 @@ def test_filters_framework_and_loopback_noise():
     assert "127.0.0.1" not in low   # loopback is IP intelligence, not an endpoint
 
 
+def test_bare_base_url_hosts_extracted():
+    # Retrofit/OkHttp/BuildConfig base URLs declared WITHOUT a scheme were missed.
+    with tempfile.TemporaryDirectory() as root:
+        _write(root, "sources/com/app/BuildConfig.java",
+               'public static final String BASE_URL = "api.bank-corp.net";\n')
+        _write(root, "sources/com/app/Api.kt",
+               'const val API_HOST = "gateway.bank-corp.net/v1"\n')
+        eps = endpoint_intel.extract_endpoints(root)
+    assert "https://api.bank-corp.net" in eps
+    assert "https://gateway.bank-corp.net" in eps
+
+
 def test_empty_tree_is_clean():
     with tempfile.TemporaryDirectory() as root:
         _write(root, "a/b.kt", "val x = 1\n")
