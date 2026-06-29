@@ -28,9 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from analyzers.android_analyzer import analyze_apk
-from analyzers.ios_analyzer import analyze_ipa
-from analyzers.repo_analyzer import analyze_repository
+from analyzers import scan_targets
 from json_utils import safe_results
 from report.pdf_generator import generate_pdf
 from report.compliance_pdf import generate_compliance_pdf, FRAMEWORKS as COMPLIANCE_FRAMEWORKS
@@ -770,6 +768,10 @@ def _run_scan_job(
     use_apktool: bool,
 ):
     try:
+        # Resolve the scan target (ingestion layer). Everything below is target-
+        # agnostic — the intelligence pipeline is identical across targets.
+        target = scan_targets.resolve_target(ext) or scan_targets.SCAN_TARGETS[0]
+
         _update_scan_job(
             scan_id,
             status="running",
@@ -777,14 +779,15 @@ def _run_scan_job(
             progress=10,
             message="Preparing package",
             filename=filename,
-            platform=("cicd" if ext == ".zip" else "ios" if ext == ".ipa" else "android"),
+            platform=target.platform,
         )
 
-        jadx_dir = None
-        apktool_dir = None
-        decompile_info = {"tools_used": [], "errors": [], "jadx_dir": None, "apktool_dir": None}
-
-        if ext == ".apk" and DECOMPILER_AVAILABLE and (use_jadx or use_apktool):
+        # Prepare step — only targets that declare needs_decompile run it (APK).
+        # Other targets (IPA, repository, future IaC/AI) ingest inside their analyzer.
+        artifacts: dict = {}
+        decompile_info = None
+        if target.needs_decompile and DECOMPILER_AVAILABLE and (use_jadx or use_apktool):
+            decompile_info = {"tools_used": [], "errors": [], "jadx_dir": None, "apktool_dir": None}
             try:
                 _update_scan_job(
                     scan_id,
@@ -794,8 +797,7 @@ def _run_scan_job(
                 )
                 log.info(f"[{scan_id}] Decompiling...")
                 info = decompile_apk(str(file_path), scan_id)
-                jadx_dir = info.get("jadx_dir")
-                apktool_dir = info.get("apktool_dir")
+                artifacts = {"jadx_dir": info.get("jadx_dir"), "apktool_dir": info.get("apktool_dir")}
                 decompile_info = info
                 log.info(f"[{scan_id}] Decompile done: {info.get('tools_used', [])}")
             except Exception as e:
@@ -809,20 +811,12 @@ def _run_scan_job(
             message="Running static analysis",
         )
 
-        if ext == ".apk":
-            results = analyze_apk(
-                str(file_path),
-                scan_id,
-                filename,
-                jadx_dir=jadx_dir,
-                apktool_dir=apktool_dir,
-            )
-        elif ext == ".zip":
-            results = analyze_repository(str(file_path), scan_id, filename)
-        else:
-            results = analyze_ipa(str(file_path), scan_id, filename)
+        results = target.analyze(str(file_path), scan_id, filename, artifacts)
 
-        results["decompile_info"] = decompile_info
+        # Only the decompiling ingestion path stamps decompile_info here; other
+        # targets populate their own inside the analyzer, so don't clobber it.
+        if decompile_info is not None:
+            results["decompile_info"] = decompile_info
 
         _update_scan_job(
             scan_id,
@@ -973,8 +967,10 @@ async def analyze(
         raise HTTPException(400, detail="No file provided")
 
     ext = Path(file.filename).suffix.lower()
-    if ext not in [".apk", ".ipa", ".zip"]:
-        raise HTTPException(400, detail="Only APK, IPA, and repository .zip files are supported")
+    target = scan_targets.resolve_target(ext)
+    if target is None:
+        accepted = ", ".join(scan_targets.accepted_extensions())
+        raise HTTPException(400, detail=f"Unsupported file type. Accepted scan targets: {accepted}")
 
     scan_id = str(uuid.uuid4())
     file_path = UPLOAD_DIR / f"{scan_id}{ext}"
@@ -997,7 +993,7 @@ async def analyze(
             progress=6,
             message="Upload received",
             filename=file.filename,
-            platform=("cicd" if ext == ".zip" else "ios" if ext == ".ipa" else "android"),
+            platform=target.platform,
         )
 
         _submit_scan(scan_id, file_path, file.filename, ext, use_jadx, use_apktool)
