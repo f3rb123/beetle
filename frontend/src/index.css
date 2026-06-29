@@ -6534,6 +6534,26 @@ a:focus-visible {
 .cr-form__input:focus {
   border-color: var(--accent);
 }
+
+/* ── Phase 2.5.10 #2 — legacy settings pages adopt Beetle's black/white system ──
+   The Webhooks & SAST Rules (CustomRules) pages used the legacy green that comes
+   from --accent / --gradient-brand / --brand-1. Re-map those tokens to Beetle's
+   near-black ONLY within .settings-page so the rest of the app is untouched. No
+   markup, route, or backend-identifier changes — purely a visual-consistency pass
+   covering buttons, focus rings, hovers, badges and links on these pages. */
+.settings-page {
+  --accent: #0f172a;
+  --gradient-brand: #0f172a;
+  --brand-1: #0f172a;
+  --brand-1-soft: rgba(15, 23, 42, 0.08);
+}
+.settings-page .button {
+  background: #0f172a;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
+}
+.settings-page .button:hover:not(:disabled) {
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.22);
+}
 .cr-form__input--mono {
   font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
   font-size: 12px;
