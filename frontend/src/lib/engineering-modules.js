@@ -21,8 +21,8 @@
  * descriptor. No component, navigation, or layout changes are required.
  */
 import {
-  Smartphone, Apple, Layers, Atom, ScanSearch, GitBranch,
-  BrainCircuit, Puzzle, Building2, FolderTree, ShieldAlert,
+  Smartphone, Apple, Layers, Atom, GitBranch,
+  BrainCircuit, Puzzle, Building2,
 } from 'lucide-react'
 
 export const MODULE_STATUS = Object.freeze({
@@ -53,7 +53,7 @@ export const ENGINEERING_MODULES = [
     platform: 'ios',
   },
 
-  // ── Coming soon — visually complete, non-functional ──────────────────────────
+  // ── Available cross-platform analysis (detected from the uploaded package) ────
   {
     id: 'flutter',
     name: 'Flutter Security Intelligence',
@@ -79,41 +79,12 @@ export const ENGINEERING_MODULES = [
     platform: 'react_native',
   },
 
-  // ── Available investigation workspaces — navigate into a scan (no upload) ──────
-  {
-    id: 'source-explorer',
-    name: 'Source Explorer',
-    icon: FolderTree,
-    status: MODULE_STATUS.AVAILABLE,
-    description: 'Professional file tree + code viewer with intelligence badges across every platform.',
-    capability: 'Lazy tree, syntax-highlighted viewer, finding-to-source navigation.',
-    // Investigation view inside a scan — the launcher deep-links into a scan section
-    // instead of uploading. `deepLink.section` is the workspace section id to open;
-    // optional `category`/`detectedBy` pre-seed the destination panel's filters.
-    deepLink: { section: 'codebrowser' },
-  },
-  {
-    id: 'security-explorer',
-    name: 'Security Explorer',
-    icon: ShieldAlert,
-    status: MODULE_STATUS.AVAILABLE,
-    description: 'Investigate by security category — Secrets, Crypto, Network, Storage, IPC and more.',
-    capability: 'Category filters that drive the Source Explorer tree.',
-    // Same Source Explorer surface, opened with the security filter engaged so the
-    // tree shows only files carrying security findings.
-    deepLink: { section: 'codebrowser', category: 'findings' },
-  },
-  {
-    id: 'semgrep',
-    name: 'Semgrep Integration',
-    icon: ScanSearch,
-    status: MODULE_STATUS.AVAILABLE,
-    description: 'Policy-as-code SAST fused natively into Beetle findings, credited as "Detected By: Semgrep".',
-    capability: 'Configurable Semgrep rule packs as a first-class detection source.',
-    // No dedicated Semgrep section exists — open Findings pre-filtered to the
-    // Semgrep detection source so analysts land on its canonical results.
-    deepLink: { section: 'findings', detectedBy: 'Semgrep' },
-  },
+  // Investigation tools (Source Explorer, Security Explorer, Semgrep) are NOT
+  // launcher modules (Phase 2.5.2–2.5.4): they live inside the scan dashboard, and
+  // Semgrep is an internal SAST engine surfaced via the "Detected By" filter only.
+  // The Engineering Workspace launches analysis modules — never investigation tools.
+
+  // ── Coming soon — visually complete, non-functional ──────────────────────────
   {
     id: 'cicd',
     name: 'CI/CD Security',

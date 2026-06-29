@@ -1,49 +1,16 @@
-import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import EngineeringWorkspace from '../components/EngineeringWorkspace.jsx'
 import beetleIcon from '../assets/beetle-icon.png'
-import { loadLocalHistory, normalizeHistoryEntry } from '../lib/scan-data.js'
-import { apiFetch, clearAuth, getToken, getUser, isAdmin } from '../lib/auth.js'
+import { clearAuth, getToken, getUser, isAdmin } from '../lib/auth.js'
 
 export default function Home() {
   const navigate = useNavigate()
-  // History is only needed so investigation modules (Source / Security Explorer,
-  // Semgrep) can open the most recent scan. The scan list itself now lives on the
-  // dedicated Scan page.
-  const [history, setHistory] = useState([])
 
-  useEffect(() => {
-    apiFetch('/api/scans?limit=8')
-      .then(response => (response.ok ? response.json() : null))
-      .then(payload => {
-        if (payload?.scans?.length) {
-          setHistory(payload.scans.map(normalizeHistoryEntry))
-          return
-        }
-        setHistory(loadLocalHistory())
-      })
-      .catch(() => setHistory(loadLocalHistory()))
-  }, [])
-
-  // The Engineering Workspace is the application launcher. Selecting a capability
-  // routes into its dedicated stage; the Workspace itself never performs a scan.
-  //   • Upload modules (Android/iOS/Flutter/React Native) → dedicated Scan page.
-  //   • Investigation modules (Source/Security Explorer, Semgrep) → deep-link into
-  //     the latest scan's section (with optional panel filters), or fall back to the
-  //     Scan page when no scans exist yet.
-  //   • Coming Soon modules show their inline notice (handled in EngineeringWorkspace).
+  // The Engineering Workspace is the application launcher: it launches ANALYSIS
+  // modules only (Phase 2.5.2–2.5.4). Selecting one opens the dedicated Scan page;
+  // the Workspace itself never performs a scan or exposes investigation tools.
+  // Coming Soon modules show their inline notice (handled in EngineeringWorkspace).
   const launchModule = module => {
-    if (module.deepLink) {
-      const latest = history[0]?.scan_id
-      if (!latest) { navigate('/scan'); return }
-      const { section, category, detectedBy } = module.deepLink
-      const params = new URLSearchParams()
-      if (category) params.set('cat', category)
-      if (detectedBy) params.set('src', detectedBy)
-      const qs = params.toString()
-      navigate(`/scans/${latest}/${section}${qs ? `?${qs}` : ''}`)
-      return
-    }
     navigate(`/scan/${module.id}`)
   }
 
