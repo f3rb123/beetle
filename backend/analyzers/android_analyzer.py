@@ -43,7 +43,7 @@ from .live_checks import (
     check_firebase_db, check_assetlinks, check_s3_buckets,
     analyze_file_inventory, detect_obfuscation
 )
-from .tracker_db import detect_trackers, analyze_malware_permissions
+from .tracker_db import detect_trackers, analyze_malware_permissions, normalize_sdks
 from .api_analyzer import analyze_android_apis, extract_emails_from_app, detect_apkid_features
 from .domain_analyzer import check_domains
 from . import network_intel
@@ -1669,7 +1669,7 @@ def _detect_sdks(apk, tmpdir, results):
             })
 
     _detect_session_recording_sdk_issues(tmpdir, all_packages, tracker_hits, results)
-    results["sdks"] = found_sdks
+    results["sdks"] = normalize_sdks(found_sdks)
 
 
 def _normalize_protection_level(protection: str) -> str:

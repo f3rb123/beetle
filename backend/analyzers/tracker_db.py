@@ -211,6 +211,62 @@ def detect_trackers(package_names: set) -> list:
     return found
 
 
+# ─── SDK name normalization (Phase 2.5.10 #8) ───────────────────────────────
+# The same SDK is reported under vendor-prefixed aliases by different detectors
+# (e.g. "Firebase" vs "Google Firebase"). Canonicalize so it appears ONCE.
+_SDK_ALIASES = {
+    "google firebase": "Firebase",
+    "firebase": "Firebase",
+    "google firebase analytics": "Firebase Analytics",
+    "firebase analytics": "Firebase Analytics",
+    "google firebase crashlytics": "Firebase Crashlytics",
+    "firebase crashlytics": "Firebase Crashlytics",
+    "crashlytics": "Firebase Crashlytics",
+    "google firebase messaging": "Firebase Cloud Messaging",
+    "firebase cloud messaging": "Firebase Cloud Messaging",
+    "google admob": "Google AdMob",
+    "admob": "Google AdMob",
+    "google analytics": "Google Analytics",
+    "google play services": "Google Play Services",
+    "facebook": "Facebook SDK",
+    "facebook sdk": "Facebook SDK",
+    "facebook login": "Facebook SDK",
+}
+
+_SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def canonical_sdk_name(name: str) -> str:
+    """Map an SDK display name to its canonical form (alias table, else as-is)."""
+    n = (name or "").strip()
+    return _SDK_ALIASES.get(n.lower(), n)
+
+
+def normalize_sdks(sdks: list) -> list:
+    """Merge duplicate SDK entries by canonical name across platforms. Keeps first
+    appearance order, enriches missing url/category, and keeps the highest severity."""
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for s in sdks or []:
+        if not isinstance(s, dict):
+            continue
+        canon = canonical_sdk_name(s.get("name", ""))
+        key = canon.lower()
+        if not key:
+            continue
+        if key not in merged:
+            merged[key] = {**s, "name": canon}
+            order.append(key)
+            continue
+        cur = merged[key]
+        for field in ("url", "category", "package", "description"):
+            if not cur.get(field) and s.get(field):
+                cur[field] = s[field]
+        if _SEV_RANK.get(s.get("severity"), 4) < _SEV_RANK.get(cur.get("severity"), 4):
+            cur["severity"] = s.get("severity")
+    return [merged[k] for k in order]
+
+
 def analyze_malware_permissions(permissions: list) -> dict:
     """
     Categorize permissions into malware / common malware / normal.

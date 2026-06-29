@@ -1304,7 +1304,10 @@ def _analyze_embedded_frameworks(app_bundle: str, results: dict):
             pass
 
     results["embedded_frameworks"] = found
-    results["sdks"] = [{"name": f["name"], "category": f["category"], "description": f["description"]} for f in found]
+    from .tracker_db import normalize_sdks
+    results["sdks"] = normalize_sdks(
+        [{"name": f["name"], "category": f["category"], "description": f["description"]} for f in found]
+    )
 
 
 # ─── Swift / ObjC deep source scan ───────────────────────────────────────────
