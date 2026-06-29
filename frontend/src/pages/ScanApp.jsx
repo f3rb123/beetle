@@ -135,8 +135,8 @@ export default function ScanApp() {
     if (!nextFile) return
     const lower = nextFile.name.toLowerCase()
 
-    if (!lower.endsWith('.apk') && !lower.endsWith('.ipa')) {
-      setError('Only APK and IPA files are supported.')
+    if (!lower.endsWith('.apk') && !lower.endsWith('.ipa') && !lower.endsWith('.zip')) {
+      setError('Only APK, IPA, and repository .zip files are supported.')
       return
     }
 
@@ -463,7 +463,9 @@ export default function ScanApp() {
                       ? 'Drag an IPA to begin analysis'
                       : selectedModule.platform === 'android'
                         ? 'Drag an APK to begin analysis'
-                        : 'Drag an APK or IPA to begin analysis')
+                        : selectedModule.platform === 'cicd'
+                          ? 'Drag a repository .zip to begin analysis'
+                          : 'Drag an APK or IPA to begin analysis')
                   : 'Drag an APK or IPA to begin analysis'}
               </div>
             </div>

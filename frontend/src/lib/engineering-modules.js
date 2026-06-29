@@ -87,12 +87,15 @@ export const ENGINEERING_MODULES = [
   // ── Coming soon — visually complete, non-functional ──────────────────────────
   {
     id: 'cicd',
-    name: 'CI/CD Security',
+    name: 'CI/CD Security Intelligence',
     icon: GitBranch,
-    status: MODULE_STATUS.COMING_SOON,
-    description: 'Automated scanning in build pipelines with policy gating.',
-    capability: 'Pull-request checks, policy gates, SARIF export to CI.',
-    eta: 'Planned',
+    status: MODULE_STATUS.AVAILABLE,
+    description: 'Analyze repository pipelines (GitHub Actions, GitLab CI, Jenkins, …) for secrets, dangerous permissions, supply-chain and hardening gaps.',
+    capability: 'Pipeline misconfig, untrusted/unpinned actions, OIDC & runner risks.',
+    // CI/CD analysis runs on a repository archive uploaded through the existing
+    // Scan Application workflow; the backend detects pipeline files automatically.
+    accept: '.zip',
+    platform: 'cicd',
   },
   {
     id: 'ai',
