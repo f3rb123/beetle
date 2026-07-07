@@ -44,6 +44,16 @@ _POD_PATH_RE = re.compile(r"/Pods/([A-Za-z0-9_+\-]+)/", re.I)
 # Deliberately does NOT include real package roots like "kotlin"/"okhttp3".
 _NON_PACKAGE_ROOTS = {"res", "assets", "lib", "meta-inf", "build", "fabric"}
 
+# A dotted string ending in a file extension is a FILENAME, not a class
+# reference ("AndroidManifest.xml", "librdpdf.so"). Without this guard,
+# _class_ref_package turned bare filenames into phantom packages
+# ("AndroidManifest.xml" → package "androidmanifest.xml"), which blocked the
+# application-config stage for every manifest finding.
+_FILENAME_EXT_RE = re.compile(
+    r"\.(?:java|kt|kts|xml|json|js|ts|smali|so|dex|txt|html|css|properties|"
+    r"gradle|ya?ml|cfg|conf|config|plist|strings|swift|mm?|h|png|jpe?g|gif|"
+    r"webp|pdf|bin|jar|aar|zip|apk|arsc|proto|md|dylib)$", re.I)
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Signal derivation
@@ -93,6 +103,8 @@ def _class_ref_package(s: str) -> str:
         return _pkg_from_fqn(t[1:].rstrip(";").replace("/", "."))
     if "/" in t or "\\" in t:
         return ""
+    if _FILENAME_EXT_RE.search(t):
+        return ""  # bare filename ("AndroidManifest.xml"), not a class reference
     if "." in t:
         return _pkg_from_fqn(t.rstrip(";"))
     return ""
@@ -314,6 +326,19 @@ class OwnershipEngine:
     def classify(self, finding: CanonicalFinding, ctx: OwnershipContext | None = None) -> OwnershipResult:
         """Return the ownership of one finding. Pure — does not mutate input."""
         ctx = ctx or OwnershipContext(platform=(finding.platform or "unknown"))
+        # An upstream pipeline decision outranks fingerprints: exported-component
+        # findings are flagged app_owned_exposure because the EXPOSURE is declared
+        # in the app's own manifest — the app owns it even when the component
+        # class is implemented by a bundled SDK (android_analyzer Phase B).
+        if finding.raw.get("app_owned_exposure"):
+            return OwnershipResult(
+                owner_type=OwnerType.APPLICATION,
+                owner_name=ctx.app_name or "Application",
+                owner_confidence=Confidence.APPLICATION,
+                owner_reason=("Exported-component exposure declared in the application "
+                              "manifest (app-owned even when the class is library code)."),
+                matched_rule="app_exposure", matched_signature="app_owned_exposure",
+                classification_stage=Stage.APPLICATION_NAMESPACE)
         sig = derive_signals(finding)
         for stage in (
             lambda: self._match_prefix(sig),
@@ -387,6 +412,10 @@ def _looks_obfuscated(package: str) -> bool:
     segs = [s for s in package.split(".") if s]
     if not segs:
         return False
+    # jadx places classes stripped of their package (fully obfuscated) under a
+    # synthetic `defpackage` container — that IS the obfuscation signal.
+    if segs[0] == "defpackage":
+        return True
     if len(segs) == 1:
         return len(segs[0]) <= 2
     short = sum(1 for s in segs if len(s) <= 2)
@@ -397,6 +426,8 @@ _APP_CONFIG_CATEGORIES = {
     "configuration", "manifest", "permissions", "network security",
     "deeplinks", "deeplink", "attack surface", "components", "component",
     "data storage", "backup", "code signing", "privacy",
+    # The APK signing certificate is the application's own artifact.
+    "certificate",
 }
 
 
@@ -418,6 +449,63 @@ def get_engine() -> OwnershipEngine:
     return _ENGINE
 
 
+def _derived_app_namespaces(results: dict, declared: tuple, platform: str) -> tuple:
+    """Extra first-party namespaces from high-confidence manifest signals.
+
+    Real apps routinely ship code outside the applicationId namespace (the
+    Washington Post's applicationId is com.washingtonpost.android while its code
+    lives in com.wapo.*). Two signals identify those namespaces with high
+    confidence, and any candidate matching a known SDK/framework fingerprint is
+    rejected so this can never claim library code for the app:
+
+      1. the main/launcher activity's package — by definition the app's own
+         entry point;
+      2. a namespace owning a DOMINANT share of the manifest-declared
+         components (>= 3 components and >= 25% of all components) — no
+         bundled SDK contributes the majority of an app's manifest surface.
+    """
+    if platform != "android":
+        return ()
+    engine = get_engine()
+
+    def _is_library(ns: str) -> bool:
+        return engine._match_prefix({"pkg_lower": ns, "platform": platform}) is not None
+
+    out: list[str] = []
+    seen = {d.lower() for d in declared}
+
+    def _accept(ns: str):
+        ns = (ns or "").strip().lower()
+        if ns and "." in ns and ns not in seen and not _is_library(ns):
+            seen.add(ns)
+            out.append(ns)
+
+    info = results.get("app_info", {}) or {}
+    main = str(info.get("main_activity") or "")
+    if "." in main:
+        _accept(_pkg_from_fqn(main))
+
+    comps: list[str] = []
+    surface = results.get("attack_surface") or {}
+    for key in ("activities", "services", "receivers", "providers"):
+        for c in surface.get(key) or []:
+            name = c.get("name") if isinstance(c, dict) else c
+            if name and "." in str(name):
+                comps.append(str(name))
+    if len(comps) >= 8:  # too few components → dominance is meaningless
+        counts: dict[str, int] = {}
+        for name in comps:
+            segs = _pkg_from_fqn(name).split(".")
+            if len(segs) >= 3:
+                pref = ".".join(segs[:3]).lower()
+                counts[pref] = counts.get(pref, 0) + 1
+        threshold = max(3, len(comps) // 4)
+        for ns, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+            if n >= threshold:
+                _accept(ns)
+    return tuple(out)
+
+
 def context_from_results(results: dict) -> OwnershipContext:
     """Build an OwnershipContext from a scan's results dict."""
     info = results.get("app_info", {}) or {}
@@ -428,6 +516,7 @@ def context_from_results(results: dict) -> OwnershipContext:
         info.get("package"), results.get("package"),
         *(results.get("extra_app_packages") or ()),
     ) if p)
+    app_packages += _derived_app_namespaces(results, app_packages, platform)
     bundle_ids = tuple(b for b in (
         info.get("bundle_id"), info.get("bundle_identifier"),
     ) if b)

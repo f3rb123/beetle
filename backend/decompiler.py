@@ -8,6 +8,8 @@ import re
 import subprocess
 import shutil
 import logging
+import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -112,6 +114,109 @@ def _describe_jadx_failure(returncode, stdout: str, stderr: str) -> str:
     return f"jadx exited {returncode}: {detail}"
 
 
+def _dex_workload_mb(apk_path: str) -> float:
+    """Total uncompressed size of the .dex files inside the APK, in MB.
+
+    APK size is a poor proxy for jadx workload — assets/resources can dominate
+    an APK while jadx only decompiles DEX bytecode. Read from the zip central
+    directory (no extraction). Returns 0.0 when the APK is unreadable so
+    callers fall back to APK-size-based budgeting.
+    """
+    try:
+        with zipfile.ZipFile(apk_path) as z:
+            return sum(i.file_size for i in z.infolist()
+                       if i.filename.endswith(".dex")) / (1024 * 1024)
+    except Exception:
+        return 0.0
+
+
+def _jadx_time_budget(dex_mb: float, apk_mb: float) -> int:
+    """Soft timeout (seconds) for a jadx run.
+
+    Preferred: scale with the actual DEX workload (~10s per uncompressed DEX
+    MB with the default thread count), floor 120s, cap 600s. Fallback when the
+    DEX size is unknown: the legacy APK-size formula (~4s/MB, 90–420s).
+    CORTEX_JADX_TIMEOUT overrides both.
+    """
+    env = os.environ.get("CORTEX_JADX_TIMEOUT")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            log.warning(f"Ignoring invalid CORTEX_JADX_TIMEOUT={env!r}")
+    if dex_mb > 0:
+        return min(600, max(120, int(dex_mb * 10)))
+    return min(420, max(90, int(apk_mb * 4)))
+
+
+def _jadx_thread_count() -> int:
+    """Decompile threads for jadx. Defaults to the CPUs actually available to
+    this process (the container quota), clamped to 2–8 so jadx neither starves
+    on big hosts nor oversubscribes small ones. CORTEX_JADX_THREADS overrides."""
+    env = os.environ.get("CORTEX_JADX_THREADS")
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            log.warning(f"Ignoring invalid CORTEX_JADX_THREADS={env!r}")
+    cpus = getattr(os, "process_cpu_count", os.cpu_count)() or 4
+    return max(2, min(8, cpus))
+
+
+def _count_java_sources(jadx_dir: str) -> int:
+    """Number of .java files jadx has written so far. Used both as the progress
+    signal for the adaptive timeout and to validate partial output — a non-empty
+    directory with zero .java files is NOT usable decompiled source."""
+    count = 0
+    try:
+        for root, _dirs, names in os.walk(jadx_dir):
+            count += sum(1 for n in names if n.endswith(".java"))
+    except OSError:
+        pass
+    return count
+
+
+# Adaptive-timeout tuning. Poll the output tree every 15s; once past the soft
+# deadline, a run that has not produced a single new .java file for 60s is
+# considered wedged and killed rather than allowed to burn the full hard cap.
+_JADX_POLL_S = 15
+_JADX_STALL_S = 60
+
+
+def _wait_with_progress(proc, jadx_dir: str, soft_timeout: int, hard_cap: int):
+    """Wait for jadx with an adaptive deadline.
+
+    Up to `soft_timeout` the process simply runs (jadx front-loads DEX loading
+    and writes nothing early on — that is not a stall). Past the soft deadline
+    the run is EXTENDED as long as new .java files keep appearing, up to
+    `hard_cap`; if output stops growing for _JADX_STALL_S the process is killed
+    early. Returns (stdout, stderr, timed_out, elapsed_seconds).
+    """
+    start = time.monotonic()
+    last_count = -1
+    last_progress_at = start
+    while True:
+        try:
+            stdout, stderr = proc.communicate(timeout=_JADX_POLL_S)
+            return stdout, stderr, False, int(time.monotonic() - start)
+        except subprocess.TimeoutExpired:
+            pass
+        now = time.monotonic()
+        count = _count_java_sources(jadx_dir)
+        if count > last_count:
+            last_count = count
+            last_progress_at = now
+        past_soft = (now - start) >= soft_timeout
+        stalled = (now - last_progress_at) >= _JADX_STALL_S
+        if (now - start) >= hard_cap or (past_soft and stalled):
+            proc.kill()
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except Exception:
+                stdout, stderr = "", ""
+            return stdout, stderr, True, int(now - start)
+
+
 def jadx_available() -> bool:
     try:
         result = subprocess.run([JADX_PATH, "--version"], capture_output=True, timeout=10)
@@ -168,42 +273,59 @@ def decompile_apk(apk_path: str, scan_id: str) -> dict:
             log.warning(f"[{scan_id}] jadx not available")
             return False, "jadx not installed — using DEX string extraction only"
         try:
-            log.info(f"[{scan_id}] Running jadx ({apk_size_mb:.1f} MB)...")
-            # Timeout scales with APK size: ~4s per MB, floor 90s, cap 420s (7 min).
+            # Budget scales with the real workload (DEX bytes), not APK bytes.
             # Jadx writes output incrementally so partial output on timeout is
             # still usable downstream.
-            jadx_timeout = int(os.environ.get(
-                "CORTEX_JADX_TIMEOUT",
-                str(min(420, max(90, int(apk_size_mb * 4))))
-            ))
-            result = subprocess.run(
+            dex_mb = _dex_workload_mb(apk_path)
+            jadx_timeout = _jadx_time_budget(dex_mb, apk_size_mb)
+            threads = _jadx_thread_count()
+            # Adaptive extension: past the soft deadline jadx keeps running as
+            # long as it is still writing sources, up to a hard cap. A stalled
+            # process is killed early instead of burning the whole budget.
+            hard_cap = min(900, jadx_timeout * 2)
+            log.info(
+                f"[{scan_id}] Running jadx ({apk_size_mb:.1f} MB APK, "
+                f"{dex_mb:.1f} MB dex, threads={threads}, "
+                f"soft_timeout={jadx_timeout}s, hard_cap={hard_cap}s)..."
+            )
+            proc = subprocess.Popen(
                 [JADX_PATH, "-d", jadx_dir, "--no-debug-info", "--no-res",
-                 "--threads-count", "4", "--show-bad-code", apk_path],
-                capture_output=True, timeout=jadx_timeout, text=True,
+                 "--threads-count", str(threads), "--show-bad-code", apk_path],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 env=_jadx_subprocess_env(),
             )
-            if os.path.exists(jadx_dir) and os.listdir(jadx_dir):
-                log.info(f"[{scan_id}] jadx complete (exit {result.returncode})")
-                return True, None
-            # No output. The reason is almost never in stderr alone — jadx logs to
-            # stdout, and an OOM/SIGKILL leaves both streams empty with only a
-            # non-zero return code. Capture all three so the failure is
-            # diagnosable from both the logs and decompile_info.errors.
-            reason = _describe_jadx_failure(result.returncode, result.stdout, result.stderr)
-            log.warning(
-                f"[{scan_id}] jadx produced no output — {reason} | "
-                f"rc={result.returncode} "
-                f"stdout_tail={result.stdout[-500:]!r} "
-                f"stderr_tail={result.stderr[-500:]!r}"
-            )
-            return False, f"jadx produced no output: {reason}"
-        except subprocess.TimeoutExpired:
-            # Even on timeout, jadx may have written partial output — keep it.
-            if os.path.exists(jadx_dir) and os.listdir(jadx_dir):
-                log.info(f"[{scan_id}] jadx timed out but produced partial output — using it")
-                return True, f"jadx timed out after {jadx_timeout}s (partial output kept)"
-            log.warning(f"[{scan_id}] jadx timed out after {jadx_timeout}s with no output — falling back to apktool/smali")
-            return False, f"jadx timed out after {jadx_timeout}s — falling back to apktool/smali"
+            stdout, stderr, timed_out, elapsed = _wait_with_progress(
+                proc, jadx_dir, soft_timeout=jadx_timeout, hard_cap=hard_cap)
+
+            java_count = _count_java_sources(jadx_dir)
+            if not timed_out:
+                if java_count > 0:
+                    log.info(f"[{scan_id}] jadx complete "
+                             f"(exit {proc.returncode}, {java_count} java files)")
+                    return True, None
+                # No usable source. The reason is almost never in stderr alone —
+                # jadx logs to stdout, and an OOM/SIGKILL leaves both streams
+                # empty with only a non-zero return code. Capture all three so
+                # the failure is diagnosable from both the logs and
+                # decompile_info.errors.
+                reason = _describe_jadx_failure(proc.returncode, stdout, stderr)
+                log.warning(
+                    f"[{scan_id}] jadx produced no usable source — {reason} | "
+                    f"rc={proc.returncode} "
+                    f"stdout_tail={(stdout or '')[-500:]!r} "
+                    f"stderr_tail={(stderr or '')[-500:]!r}"
+                )
+                return False, f"jadx produced no output: {reason}"
+            # Timed out. Partial output is kept — but only when it actually
+            # contains decompiled source, not just an empty directory skeleton.
+            if java_count > 0:
+                log.info(f"[{scan_id}] jadx timed out after {elapsed}s but produced "
+                         f"partial output ({java_count} java files) — using it")
+                return True, (f"jadx timed out after {elapsed}s "
+                              f"(partial output kept: {java_count} java files)")
+            log.warning(f"[{scan_id}] jadx timed out after {elapsed}s with no "
+                        f"usable source — falling back to apktool/smali")
+            return False, f"jadx timed out after {elapsed}s — falling back to apktool/smali"
         except Exception as e:
             log.warning(f"[{scan_id}] jadx invocation error: {e}")
             return False, f"jadx error: {e}"

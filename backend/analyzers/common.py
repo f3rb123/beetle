@@ -137,14 +137,22 @@ def attach_evidence(finding: dict, file_lines, context: int = 2) -> dict:
 def dedupe_findings(findings):
     """Collapse duplicate findings emitted by multiple analyzers.
 
-    Key = (rule_id or title, file_path, line_number). First wins; subsequent
-    copies bump a `duplicates` counter on the retained finding.
+    Key = (rule_id or title, title, file_path, line_number). First wins;
+    subsequent copies bump a `duplicates` counter on the retained finding.
+
+    The title participates even when a rule_id is present: since v1.3 every
+    detector carries a stable rule_id, and per-instance findings of one rule
+    (e.g. one exported-component finding per component, all rule_id
+    ``manifest_exported_service`` at the same manifest path) must NOT collapse
+    into one. For findings that never had a rule_id the key is unchanged
+    (title was already the identity).
     """
     seen = {}
     result = []
     for f in findings or []:
         key = (
             f.get("rule_id") or f.get("id") or f.get("title") or "",
+            f.get("title") or "",
             f.get("file_path") or f.get("file") or "",
             f.get("line_number") or 0,
         )
@@ -154,6 +162,18 @@ def dedupe_findings(findings):
         seen[key] = f
         result.append(f)
     return result
+
+
+# ─── Rule identity ────────────────────────────────────────────────────────────
+def rule_slug(prefix: str, text: str) -> str:
+    """Stable snake_case rule_id for rule-table detectors whose rules carry a
+    title but no hand-assigned id (Flutter/RN/iOS-SAST rule tuples, secret
+    patterns). Derived from the rule's TITLE — never from per-match values —
+    so the id is constant across scans. Changing a rule's title changes its id
+    (and detaches triage state keyed on it); prefer adding explicit ids when
+    rules are renamed."""
+    slug = re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")[:48].rstrip("_")
+    return f"{prefix}_{slug or 'rule'}"
 
 
 # ─── Shared file index ───────────────────────────────────────────────────────

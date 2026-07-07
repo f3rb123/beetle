@@ -2,6 +2,8 @@ import re
 import os
 import ipaddress
 from .path_utils import normalize_relative_path
+from .source_corpus import SourceCorpus, printable_text
+from . import regex_prefilter
 
 
 def _is_real_ip(val: str) -> bool:
@@ -216,69 +218,79 @@ STRING_PATTERNS = [
 ]
 
 
-def analyze_strings(tmpdir: str, platform: str) -> dict:
+def analyze_strings(tmpdir: str, platform: str, *, corpus: SourceCorpus | None = None) -> dict:
     """
     Scan extracted app content for categorized sensitive strings.
     Returns dict with categories, each match includes value + source files.
     """
     # Collect per-file content
-    file_map = _collect_files(tmpdir, platform)
+    file_map = _collect_files(tmpdir, platform, corpus=corpus or SourceCorpus())
 
-    categories = {}
-
+    # Compile once; iterate files OUTER so the casefolded content used by the
+    # necessary-literal prefilter is built once per file, not once per pattern.
+    compiled = []
     for pat_info in STRING_PATTERNS:
         try:
             pattern = re.compile(pat_info["pattern"], re.IGNORECASE | re.MULTILINE)
-            exclusions = pat_info.get("exclude", [])
-            validator = _VALUE_VALIDATORS.get(pat_info["category"])
-
-            # Track unique values and which files they came from
-            value_files = {}  # value -> list of rel paths
-
-            for rel_path, content in file_map.items():
-                for m in pattern.findall(content):
-                    val = m if isinstance(m, str) else (m[0] if m else "")
-                    if not val or len(val) < 3:
-                        continue
-                    # Length cap — skip crypto constants
-                    if len(val) > 200:
-                        continue
-                    # Skip pure long hex
-                    if len(val) > 40 and re.fullmatch(r'[0-9a-fA-F]+', val):
-                        continue
-                    if any(re.search(excl, val, re.IGNORECASE) for excl in exclusions):
-                        continue
-                    # Category-specific semantic validation (real IP, not a
-                    # namespace URL, …). Drops shape-matches that aren't real.
-                    if validator and not validator(val):
-                        continue
-
-                    # Truncate display value but keep it readable
-                    display = val if len(val) <= 80 else val[:40] + "..." + val[-15:]
-
-                    if display not in value_files:
-                        value_files[display] = []
-                    if rel_path not in value_files[display]:
-                        value_files[display].append(rel_path)
-
-            if value_files:
-                matches = [
-                    {"value": v, "files": fs}
-                    for v, fs in list(value_files.items())[:20]
-                ]
-                categories[pat_info["category"]] = {
-                    "severity":    pat_info["severity"],
-                    "description": pat_info["description"],
-                    "matches":     matches,
-                    "count":       len(value_files),
-                }
         except re.error:
             continue
+        compiled.append((
+            pat_info, pattern,
+            pat_info.get("exclude", []),
+            _VALUE_VALIDATORS.get(pat_info["category"]),
+            {},  # value -> list of rel paths (accumulated across files)
+        ))
+
+    for rel_path, content in file_map.items():
+        folded = regex_prefilter.fold(content)
+        for pat_info, pattern, exclusions, validator, value_files in compiled:
+            if not regex_prefilter.may_match(pat_info["pattern"], folded):
+                continue
+            for m in pattern.findall(content):
+                val = m if isinstance(m, str) else (m[0] if m else "")
+                if not val or len(val) < 3:
+                    continue
+                # Length cap — skip crypto constants
+                if len(val) > 200:
+                    continue
+                # Skip pure long hex
+                if len(val) > 40 and re.fullmatch(r'[0-9a-fA-F]+', val):
+                    continue
+                if any(re.search(excl, val, re.IGNORECASE) for excl in exclusions):
+                    continue
+                # Category-specific semantic validation (real IP, not a
+                # namespace URL, …). Drops shape-matches that aren't real.
+                if validator and not validator(val):
+                    continue
+
+                # Truncate display value but keep it readable
+                display = val if len(val) <= 80 else val[:40] + "..." + val[-15:]
+
+                if display not in value_files:
+                    value_files[display] = []
+                if rel_path not in value_files[display]:
+                    value_files[display].append(rel_path)
+
+    # Emit in STRING_PATTERNS order — identical to the historical pattern-outer
+    # loop, so category ordering and content are unchanged.
+    categories = {}
+    for pat_info, _pattern, _ex, _v, value_files in compiled:
+        if value_files:
+            matches = [
+                {"value": v, "files": fs}
+                for v, fs in list(value_files.items())[:20]
+            ]
+            categories[pat_info["category"]] = {
+                "severity":    pat_info["severity"],
+                "description": pat_info["description"],
+                "matches":     matches,
+                "count":       len(value_files),
+            }
 
     return categories
 
 
-def _collect_files(tmpdir: str, platform: str) -> dict:
+def _collect_files(tmpdir: str, platform: str, *, corpus: SourceCorpus | None = None) -> dict:
     """Return {rel_path -> content} for all scannable files.
 
     Raw .dex/.so binaries are only string-dumped as a LAST RESORT — when no
@@ -286,6 +298,7 @@ def _collect_files(tmpdir: str, platform: str) -> dict:
     dump just duplicates the real source while attributing findings to a binary
     file (classes.dex) that can't be opened in the source viewer.
     """
+    corpus = corpus or SourceCorpus()
     result = {}
     binary_blobs = {}  # rel_path -> dumped strings (only used if no source)
     has_source = False
@@ -296,28 +309,24 @@ def _collect_files(tmpdir: str, platform: str) -> dict:
         ".yaml", ".yml", ".cfg", ".config", ".env",
     }
 
-    for root, _, files in os.walk(tmpdir):
+    for root, _, files in corpus.walk(tmpdir):
         for fname in files:
             fpath = os.path.join(root, fname)
             rel = normalize_relative_path(os.path.relpath(fpath, tmpdir))
             ext = os.path.splitext(fname)[1].lower()
 
             if ext in text_exts:
-                try:
-                    with open(fpath, "r", errors="replace") as f:
-                        result[rel] = f.read()
-                    if ext in (".java", ".kt", ".smali"):
-                        has_source = True
-                except Exception:
+                content = corpus.read_text(fpath)
+                if content is None:
                     continue
+                result[rel] = content
+                if ext in (".java", ".kt", ".smali"):
+                    has_source = True
             elif ext in (".dex", ".so"):
-                try:
-                    with open(fpath, "rb") as f:
-                        raw = f.read(8 * 1024 * 1024)
-                    text = "".join(chr(b) if 32 <= b < 127 else " " for b in raw)
-                    binary_blobs[rel] = text
-                except Exception:
+                raw = corpus.read_bytes(fpath, max_bytes=8 * 1024 * 1024)
+                if raw is None:
                     continue
+                binary_blobs[rel] = printable_text(raw)
 
     # Fallback only: surface dex/so strings when decompilation produced nothing.
     if not has_source:

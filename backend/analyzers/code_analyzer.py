@@ -11,6 +11,8 @@ import os
 from .code_rules import CODE_RULES, IOS_CODE_RULES
 from .path_utils import normalize_relative_path
 from .evidence_scanner import is_namespace_url, classify_ip
+from .source_corpus import SourceCorpus
+from . import regex_prefilter
 
 # ── Phase 4 (P2): per-match validators for noise-prone SAST rules ─────────────
 # A rule's regex can shape-match non-findings (XML namespace URLs, vector
@@ -51,14 +53,14 @@ except Exception:
     def _get_custom_rules(platform): return []
 
 
-def run_android_sast(scan_dirs, results: dict):
-    file_map = _collect_android_files(scan_dirs)
+def run_android_sast(scan_dirs, results: dict, *, corpus: SourceCorpus | None = None):
+    file_map = _collect_android_files(scan_dirs, corpus=corpus or SourceCorpus())
     custom = _get_custom_rules("android")
     _run_rules_per_file(file_map, CODE_RULES + custom, results)
 
 
-def run_ios_sast(tmpdir: str, results: dict):
-    file_map = _collect_ios_files(tmpdir)
+def run_ios_sast(tmpdir: str, results: dict, *, corpus: SourceCorpus | None = None):
+    file_map = _collect_ios_files(tmpdir, corpus=corpus or SourceCorpus())
     custom = _get_custom_rules("ios")
     _run_rules_per_file(file_map, IOS_CODE_RULES + custom, results)
 
@@ -73,21 +75,31 @@ def _run_rules_per_file(file_map: dict, rules: list, results: dict):
     """
     rule_matches = {}  # rule_id -> {rule, files: [{path, lines, snippet}]}
 
+    compiled_rules = []
     for rule in rules:
-        rule_id = rule["id"]
         try:
             pattern = re.compile(rule["pattern"], re.IGNORECASE | re.MULTILINE | re.DOTALL)
         except re.error:
             continue
+        compiled_rules.append((rule, pattern, _SAST_MATCH_VALIDATORS.get(rule["id"])))
 
-        validator = _SAST_MATCH_VALIDATORS.get(rule_id)
-        for rel_path, content in file_map.items():
+    # Files OUTER so the casefolded prefilter key and the splitlines() result
+    # are computed once per file instead of once per (rule, file) — profiling
+    # showed 825k splitlines calls (rules x files) dominating this stage.
+    for rel_path, content in file_map.items():
+        folded = regex_prefilter.fold(content)
+        lines_content = None
+        for rule, pattern, validator in compiled_rules:
+            if not regex_prefilter.may_match(rule["pattern"], folded):
+                continue
+            rule_id = rule["id"]
             try:
-                lines_content = content.splitlines()
                 matched_lines = []
                 first_snippet = ""
 
                 for match in pattern.finditer(content):
+                    if lines_content is None:
+                        lines_content = content.splitlines()
                     line_no = content[:match.start()].count("\n") + 1
                     if validator:
                         line_text = lines_content[line_no - 1] if line_no - 1 < len(lines_content) else match.group(0)
@@ -109,7 +121,17 @@ def _run_rules_per_file(file_map: dict, rules: list, results: dict):
             except Exception:
                 continue
 
-    for rule_id, data in rule_matches.items():
+    # Emit findings in RULE order (not file-discovery order) so the findings
+    # list is identical to the historical rule-outer iteration.
+    emitted = set()
+    ordered = []
+    for rule, _pattern, _validator in compiled_rules:
+        rid = rule["id"]
+        if rid in rule_matches and rid not in emitted:
+            emitted.add(rid)
+            ordered.append((rid, rule_matches[rid]))
+
+    for rule_id, data in ordered:
         rule    = data["rule"]
         fentries = sorted(data["files"], key=lambda x: x["path"])
 
@@ -182,7 +204,8 @@ _SAST_SKIP_PREFIXES = (
 )
 
 
-def _collect_android_files(scan_dirs) -> dict:
+def _collect_android_files(scan_dirs, *, corpus: SourceCorpus | None = None) -> dict:
+    corpus = corpus or SourceCorpus()
     if isinstance(scan_dirs, str):
         scan_dirs = [scan_dirs]
     scan_dirs = [d for d in (scan_dirs or []) if d and os.path.exists(d)]
@@ -210,7 +233,7 @@ def _collect_android_files(scan_dirs) -> dict:
         if len(result) >= _SAST_MAX_FILES:
             break
         include_binary_fallback = fallback_only and os.path.basename(scan_dir).lower() not in {"jadx", "apktool"}
-        for root, dirs, files in os.walk(scan_dir):
+        for root, dirs, files in corpus.walk(scan_dir):
             # Prune noise dirs in-place so os.walk doesn't descend into them.
             rel_root = normalize_relative_path(os.path.relpath(root, scan_dir)).rstrip("/") + "/"
             if any(rel_root.startswith(p) or ("/" + p) in ("/" + rel_root) for p in _SAST_SKIP_PREFIXES):
@@ -237,25 +260,20 @@ def _collect_android_files(scan_dirs) -> dict:
                     if fsize > _SAST_MAX_FILE_BYTES:
                         skipped_size += 1
                         continue
-                    try:
-                        with open(fpath, "r", errors="replace") as f:
-                            result[rel] = f.read()
-                    except Exception:
+                    content = corpus.read_text(fpath)
+                    if content is None:
                         continue
+                    result[rel] = content
                 elif include_binary_fallback and ext == ".dex":
-                    try:
-                        with open(fpath, "rb") as f:
-                            raw = f.read(8 * 1024 * 1024)
-                        result[rel] = _extract_strings(raw)
-                    except Exception:
+                    raw = corpus.read_bytes(fpath, max_bytes=8 * 1024 * 1024)
+                    if raw is None:
                         continue
+                    result[rel] = _extract_strings(raw)
                 elif include_binary_fallback and ext == ".so":
-                    try:
-                        with open(fpath, "rb") as f:
-                            raw = f.read(4 * 1024 * 1024)
-                        result[rel] = _extract_strings(raw)
-                    except Exception:
+                    raw = corpus.read_bytes(fpath, max_bytes=4 * 1024 * 1024)
+                    if raw is None:
                         continue
+                    result[rel] = _extract_strings(raw)
 
     try:
         import logging as _lg
@@ -269,40 +287,34 @@ def _collect_android_files(scan_dirs) -> dict:
     return result
 
 
-def _collect_ios_files(tmpdir: str) -> dict:
+def _collect_ios_files(tmpdir: str, *, corpus: SourceCorpus | None = None) -> dict:
+    corpus = corpus or SourceCorpus()
     result = {}
     target_exts = {".swift",".m",".h",".js",".json",".plist",".xml",".strings",".txt"}
-    for root, _, files in os.walk(tmpdir):
+    for root, _, files in corpus.walk(tmpdir):
         for fname in files:
             ext   = os.path.splitext(fname)[1].lower()
             fpath = os.path.join(root, fname)
             rel   = normalize_relative_path(os.path.relpath(fpath, tmpdir))
             if ext in target_exts:
-                try:
-                    with open(fpath, "r", errors="replace") as f:
-                        result[rel] = f.read()
-                except Exception:
+                content = corpus.read_text(fpath)
+                if content is None:
                     continue
+                result[rel] = content
             else:
-                try:
-                    with open(fpath, "rb") as f:
-                        raw = f.read(5 * 1024 * 1024)
-                    if len(raw) > 100:
-                        result[rel] = _extract_strings(raw)
-                except Exception:
+                raw = corpus.read_bytes(fpath, max_bytes=5 * 1024 * 1024)
+                if raw is None:
                     continue
+                if len(raw) > 100:
+                    result[rel] = _extract_strings(raw)
     return result
 
 
+_NONPRINTABLE_TO_NUL = bytes(i if 32 <= i < 127 else 0 for i in range(256))
+
+
 def _extract_strings(data: bytes, min_len: int = 5) -> str:
-    result, current = [], []
-    for byte in data:
-        if 32 <= byte < 127:
-            current.append(chr(byte))
-        else:
-            if len(current) >= min_len:
-                result.append("".join(current))
-            current = []
-    if len(current) >= min_len:
-        result.append("".join(current))
-    return "\n".join(result)
+    """Printable-ASCII runs of at least ``min_len``, newline-joined — identical
+    output to the historical per-byte loop, at C speed (translate + split)."""
+    printable = data.translate(_NONPRINTABLE_TO_NUL).decode("latin-1")
+    return "\n".join(run for run in printable.split("\x00") if len(run) >= min_len)

@@ -16,13 +16,14 @@ log = logging.getLogger("cortex.ios")
 
 from .common import (
     scan_files_for_secrets, scan_text_for_secrets,
-    extract_urls, sort_findings, SEVERITY_ORDER,
+    extract_urls, sort_findings, SEVERITY_ORDER, rule_slug,
     normalize_severity, compute_severity_summary, dedupe_findings,
 )
 from . import scan_storage
 from . import finding_model
 from .code_analyzer import run_ios_sast
 from .string_analyzer import analyze_strings
+from .source_corpus import SourceCorpus
 from .scoring import calculate_score
 from .path_utils import relativize_path
 from .virustotal import run_virustotal
@@ -120,6 +121,7 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                     z.extract(member, tmpdir)
         except Exception as e:
             results["findings"].append({
+                "rule_id": "ios_ipa_extraction_warning",
                 "title": "IPA Extraction Warning",
                 "severity": "info",
                 "category": "Meta",
@@ -148,6 +150,14 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         # ── Parallelize heavy independent scans to speed up iOS analysis.
         # Each module is CPU-bound on file IO + regex — running them on a
         # small thread pool overlaps their walks.
+        # Priority 1 — SourceCorpus: one shared walk + read of the IPA tree for
+        # every text analyzer below. Pre-warm the walk once here so the 7 threads
+        # start from a populated directory cache (reads then fill lazily, keyed by
+        # path — concurrent hits are idempotent). Detections are unchanged; only
+        # the redundant per-analyzer traversal is removed.
+        corpus = SourceCorpus()
+        for _ in corpus.walk(tmpdir):
+            pass
         from concurrent.futures import ThreadPoolExecutor as _TPE
         with _TPE(max_workers=7) as _pool:
             # Use evidence_scanner (richer, full CWE/MASVS/OWASP metadata)
@@ -157,17 +167,17 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
             # extra filesystem traversal — its hits are split out below and fused.
             from . import secret_catalog as _secret_catalog
             _fut_secrets_ev = _pool.submit(ev_scan_secrets, tmpdir, None, None,
-                                           _secret_catalog.combined())
+                                           _secret_catalog.combined(), corpus=corpus)
             _fut_secrets_lg = _pool.submit(scan_files_for_secrets, tmpdir, [
                 ".plist", ".json", ".xml", ".strings", ".js", ".swift",
                 ".m", ".h", ".txt", ".yml", ".yaml", ".cfg",
             ])
-            _fut_jwts = _pool.submit(scan_directory_for_jwts, tmpdir)
-            _fut_ips  = _pool.submit(network_intel.extract_ips, tmpdir)
-            _fut_cc   = _pool.submit(cloud_config.scan, tmpdir)
-            _fut_endpoints = _pool.submit(_extract_endpoints, tmpdir, results)
-            _fut_strings = _pool.submit(analyze_strings, tmpdir, "ios")
-            _fut_sast = _pool.submit(run_ios_sast, tmpdir, results)
+            _fut_jwts = _pool.submit(scan_directory_for_jwts, tmpdir, corpus=corpus)
+            _fut_ips  = _pool.submit(network_intel.extract_ips, tmpdir, corpus=corpus)
+            _fut_cc   = _pool.submit(cloud_config.scan, tmpdir, corpus=corpus)
+            _fut_endpoints = _pool.submit(_extract_endpoints, tmpdir, results, corpus=corpus)
+            _fut_strings = _pool.submit(analyze_strings, tmpdir, "ios", corpus=corpus)
+            _fut_sast = _pool.submit(run_ios_sast, tmpdir, results, corpus=corpus)
             _fut_framework = _pool.submit(_detect_framework, app_bundle or tmpdir, results)
 
             # Split the combined evidence walk into native vs APKLeaks hits BEFORE
@@ -259,6 +269,8 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         # ── JWT findings ──────────────────────────────────────────────────────
         for jwt in results.get("jwts", []):
             results["findings"].append({
+                # Same detector as the Android JWT scan — shared rule identity.
+                "rule_id":           "hardcoded_jwt_token",
                 "title":             "Hardcoded JWT Token",
                 "severity":          "high",
                 "category":          "Auth Token",
@@ -283,6 +295,7 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         public_ips = [ip for ip in results.get("ips", []) if ip.get("type") == "public"]
         if public_ips:
             results["findings"].append({
+                "rule_id":           "hardcoded_public_ips",
                 "title":             f"Hardcoded Public IP Addresses ({len(public_ips)} found)",
                 "severity":          "low",
                 "category":          "Configuration",
@@ -628,6 +641,7 @@ def _analyze_info_plist(plist_path: str, results: dict):
             plist = plistlib.loads(content.encode())
         except Exception as e:
             results["findings"].append({
+                "rule_id": "ios_plist_parse_error",
                 "title": "Info.plist Parse Error",
                 "severity": "info",
                 "category": "Meta",
@@ -674,6 +688,7 @@ def _analyze_info_plist(plist_path: str, results: dict):
             results["attack_surface"]["url_schemes"].append(scheme)
             if scheme.lower() not in ("http", "https"):
                 results["findings"].append({
+                    "rule_id":        "ios_custom_url_scheme",
                     "title":          f"Custom URL Scheme Registered — {scheme}://",
                     "severity":       "medium",
                     "category":       "Deeplinks",
@@ -695,6 +710,7 @@ def _analyze_info_plist(plist_path: str, results: dict):
 
     if ats.get("NSAllowsArbitraryLoads"):
         results["findings"].append({
+            "rule_id":        "ios_ats_disabled",
             "title":          "ATS Fully Disabled — All HTTP Connections Allowed",
             "severity":       "high",
             "category":       "Network Security",
@@ -704,6 +720,7 @@ def _analyze_info_plist(plist_path: str, results: dict):
         })
     elif ats.get("NSAllowsArbitraryLoadsInWebContent"):
         results["findings"].append({
+            "rule_id":        "ios_ats_web_content_disabled",
             "title":          "ATS Disabled for Web Content",
             "severity":       "medium",
             "category":       "Network Security",
@@ -715,6 +732,7 @@ def _analyze_info_plist(plist_path: str, results: dict):
     for domain, config in exception_domains.items():
         if config.get("NSExceptionAllowsInsecureHTTPLoads"):
             results["findings"].append({
+                "rule_id":        "ios_ats_domain_exception",
                 "title":          f"ATS Exception — HTTP Allowed for {domain}",
                 "severity":       "low",
                 "category":       "Network Security",
@@ -725,6 +743,7 @@ def _analyze_info_plist(plist_path: str, results: dict):
     # ── Dangerous plist flags ─────────────────────────────────────────────────
     if plist.get("NSBluetoothAlwaysUsageDescription") and plist.get("NSLocationAlwaysUsageDescription"):
         results["findings"].append({
+            "rule_id":        "ios_background_bluetooth_location",
             "title":          "Background Bluetooth + Location — Privacy Risk",
             "severity":       "medium",
             "category":       "Permissions",
@@ -734,6 +753,7 @@ def _analyze_info_plist(plist_path: str, results: dict):
 
     if plist.get("NSUserTrackingUsageDescription"):
         results["findings"].append({
+            "rule_id":        "ios_att_requested",
             "title":          "App Tracking Transparency (ATT) Requested",
             "severity":       "info",
             "category":       "Privacy",
@@ -777,6 +797,7 @@ def _analyze_macho(binary_path: str, results: dict):
 
         if not has_stack_canary:
             results["findings"].append({
+                "rule_id":        "ios_binary_stack_canary_missing",
                 "title":          "Stack Canary Not Detected",
                 "severity":       "low",
                 "category":       "Binary Hardening",
@@ -786,6 +807,7 @@ def _analyze_macho(binary_path: str, results: dict):
 
         if not has_arc:
             results["findings"].append({
+                "rule_id":        "ios_binary_arc_missing",
                 "title":          "ARC (Automatic Reference Counting) Not Detected",
                 "severity":       "low",
                 "category":       "Binary Hardening",
@@ -795,6 +817,7 @@ def _analyze_macho(binary_path: str, results: dict):
 
         if has_rpath:
             results["findings"].append({
+                "rule_id":        "ios_binary_rpath_usage",
                 "title":          "@rpath — Dylib Hijacking Risk",
                 "severity":       "medium",
                 "category":       "Binary Hardening",
@@ -804,6 +827,7 @@ def _analyze_macho(binary_path: str, results: dict):
             })
 
         results["findings"].append({
+            "rule_id":        "ios_binary_hardening_summary",
             "title":          "Binary Hardening Analysis Complete",
             "severity":       "info",
             "category":       "Binary Hardening",
@@ -819,7 +843,7 @@ def _scan_binary_strings(binary_path: str, results: dict, base_dir: str = ""):
     try:
         with open(binary_path, "rb") as f:
             raw = f.read()
-        text = "".join(chr(b) if 32 <= b < 127 else " " for b in raw)
+        text = printable_text(raw)
         seen = {f"{s['name']}:{s['value']}" for s in results["secrets"]}
         rel_path = relativize_path(binary_path, base_dir) if base_dir else binary_path
         for s in scan_text_for_secrets(text, rel_path):
@@ -832,11 +856,11 @@ def _scan_binary_strings(binary_path: str, results: dict, base_dir: str = ""):
 
 
 # ─── Endpoint extraction ──────────────────────────────────────────────────────
-def _extract_endpoints(tmpdir: str, results: dict):
+def _extract_endpoints(tmpdir: str, results: dict, *, corpus: SourceCorpus = None):
     # Phase 2.5.6: broad, multi-source extraction shared with Android via
     # endpoint_intel (Swift/ObjC/plist/json/js + ws/wss + custom-scheme deep links).
     from . import endpoint_intel
-    results["endpoints"] = endpoint_intel.extract_endpoints(tmpdir)
+    results["endpoints"] = endpoint_intel.extract_endpoints(tmpdir, corpus=corpus or SourceCorpus())
 
 
 # ─── Framework detection ──────────────────────────────────────────────────────
@@ -857,6 +881,8 @@ def _detect_framework(app_bundle: str, results: dict):
         fw_type = "flutter"
         details.append("Flutter detected via flutter_assets directory")
         results["findings"].append({
+            "rule_id":        "framework_flutter_detected",
+            "rule_id":        "framework_flutter_detected",
             "title":          "Flutter Framework Detected",
             "severity":       "info",
             "category":       "Framework",
@@ -870,6 +896,8 @@ def _detect_framework(app_bundle: str, results: dict):
         fw_type = "react_native"
         details.append("React Native detected via JS bundle")
         results["findings"].append({
+            "rule_id":        "framework_react_native_detected",
+            "rule_id":        "framework_react_native_detected",
             "title":          "React Native Framework Detected",
             "severity":       "info",
             "category":       "Framework",
@@ -882,6 +910,8 @@ def _detect_framework(app_bundle: str, results: dict):
         fw_type = "cordova"
         details.append("Cordova detected via cordova.js")
         results["findings"].append({
+            "rule_id":        "framework_cordova_detected",
+            "rule_id":        "framework_cordova_detected",
             "title":          "Cordova/Ionic Hybrid Framework",
             "severity":       "medium",
             "category":       "Framework",
@@ -897,6 +927,8 @@ def _check_ats(results: dict):
     ats = results["app_info"].get("ats", {})
     if not ats:
         results["findings"].append({
+            "rule_id":        "ios_ats_config_missing",
+            "rule_id":        "ios_ats_not_configured",
             "title":          "ATS Configuration Not Found",
             "severity":       "info",
             "category":       "Network Security",
@@ -1103,6 +1135,8 @@ def _analyze_entitlements(app_bundle: str, results: dict):
                         days = int(delta // 86400)
                         if days < 0:
                             results["findings"].append({
+                                "rule_id": "ios_provisioning_profile_expired",
+                                "rule_id": "ios_provisioning_profile_expired",
                                 "title":   "Provisioning Profile Expired",
                                 "severity": "high",
                                 "category": "Code Signing",
@@ -1114,6 +1148,8 @@ def _analyze_entitlements(app_bundle: str, results: dict):
                             })
                         elif days < 30:
                             results["findings"].append({
+                                "rule_id": "ios_provisioning_profile_expiring",
+                                "rule_id": "ios_provisioning_profile_expiring",
                                 "title":   f"Provisioning Profile Expires in {days} days",
                                 "severity": "low",
                                 "category": "Code Signing",
@@ -1138,6 +1174,7 @@ def _analyze_entitlements(app_bundle: str, results: dict):
                     if not prov_plist.get("ProvisionedDevices"):
                         # distribution-tagged but dev cert — mismatch
                         results["findings"].append({
+                            "rule_id": "ios_dev_cert_on_distribution",
                             "title":   "Development Certificate on Distribution Profile",
                             "severity": "medium",
                             "category": "Code Signing",
@@ -1224,6 +1261,7 @@ def _analyze_entitlements(app_bundle: str, results: dict):
         if sev is None:
             continue  # positive entitlement — skip
         results["findings"].append({
+            "rule_id":        rule_slug("ios_entitlement", key),
             "title":          f"Dangerous Entitlement: {title}",
             "severity":       sev,
             "category":       "Entitlements",
@@ -1290,6 +1328,7 @@ def _analyze_embedded_frameworks(app_bundle: str, results: dict):
                 # Flag high-severity known frameworks as findings
                 if info and info[1] in ("high", "medium"):
                     results["findings"].append({
+                        "rule_id":        "ios_third_party_framework",
                         "title":          f"Third-Party Framework: {name}",
                         "severity":       info[1],
                         "category":       "Third-Party SDKs",
@@ -1676,6 +1715,9 @@ def _analyze_swift_objc_sources(tmpdir: str, results: dict):
                 snippet = content[max(0, m.start()-40):m.end()+80].strip()
 
                 results["findings"].append({
+                    # Stable per-RULE id from the SAST rule's static title.
+                    "rule_id":        rule_slug("ios_sast", title),
+                    "evidence_type":  "regex_match",
                     "title":          title,
                     "severity":       sev,
                     "category":       "iOS Source Analysis",
@@ -1739,6 +1781,7 @@ def _analyze_ios_data_storage(tmpdir: str, results: dict):
     # Warn if using file manager without data protection
     if storage["uses_file_manager"] and not storage["data_protection"]:
         results["findings"].append({
+            "rule_id":        "ios_file_no_data_protection",
             "title":          "File Storage Without Explicit Data Protection",
             "severity":       "medium",
             "category":       "Data Storage",
@@ -1751,6 +1794,7 @@ def _analyze_ios_data_storage(tmpdir: str, results: dict):
 
     if storage["uses_coredata"] and not storage["data_protection"]:
         results["findings"].append({
+            "rule_id":        "ios_coredata_no_protection",
             "title":          "CoreData Store Without File Protection",
             "severity":       "medium",
             "category":       "Data Storage",
@@ -1808,6 +1852,7 @@ def _analyze_ios_crypto(tmpdir: str, results: dict):
 
     if crypto["weak_algorithms"]:
         results["findings"].append({
+            "rule_id":        "ios_weak_crypto_algorithms",
             "title":          f"Weak Cryptographic Algorithms Used: {', '.join(crypto['weak_algorithms'])}",
             "severity":       "high",
             "category":       "Cryptography",
@@ -1820,6 +1865,7 @@ def _analyze_ios_crypto(tmpdir: str, results: dict):
 
     if crypto["uses_openssl"]:
         results["findings"].append({
+            "rule_id":        "ios_openssl_direct_use",
             "title":          "OpenSSL / BoringSSL Used Directly",
             "severity":       "medium",
             "category":       "Cryptography",
@@ -1871,6 +1917,7 @@ def _analyze_ios_webview(tmpdir: str, results: dict):
 
     if webview["uses_uiwebview"]:
         results["findings"].append({
+            "rule_id":        "ios_deprecated_uiwebview",
             "title":          "Deprecated UIWebView Used",
             "severity":       "high",
             "category":       "WebView",
@@ -1883,6 +1930,7 @@ def _analyze_ios_webview(tmpdir: str, results: dict):
 
     if webview["bridge_handlers"]:
         results["findings"].append({
+            "rule_id":        "ios_wkwebview_js_bridge",
             "title":          f"WKWebView JavaScript Bridge ({len(webview['bridge_handlers'])} handler(s))",
             "severity":       "medium",
             "category":       "WebView",
@@ -1971,6 +2019,7 @@ def _analyze_macho_deep(binary_path: str, results: dict):
 
     if not has_pie:
         results["findings"].append({
+            "rule_id":        "ios_macho_pie_missing",
             "title":          "PIE (Position-Independent Executable) Not Enabled",
             "severity":       "medium",
             "category":       "Binary Hardening",
@@ -1983,6 +2032,7 @@ def _analyze_macho_deep(binary_path: str, results: dict):
 
     if not has_stack_canary:
         results["findings"].append({
+            "rule_id":        "ios_macho_stack_canary_missing",
             "title":          "Stack Canary Not Present",
             "severity":       "low",
             "category":       "Binary Hardening",
@@ -1995,6 +2045,7 @@ def _analyze_macho_deep(binary_path: str, results: dict):
 
     if not has_arc:
         results["findings"].append({
+            "rule_id":        "ios_macho_arc_missing",
             "title":          "ARC Not Detected",
             "severity":       "low",
             "category":       "Binary Hardening",
@@ -2007,6 +2058,7 @@ def _analyze_macho_deep(binary_path: str, results: dict):
 
     if not has_encryption:
         results["findings"].append({
+            "rule_id":        "ios_macho_not_encrypted",
             "title":          "Binary Not Encrypted (No FairPlay DRM)",
             "severity":       "info",
             "category":       "Binary Hardening",
@@ -2020,6 +2072,7 @@ def _analyze_macho_deep(binary_path: str, results: dict):
 
     if not symbol_stripped:
         results["findings"].append({
+            "rule_id":        "ios_macho_symbols_not_stripped",
             "title":          "Debug Symbols Not Stripped",
             "severity":       "low",
             "category":       "Binary Hardening",
@@ -2054,6 +2107,7 @@ def _build_ios_file_inventory(tmpdir: str, results: dict):
     for s in suspicious[:10]:
         if any(s["path"].endswith(e) for e in (".key", ".p12", ".pem", ".p8")):
             results["findings"].append({
+                "rule_id":        "ios_embedded_key_file",
                 "title":          f"Certificate/Key File Embedded: {Path(s['path']).name}",
                 "severity":       "high",
                 "category":       "Embedded Secrets",

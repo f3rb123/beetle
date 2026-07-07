@@ -21,6 +21,8 @@ import logging
 import os
 import re
 
+from .finding_model import evidence_dict
+
 log = logging.getLogger("cortex.workspaces")
 
 _WS = re.compile(r"^wss?://", re.I)
@@ -87,10 +89,14 @@ def _member_evidence(full: dict, member: dict):
                 return file, line, view
         except Exception:  # noqa: BLE001 — never let chain enrichment fail a scan
             view = None
+    # `evidence` is polymorphic (see finding_model.evidence_dict): certificate
+    # and chain findings carry proof TEXT here, not a location dict. Those
+    # findings legitimately have no file/line — the text stays on the finding.
+    ev = evidence_dict(full) if full else {}
     file = (member.get("file_path") or member.get("file")
             or (full.get("file_path") if full else "")
-            or ((full.get("evidence") or {}).get("file_path") if full else "") or "")
-    line = (full.get("line") if full else 0) or 0
+            or ev.get("file_path") or "")
+    line = (full.get("line") if full else 0) or ev.get("line") or 0
     return file, line, view
 
 

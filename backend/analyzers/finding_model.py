@@ -241,7 +241,11 @@ def _evidence_type(finding: dict, path: str) -> str:
         return "semgrep"
     if "androidmanifest.xml" in path.lower() or "info.plist" in path.lower():
         return "manifest"
-    if finding.get("rule_id") or src in ("sast", "custom_rule"):
+    # NOTE: rule_id presence is deliberately NOT a signal here. Historically only
+    # regex detectors carried rule ids, so it doubled as a discovery-method hint;
+    # since v1.3 every detector has a stable rule_id, and the regex producers
+    # (SAST/custom/js_bundle/elf/lief) declare evidence_type explicitly instead.
+    if src in ("sast", "custom_rule"):
         return "regex_match"
     return ""
 
@@ -619,6 +623,24 @@ def is_application_code(finding) -> bool:
     if not label:
         return finding.get("ownership") == APP
     return label == APPLICATION
+
+
+# ── Evidence field contract ──────────────────────────────────────────────────
+# `finding["evidence"]` is polymorphic BY DESIGN:
+#   * dict — structured evidence (file_path / line / snippet / provider
+#     metadata) produced by the secret and cloud pipelines.
+#   * str  — human-readable proof text with no source location (certificate
+#     metadata blocks from cert_analyzer, synthesized chain narratives from
+#     chain_analyzer). For these findings the text IS the evidence.
+# Consumers must never assume a shape. Use evidence_dict() when you need
+# structured location fields; a plain-string evidence simply has none.
+
+
+def evidence_dict(finding: dict) -> dict:
+    """Structured evidence for a finding, or {} when the finding carries
+    proof text (str) or no evidence at all. Never raises on either shape."""
+    ev = finding.get("evidence")
+    return ev if isinstance(ev, dict) else {}
 
 
 # ── Evidence text extraction ─────────────────────────────────────────────────

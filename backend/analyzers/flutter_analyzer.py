@@ -34,7 +34,7 @@ import logging
 import os
 import re
 
-from .common import extract_urls, scan_text_for_secrets
+from .common import extract_urls, rule_slug, scan_text_for_secrets
 from .path_utils import make_file_evidence, relativize_path
 
 log = logging.getLogger("cortex.flutter")
@@ -197,6 +197,9 @@ _KNOWN_DEPS = {
 def _finding(title, severity, category, desc, *, file_path="", line=0, snippet="",
              rec="", cwe="", masvs="", owasp="M1") -> dict:
     return {
+        # Stable per-RULE id derived from the rule's static title.
+        "rule_id": rule_slug("flutter", title),
+        "evidence_type": "regex_match",
         "title": title, "severity": severity, "category": category,
         "description": desc, "recommendation": rec,
         "file_path": file_path, "line": line, "line_number": line,

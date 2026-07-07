@@ -181,6 +181,7 @@ def analyze_js_bundles(root: str, max_file_bytes: int = 15_000_000) -> dict:
                 line_no = content.count("\n", 0, m.start()) + 1
                 findings.append({
                     "rule_id":        f"js_{title.lower().replace(' ', '_')[:40]}",
+                    "evidence_type":  "regex_match",
                     "title":          title,
                     "severity":       normalize_severity(sev),
                     "source":         "js_bundle",

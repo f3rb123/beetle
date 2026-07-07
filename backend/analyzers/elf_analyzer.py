@@ -56,6 +56,7 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
     if no_nx:
         names = ", ".join(Path(b["path"]).name for b in no_nx[:5])
         results["findings"].append({
+            "rule_id":        "elf_nx_missing",
             "title":          f"NX Bit Not Set in Native Libraries ({len(no_nx)} found)",
             "severity":       "high",
             "category":       "Binary Hardening",
@@ -70,6 +71,7 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
     if no_canary:
         names = ", ".join(Path(b["path"]).name for b in no_canary[:5])
         results["findings"].append({
+            "rule_id":        "elf_stack_canary_missing",
             "title":          f"Stack Canary Missing in Native Libraries ({len(no_canary)} found)",
             "severity":       "medium",
             "category":       "Binary Hardening",
@@ -83,6 +85,7 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
     if no_pie:
         names = ", ".join(Path(b["path"]).name for b in no_pie[:5])
         results["findings"].append({
+            "rule_id":        "elf_pie_missing",
             "title":          f"PIE Not Enabled in Native Libraries ({len(no_pie)} found)",
             "severity":       "medium",
             "category":       "Binary Hardening",
@@ -96,6 +99,7 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
     if no_relro:
         names = ", ".join(Path(b["path"]).name for b in no_relro[:5])
         results["findings"].append({
+            "rule_id":        "elf_relro_missing",
             "title":          f"RELRO Not Configured ({len(no_relro)} libraries)",
             "severity":       "medium",
             "category":       "Binary Hardening",
@@ -107,6 +111,7 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
         })
     elif partial_relro:
         results["findings"].append({
+            "rule_id":        "elf_partial_relro",
             "title":          f"Partial RELRO in {len(partial_relro)} Libraries (Full RELRO Preferred)",
             "severity":       "low",
             "category":       "Binary Hardening",
@@ -119,6 +124,7 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
     if not_stripped:
         names = ", ".join(Path(b["path"]).name for b in not_stripped[:5])
         results["findings"].append({
+            "rule_id":        "elf_symbols_not_stripped",
             "title":          f"Debug Symbols Not Stripped ({len(not_stripped)} libraries)",
             "severity":       "low",
             "category":       "Binary Hardening",
@@ -131,6 +137,7 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
 
     if rpath_bins:
         results["findings"].append({
+            "rule_id":        "elf_rpath_set",
             "title":          f"RPATH/RUNPATH Set — Dylib Hijacking Surface",
             "severity":       "medium",
             "category":       "Binary Hardening",
@@ -149,6 +156,7 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
             "severity":       "medium",
             "category":       "Binary Hardening",
             "rule_id":        "elf_unsafe_libc_imports",
+            "evidence_type":  "regex_match",
             "description":    f"{len(risky)} libraries reference memory-unsafe functions (e.g. {func_list}). "
                               "These are classic buffer-overflow sinks.",
             "recommendation": "Replace strcpy/strcat/sprintf with bounded equivalents (strlcpy, snprintf). "
@@ -164,6 +172,7 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
         protected = sum(1 for b in binary_results
                        if b.get("nx") and b.get("stack_canary") and b.get("pie") and b.get("relro") != "none")
         results["findings"].append({
+            "rule_id":     "elf_hardening_summary",
             "title":       f"Native Binary Analysis — {protected}/{total} Fully Hardened",
             "severity":    "info",
             "category":    "Binary Hardening",

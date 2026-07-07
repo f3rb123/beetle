@@ -942,6 +942,9 @@ def build_attack_chain_findings(findings: list, chains: list) -> list:
         chain["chain_confidence"] = chain_confidence
 
         cf = {
+            # cid is the chain detector's stable slug (chain.get("id")), so the
+            # rule identity survives chain-title copy edits.
+            "rule_id": f"chain_{cid}",
             "title": f"Attack Chain: {chain.get('title', 'Correlated Exploit Chain')}",
             "severity": chain.get("severity", "high"),
             "category": "Attack Chain",

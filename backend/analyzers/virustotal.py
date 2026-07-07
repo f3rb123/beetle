@@ -219,6 +219,7 @@ def run_virustotal(file_path: str, results: dict) -> dict:
         # Inject a finding if main file is flagged
         if main_report and main_report.get("malicious", 0) > 0:
             results.setdefault("findings", []).append({
+                "rule_id":        "virustotal_flagged_malicious",
                 "title":          f"VirusTotal: {main_report['malicious']} engines flagged this file as malicious",
                 "severity":       "critical",
                 "category":       "Malware",
