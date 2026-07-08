@@ -345,6 +345,20 @@ async def login(request: Request):
     return {"access_token": token, "token_type": "bearer", "role": user["role"], "username": user["username"]}
 
 
+@app.get("/api/auth/bootstrap-status")
+async def api_bootstrap_status():
+    """Public (pre-login): whether the instance still uses the insecure default
+    admin credentials, so the login page can display them for a fresh install and
+    hide them once the password is changed. Never returns a non-default password."""
+    if not AUTH_AVAILABLE:
+        return {"active": False, "username": ""}
+    try:
+        from auth import default_admin_active
+        return default_admin_active()
+    except Exception:
+        return {"active": False, "username": ""}
+
+
 @app.get("/api/auth/me")
 async def get_me(user: dict = Depends(_require_auth)):
     return user

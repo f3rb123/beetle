@@ -14,6 +14,19 @@ services:
       - JADX_PATH=/opt/jadx/bin/jadx
       - APKTOOL_PATH=/usr/local/bin/apktool
 
+      # -------------------------------------------------------
+      # Initial Administrator Bootstrap (FIRST RUN ONLY)
+      #
+      # Default development credentials. Used only when no admin
+      # account exists yet; existing accounts are NEVER overwritten.
+      #
+      # Production: override these with strong credentials. The
+      # login page's "default credentials" notice automatically
+      # disappears once the password is changed from 'beetle'.
+      # -------------------------------------------------------
+      - CORTEX_ADMIN_USERNAME=beetle
+      - CORTEX_ADMIN_PASSWORD=beetle
+
       # JADX
       - CORTEX_JADX_HEAP=4g
       - CORTEX_JADX_STATE_DIR=/tmp/jadx

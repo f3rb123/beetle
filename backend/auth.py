@@ -134,30 +134,69 @@ def init_auth_db():
     _ensure_admin()
 
 
+# Initial-admin bootstrap credentials. Configurable via environment (set in
+# docker-compose.yml); default to the documented development credentials so a
+# fresh install has known, ready-to-use access without reading the server logs.
+ADMIN_BOOTSTRAP_USERNAME = os.environ.get("CORTEX_ADMIN_USERNAME", "beetle").strip() or "beetle"
+ADMIN_BOOTSTRAP_PASSWORD = os.environ.get("CORTEX_ADMIN_PASSWORD", "beetle") or "beetle"
+# The shipped insecure development default. Used only to decide whether the login
+# page should surface the "default credentials" notice (shown while the instance
+# still uses beetle/beetle, hidden once the password is changed or overridden).
+_DEV_DEFAULT_PASSWORD = "beetle"
+
+
 def _ensure_admin():
-    """Create the admin user on first run, printing credentials to stdout."""
+    """Create the initial admin user on first run from the configured bootstrap
+    credentials (``CORTEX_ADMIN_USERNAME`` / ``CORTEX_ADMIN_PASSWORD``, defaulting
+    to ``beetle`` / ``beetle``), hashed with the normal bcrypt path.
+
+    First-run only: if ANY admin already exists this is a no-op — existing
+    credentials are never overwritten and no password is ever reset. No random
+    password is generated and none is printed, so operators never need to read the
+    server logs to obtain the initial credentials.
+    """
     try:
         with _conn() as conn:
             row = conn.execute("SELECT id FROM users WHERE role = 'admin' LIMIT 1").fetchone()
             if row:
                 return
-            # First run — generate random password
-            password = secrets.token_urlsafe(16)
-            hashed   = hash_password(password)
+            hashed = hash_password(ADMIN_BOOTSTRAP_PASSWORD)
             conn.execute(
                 "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-                ("admin", hashed, "admin"),
+                (ADMIN_BOOTSTRAP_USERNAME, hashed, "admin"),
             )
-        # Print credentials to stdout (visible in Docker logs)
         sep = "=" * 60
         print(f"\n{sep}")
-        print("  Cortex — Admin account created (first run)")
-        print(f"  Username : admin")
-        print(f"  Password : {password}")
-        print(f"  Change with: POST /api/auth/change-password")
+        print("  Beetle — initial admin account created (first run)")
+        print(f"  Username : {ADMIN_BOOTSTRAP_USERNAME}")
+        print("  Password : configured via CORTEX_ADMIN_PASSWORD (default 'beetle')")
+        print("  Change it after first login: POST /api/auth/change-password")
         print(f"{sep}\n")
     except Exception as e:
         print(f"[auth] _ensure_admin error: {e}")
+
+
+def default_admin_active() -> dict:
+    """Whether the instance still uses the shipped insecure default admin password.
+
+    Returns ``{"active": bool, "username": str}``. ``active`` is True only when the
+    configured admin user exists AND still authenticates with the insecure default
+    password (``beetle``). It becomes False as soon as the password is changed or a
+    strong password was configured via ``CORTEX_ADMIN_PASSWORD`` — so the login page
+    can show the default credentials on a fresh install and hide them afterwards,
+    and never reveals a non-default (production) password.
+    """
+    try:
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT password_hash FROM users WHERE username = ? AND role = 'admin'",
+                (ADMIN_BOOTSTRAP_USERNAME,),
+            ).fetchone()
+        if row and verify_password(_DEV_DEFAULT_PASSWORD, row["password_hash"]):
+            return {"active": True, "username": ADMIN_BOOTSTRAP_USERNAME}
+    except Exception:
+        pass
+    return {"active": False, "username": ""}
 
 
 # ── Password helpers ──────────────────────────────────────────────────────────

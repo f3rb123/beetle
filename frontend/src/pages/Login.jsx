@@ -13,12 +13,22 @@ export default function Login() {
   const [password, setPassword] = useState('')
   const [error,    setError]    = useState('')
   const [loading,  setLoading]  = useState(false)
+  const [bootstrap, setBootstrap] = useState(null)
 
   // Already authenticated — skip login
   useEffect(() => {
     if (getToken()) navigate(from, { replace: true })
     else userRef.current?.focus()
   }, []) // eslint-disable-line
+
+  // Fresh-install hint: show the default credentials only while the instance
+  // still uses them (the backend reports active=false once the password changes).
+  useEffect(() => {
+    fetch('/api/auth/bootstrap-status')
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => setBootstrap(d))
+      .catch(() => {})
+  }, [])
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -59,7 +69,7 @@ export default function Login() {
               className="login-form__input"
               autoComplete="username"
               spellCheck={false}
-              placeholder="admin"
+              placeholder="beetle"
               value={username}
               onChange={e => setUsername(e.target.value)}
               disabled={loading}
@@ -97,9 +107,31 @@ export default function Login() {
         </form>
 
         <hr className="login-card__divider" />
-        <p className="login-card__hint">
-          Default credentials are printed in the server logs on first run.
-        </p>
+        {bootstrap?.active ? (
+          <div
+            className="login-card__hint"
+            style={{
+              textAlign: 'left',
+              padding: '10px 12px',
+              border: '1px solid rgba(255,255,255,0.14)',
+              borderRadius: 8,
+              lineHeight: 1.5,
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>
+              Default credentials (first installation only)
+            </div>
+            <div>Username: <code>{bootstrap.username || 'beetle'}</code></div>
+            <div>Password: <code>beetle</code></div>
+            <div style={{ marginTop: 6, opacity: 0.7 }}>
+              Change the password after signing in — this notice disappears once you do.
+            </div>
+          </div>
+        ) : (
+          <p className="login-card__hint">
+            Enter your administrator credentials to continue.
+          </p>
+        )}
       </div>
     </div>
   )
