@@ -22,6 +22,74 @@ SHT_DYNSYM          = 11
 SHT_STRTAB          = 3
 
 
+# Known Android ABI directory names, used to group a library's per-ABI copies.
+_ABI_DIRS = ("armeabi-v7a", "arm64-v8a", "armeabi", "x86_64", "x86",
+             "mips64", "mips", "riscv64")
+_RELRO_RANK = {"none": 0, "partial": 1, "full": 2}
+
+
+def _abi_from_path(path: str) -> str:
+    """Extract the ABI directory (e.g. ``arm64-v8a``) from a library path."""
+    for part in re.split(r"[\\/]+", path or ""):
+        if part in _ABI_DIRS:
+            return part
+    return ""
+
+
+def _collapse_by_library(binary_results: list) -> list:
+    """Collapse per-ABI copies of the same ``.so`` into one entry.
+
+    An app ships ``libfoo.so`` once per ABI (armeabi-v7a / arm64-v8a / x86); listing
+    each copy separately triples the report for no analytic gain. This groups by
+    library name, records the ``architectures`` it was built for, and merges the
+    hardening flags WEAKEST-WINS — a protection is reported present only if present
+    in EVERY ABI, so a weakness in any single architecture is never hidden."""
+    groups: dict = {}
+    order: list = []
+    for b in binary_results:
+        name = b.get("name") or Path(b.get("path", "")).name
+        abi = _abi_from_path(b.get("path", ""))
+        if name not in groups:
+            g = dict(b)
+            g["name"] = name
+            g["architectures"] = []
+            g["abi_paths"] = []
+            groups[name] = g
+            order.append(name)
+        g = groups[name]
+        if abi and abi not in g["architectures"]:
+            g["architectures"].append(abi)
+        if b.get("path"):
+            g["abi_paths"].append(b["path"])
+        # Weakest-wins: a protection counts only if present in every ABI copy.
+        for flag in ("nx", "stack_canary", "pie", "fortify", "stripped"):
+            g[flag] = bool(g.get(flag)) and bool(b.get(flag))
+        if _RELRO_RANK.get(b.get("relro"), 0) < _RELRO_RANK.get(g.get("relro"), 0):
+            g["relro"] = b.get("relro")
+        # Liabilities: present if present in ANY ABI copy.
+        if b.get("rpath"):
+            g["rpath"] = True
+        if b.get("dangerous_imports"):
+            g["dangerous_imports"] = sorted(
+                set(g.get("dangerous_imports") or []) | set(b["dangerous_imports"]))
+    out = []
+    for n in order:
+        g = groups[n]
+        g["architectures"] = sorted(g["architectures"])
+        out.append(g)
+    return out
+
+
+def _lib_names(bins: list, limit: int = 5) -> str:
+    """Human-readable library list for finding text: ``libfoo.so (arm64-v8a, x86)``."""
+    parts = []
+    for b in bins[:limit]:
+        archs = b.get("architectures") or []
+        name = b.get("name") or Path(b.get("path", "")).name
+        parts.append(f"{name} ({', '.join(archs)})" if archs else name)
+    return ", ".join(parts)
+
+
 def analyze_elf_binaries(tmpdir: str, results: dict):
     """Find and analyze all .so ELF binaries in the app."""
     so_files = []
@@ -42,6 +110,8 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
         if analysis:
             binary_results.append(analysis)
 
+    # Collapse per-ABI duplicates (libfoo.so × 3 ABIs → one entry + architectures).
+    binary_results = _collapse_by_library(binary_results)
     results["binaries"] = binary_results
 
     # ── Generate aggregate findings ───────────────────────────────────────────
@@ -54,7 +124,7 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
     rpath_bins    = [b for b in binary_results if b.get("rpath")]
 
     if no_nx:
-        names = ", ".join(Path(b["path"]).name for b in no_nx[:5])
+        names = _lib_names(no_nx)
         results["findings"].append({
             "rule_id":        "elf_nx_missing",
             "title":          f"NX Bit Not Set in Native Libraries ({len(no_nx)} found)",
@@ -69,7 +139,7 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
         })
 
     if no_canary:
-        names = ", ".join(Path(b["path"]).name for b in no_canary[:5])
+        names = _lib_names(no_canary)
         results["findings"].append({
             "rule_id":        "elf_stack_canary_missing",
             "title":          f"Stack Canary Missing in Native Libraries ({len(no_canary)} found)",
@@ -83,7 +153,7 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
         })
 
     if no_pie:
-        names = ", ".join(Path(b["path"]).name for b in no_pie[:5])
+        names = _lib_names(no_pie)
         results["findings"].append({
             "rule_id":        "elf_pie_missing",
             "title":          f"PIE Not Enabled in Native Libraries ({len(no_pie)} found)",
@@ -97,7 +167,7 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
         })
 
     if no_relro:
-        names = ", ".join(Path(b["path"]).name for b in no_relro[:5])
+        names = _lib_names(no_relro)
         results["findings"].append({
             "rule_id":        "elf_relro_missing",
             "title":          f"RELRO Not Configured ({len(no_relro)} libraries)",
@@ -122,7 +192,7 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
         })
 
     if not_stripped:
-        names = ", ".join(Path(b["path"]).name for b in not_stripped[:5])
+        names = _lib_names(not_stripped)
         results["findings"].append({
             "rule_id":        "elf_symbols_not_stripped",
             "title":          f"Debug Symbols Not Stripped ({len(not_stripped)} libraries)",

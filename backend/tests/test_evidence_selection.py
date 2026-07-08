@@ -278,6 +278,28 @@ def test_primary_snippet_refined_from_code_context():
            f"primary snippet should be refined to the real line, got: {snip_text!r}")
 
 
+def test_accurate_snippet_not_swapped_for_unrelated_neighbour():
+    """Regression: when a finding already has an accurate single-line snippet and its
+    code_context window contains several equally-plain neighbour lines (e.g. adjacent
+    <string> resource entries), refinement must NOT swap the correct matched line for
+    an earlier unrelated neighbour. This is the 'Firebase URL evidence points at an
+    unrelated strings.xml entry' bug: the matched line ties with its neighbours at the
+    same quality and the FIRST neighbour would otherwise win."""
+    f = _f(title="Firebase Realtime Database — Unauthenticated Access Risk",
+           category="Cloud Configuration",
+           file_path="resources/res/values/strings.xml", line=71,
+           snippet='<string name="firebase_database_url">https://x.firebaseio.com</string>',
+           code_context=(
+               '<string name="fingerprint_error_user_canceled">Canceled by user.</string>\n'
+               '<string name="fingerprint_not_recognized">Not recognized</string>\n'
+               '<string name="firebase_database_url">https://x.firebaseio.com</string>\n'
+               '<string name="gcm_defaultSenderId">1234567890</string>'))
+    sel = es.select(f, _ctx())
+    snip_text = sel["primary"]["snippet"]
+    _check("firebase" in snip_text.lower() and "fingerprint" not in snip_text.lower(),
+           f"primary snippet must stay on the matched firebase line, got: {snip_text!r}")
+
+
 def test_relevant_token_bonus_picks_usage_site():
     """The candidate whose snippet contains the flagged value/API outscores a same-
     file candidate that does not."""

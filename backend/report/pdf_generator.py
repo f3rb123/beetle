@@ -1469,9 +1469,10 @@ def _binary_section(story, results, T, styles):
             label = str(val) if isinstance(val, str) else ("✓" if val else "✗")
             return Paragraph(f'<font color="{color.hexval()}">{label}</font>', styles["table_cell"])
 
+        arch_label = ", ".join(b.get("architectures") or []) or b.get("arch", "")
         rows.append([
             Paragraph(b.get("name",""), styles["table_cell_mono"]),
-            Paragraph(b.get("arch",""), styles["table_cell"]),
+            Paragraph(arch_label, styles["table_cell"]),
             cell(b.get("pie",   False)),
             cell(b.get("nx",    False)),
             cell(b.get("stack_canary", False)),
