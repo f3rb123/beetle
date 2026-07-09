@@ -1,6 +1,8 @@
 # Cortex Security Scoring Engine
 # Weighted score 0-100 with letter grade
 
+from .security_controls import is_present
+
 SEVERITY_WEIGHTS = {
     "critical": 15,
     "high":      8,
@@ -8,6 +10,18 @@ SEVERITY_WEIGHTS = {
     "low":       1,
     "info":      0,
 }
+
+# Good-practice bonuses, awarded strictly from the resolved security-control states.
+# Order is fixed so `bonuses` renders identically across runs.
+CONTROL_BONUSES = (
+    ("frida_detection",          "Frida detection implemented",   2),
+    ("root_detection",           "Root detection implemented",    3),
+    ("flag_secure",              "Screenshot prevention enabled", 2),
+    ("safetynet_play_integrity", "SafetyNet/Play Integrity used", 3),
+    ("sqlcipher",                "SQLCipher encryption used",     3),
+    ("cert_pinning",             "Certificate pinning detected",  5),
+    ("obfuscation",              "Code obfuscation enabled",      3),
+)
 
 GRADE_THRESHOLDS = [
     (90, "A", "Excellent",  "Very few issues detected. App demonstrates strong security practices."),
@@ -61,27 +75,17 @@ def calculate_score(results: dict) -> dict:
     factors, chain_penalty = _security_factors(results, findings, secrets)
     total_deducted += chain_penalty
 
-    # Bonus points for good practices
+    # Bonus points for good practices. Presence is decided once, by
+    # security_controls.resolve(), from positive evidence only — a finding that says
+    # a control is MISSING can no longer pay that control's bonus. `is_present`
+    # excludes `partial`, so pinning that debug-overrides can switch off earns nothing.
     bonuses = []
     platform = results.get("platform", "android")
 
     if platform == "android":
-        finding_titles = [f.get("title", "").lower() for f in findings]
-        all_text = " ".join(finding_titles + [f.get("description", "").lower() for f in findings])
-
-        if "frida detection" in all_text:           bonuses.append(("Frida detection implemented", 2))
-        if "root detection" in all_text:            bonuses.append(("Root detection implemented", 3))
-        if "flag_secure" in all_text:               bonuses.append(("Screenshot prevention enabled", 2))
-        if "safetynet" in all_text or "play integrity" in all_text:
-            bonuses.append(("SafetyNet/Play Integrity used", 3))
-        if "sqlcipher" in all_text:                 bonuses.append(("SQLCipher encryption used", 3))
-        if "certificate pinning" in all_text:       bonuses.append(("Certificate pinning detected", 5))
-
-        # Only give obfuscation bonus if "not detected" finding is NOT present
-        obf_not_detected = any("obfuscation not detected" in t for t in finding_titles)
-        obf_detected = any("obfuscation detected" in t and "not" not in t for t in finding_titles)
-        if obf_detected and not obf_not_detected:
-            bonuses.append(("Code obfuscation enabled", 3))
+        for control, label, points in CONTROL_BONUSES:
+            if is_present(results, control):
+                bonuses.append((label, points))
 
     total_bonus = sum(b[1] for b in bonuses)
 

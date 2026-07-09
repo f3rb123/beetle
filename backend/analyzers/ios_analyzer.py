@@ -555,6 +555,15 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         evidence_selection.annotate(results, platform="ios")
     except Exception:
         log.exception("[evidence_selection] failed; findings left without proof selection")
+    # ── Security Control Resolution — decide ONCE, from positive evidence, whether
+    # each defensive control (pinning, cleartext/ATS, jailbreak detection, …) is
+    # present, so attack chains, MASVS coverage and the score cannot disagree.
+    # Runs after all findings exist and before the first consumer. Additive. ──
+    try:
+        from . import security_controls
+        results["security_controls"] = security_controls.resolve(results)
+    except Exception:
+        log.exception("[security_controls] failed; consumers will resolve on demand")
     # ── Phase 1.7: Attack Chain Engine v2 — build realistic, evidence-backed,
     # explainable attacker journeys from the triaged findings + attack surface
     # (SAFE CHAINING: framework noise / suppressed / FP secrets / generated code

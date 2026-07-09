@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import logging
 
+from .. import security_controls
 from . import config as C
 from . import templates as T
 from .model import (
@@ -218,18 +219,29 @@ class ChainContext:
         return out
 
 
+# Chain blocker key -> the security control that implements it.
+_MITIGATION_CONTROLS = (
+    ("cert_pinning", "cert_pinning"),
+    ("root_detection", "root_detection"),
+    ("attestation", "safetynet_play_integrity"),
+)
+
+
 def _detect_mitigations(results: dict) -> set:
-    m: set = set()
-    blob = " ".join(str((f or {}).get("title", "")) for f in (results.get("findings") or [])).lower()
-    bonuses = " ".join(str(b) for b in ((results.get("score") or {}).get("bonuses") or [])).lower()
-    text = blob + " " + bonuses
-    if "certificate pinning" in text or "pinning detected" in text:
-        m.add("cert_pinning")
-    if "root detection" in text:
-        m.add("root_detection")
-    if "play integrity" in text or "safetynet" in text:
-        m.add("attestation")
-    return m
+    """Which chain blockers the app actually implements.
+
+    Read from the resolved security controls rather than re-derived. The old
+    substring scan blocked a MitM chain whenever any finding title contained
+    "certificate pinning" — including *"No Certificate Pinning Configured"*, which
+    is the reason to run the chain, not to suppress it. It also mixed in
+    `results["score"]["bonuses"]`, which is always empty here because chains are
+    built before scoring.
+
+    A `partial` control does not block: pinning that `debug-overrides` can switch
+    off, or that covers one domain out of five, is not a barrier an attacker meets.
+    """
+    return {blocker for blocker, control in _MITIGATION_CONTROLS
+            if security_controls.is_present(results, control)}
 
 
 # ── small accessors ──────────────────────────────────────────────────────────

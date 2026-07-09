@@ -1030,6 +1030,17 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         evidence_selection.annotate(results, platform="android")
     except Exception:
         log.exception("[evidence_selection] failed; findings left without proof selection")
+    # ── Security Control Resolution — decide ONCE, from positive evidence, whether
+    # each defensive control (pinning, cleartext, root/frida/attestation detection,
+    # obfuscation, FLAG_SECURE) is present. Attack chains, MASVS coverage and the
+    # security score all read this instead of substring-matching finding text, so a
+    # "No Certificate Pinning" finding can never mark pinning present. Runs after all
+    # findings exist and before the first consumer. Additive: results['security_controls'].
+    try:
+        from . import security_controls
+        results["security_controls"] = security_controls.resolve(results)
+    except Exception:
+        log.exception("[security_controls] failed; consumers will resolve on demand")
     # ── Phase 1.7: Attack Chain Engine v2 — build realistic, evidence-backed,
     # explainable attacker journeys from the triaged findings + attack surface
     # (SAFE CHAINING: framework noise / suppressed / FP secrets / generated code

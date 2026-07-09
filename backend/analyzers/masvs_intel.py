@@ -16,8 +16,9 @@ Emits:
 """
 from __future__ import annotations
 
-import json
 import logging
+
+from .security_controls import corpus_asserts, positive_corpus, state_of
 
 log = logging.getLogger("cortex.masvs_intel")
 
@@ -40,16 +41,28 @@ _EXPECTED_CONTROLS = {
     "MASVS-PRIVACY":    ["Minimal Permissions", "Data Minimization"],
 }
 
-# ─── Positive control signals (Task 3) — name, category, detection patterns ──
-# Detected over a POSITIVE corpus (manifest/config/behavior/INFO-control findings)
-# so a weakness finding that merely *names* a control does not count as present.
+# ─── Controls owned by the security_controls authority (Task 3) ──────────────
+# These four are resolved once, for the whole scan, by `security_controls.resolve()`
+# and merely read here. MASVS must not re-derive them: a report where the MASVS
+# radar marks "Certificate Pinning" present while the findings list says "No
+# Certificate Pinning Configured" is the exact contradiction that module exists to
+# prevent. `state_of` returns the shared decision.
+#
+#   masvs control name -> (category, control key, states that count as implemented)
+_RESOLVED_CONTROLS = [
+    ("Certificate Pinning", "MASVS-NETWORK", "cert_pinning", ("present", "partial")),
+    ("No Cleartext Traffic", "MASVS-NETWORK", "cleartext", ("blocked",)),
+    ("Root/Tamper Detection", "MASVS-RESILIENCE", "root_detection", ("present", "partial")),
+    ("Integrity / Attestation", "MASVS-RESILIENCE", "safetynet_play_integrity", ("present", "partial")),
+]
+
+# ─── MASVS-local positive control signals ────────────────────────────────────
+# Controls with no cross-subsystem consumer, so MASVS remains their only reader.
+# Matched over the shared POSITIVE corpus with the shared negation guard, so a
+# weakness finding that merely *names* a control does not count as present.
 _SIGNALS = [
     ("Network Security Config", "MASVS-NETWORK",
      ("networksecurityconfig", "network_security_config", "android:networksecurityconfig")),
-    ("Certificate Pinning", "MASVS-NETWORK",
-     ("certificatepinner", "certificate pinning", "pin-set", "pinset", "public-key-pins", "trustkit")),
-    ("No Cleartext Traffic", "MASVS-NETWORK",
-     ("cleartexttrafficpermitted=\"false\"", "usescleartexttraffic=\"false\"", "cleartext disabled")),
     ("Biometric Authentication", "MASVS-AUTH",
      ("biometricprompt", "biometricmanager", "fingerprintmanager", "use_biometric",
       "use_fingerprint", "localauthentication", "lacontext", "setuserauthenticationrequired")),
@@ -58,16 +71,9 @@ _SIGNALS = [
       "kSecAttrAccessible".lower())),
     ("Keystore/Keychain-backed Keys", "MASVS-CRYPTO",
      ("androidkeystore", "android keystore", "keychain", "seckey", "keygenparameterspec")),
-    ("Root/Tamper Detection", "MASVS-RESILIENCE",
-     ("root detection", "rootbeer", "tamper", "jailbreak detection")),
-    ("Integrity / Attestation", "MASVS-RESILIENCE",
-     ("playintegrity", "play integrity", "safetynet", "attestation", "dcdevice")),
     ("Strong App Signing", "MASVS-RESILIENCE",
      ("signature scheme v2", "signature scheme v3", "apk signature scheme v2", "v2/v3 signed")),
 ]
-
-_NEGATION = ("no ", "not ", "without", "missing", "disabled", "absent", "lack",
-             "insecure", "weak", "vulnerab")
 
 # Severity → weakness penalty weight.
 _SEV_PEN = {"critical": 22, "high": 14, "medium": 7, "low": 3, "info": 0}
@@ -108,46 +114,26 @@ def _finding_category(finding: dict) -> str:
     return fallback or "MASVS-CODE"
 
 
-def _positive_corpus(results: dict) -> str:
-    """Build a lowercase corpus biased toward POSITIVE controls so weakness
-    findings that merely name a control do not count as 'present'."""
-    parts: list[str] = []
-    mx = results.get("manifest_xml")
-    if isinstance(mx, str):
-        parts.append(mx)
-    nc = results.get("network_config")
-    if nc:
-        parts.append(json.dumps(nc, default=str))
-    for b in results.get("behavior_analysis") or []:
-        if isinstance(b, dict):
-            parts.append(str(b.get("title", "")) + " " + str(b.get("description", "")))
-    for p in results.get("manifest_permissions") or results.get("permissions") or []:
-        parts.append(str(p if isinstance(p, str) else (p.get("name", "") if isinstance(p, dict) else "")))
-    # INFO / security-control findings indicate a control is PRESENT.
-    for f in results.get("findings") or []:
-        if not isinstance(f, dict):
-            continue
-        if f.get("security_control") or str(f.get("severity")) == "info":
-            parts.append(" ".join(str(f.get(k, "")) for k in ("title", "description", "snippet", "code_context")))
-    return " ".join(parts).lower()
-
-
 def _detect_controls(results: dict) -> dict[str, list[str]]:
-    """Detect present positive controls per category (Task 3)."""
-    corpus = _positive_corpus(results)
+    """Detect present positive controls per category (Task 3).
+
+    Cross-subsystem controls come from the shared `security_controls` decision;
+    MASVS-local ones are matched over the shared positive corpus.
+    """
     present: dict[str, list[str]] = {c: [] for c in CATEGORIES}
+
+    for name, category, control, implemented_states in _RESOLVED_CONTROLS:
+        if state_of(results, control) in implemented_states:
+            present[category].append(name)
+
+    corpus = positive_corpus(results)
     for name, category, patterns in _SIGNALS:
-        for pat in patterns:
-            idx = corpus.find(pat)
-            if idx == -1:
-                continue
-            window = corpus[max(0, idx - 24):idx]
-            if any(neg in window for neg in _NEGATION):
-                continue  # "no certificate pinning" must not count as present
+        if any(corpus_asserts(corpus, pat) for pat in patterns):
             if name not in present[category]:
                 present[category].append(name)
-            break
-    return present
+
+    # Stable order regardless of which source contributed a control.
+    return {cat: sorted(names) for cat, names in present.items()}
 
 
 def _maturity(score: int) -> str:
