@@ -45,6 +45,158 @@ _SAST_MATCH_VALIDATORS = {
     "android_hardcoded_ip":    _validate_ip_match,
 }
 
+
+# ── Raw-SQL severity resolution (android_sqlite_raw_query) ────────────────────
+# rawQuery/execSQL/compileStatement fire on EVERY raw query, including safe
+# parameterized calls like rawQuery("… WHERE id = ?", args). HIGH must require
+# actual string building in the SQL argument (the same signal the codebase already
+# keys off in android_insecure_content_resolver_query, which requires '+'), or a
+# taint flow reaching the sink. Otherwise the query is parameterized → INFO.
+_SQL_SINK_CALL_RE = re.compile(r"(?:rawQuery|execSQL|compileStatement)\s*\(", re.IGNORECASE)
+# '+' concatenation touching a string/identifier, String.format, or Kotlin string
+# interpolation ($var / ${…}) inside a string literal.
+_SQL_CONCAT_RE = re.compile(r'"\s*\+|\+\s*"|\+\s*[A-Za-z_(]|\)\s*\+')
+_SQL_FORMAT_RE = re.compile(r"String\.format\s*\(", re.IGNORECASE)
+_KOTLIN_INTERP_RE = re.compile(r'"[^"]*\$\{?[A-Za-z_]')
+
+
+def _sql_arg_region(text: str) -> str:
+    """Text of the SQL sink argument: from the sink call's '(' forward, capped so
+    the scan can't bleed past the statement into unrelated context lines."""
+    m = _SQL_SINK_CALL_RE.search(text or "")
+    if not m:
+        return ""
+    return text[m.end(): m.end() + 400]
+
+
+def _has_sql_string_building(text: str) -> bool:
+    """True when the SQL argument is built from concatenation / format / Kotlin
+    interpolation — i.e. NOT a pure parameterized ('?' + selectionArgs) query."""
+    region = _sql_arg_region(text)
+    if not region:
+        return False
+    return bool(_SQL_CONCAT_RE.search(region)
+                or _SQL_FORMAT_RE.search(region)
+                or _KOTLIN_INTERP_RE.search(region))
+
+
+def _to_dotted_class(path: str) -> str:
+    """'sources/com/app/Dao.java' → 'sources.com.app.Dao' for suffix comparison
+    against a taint engine dotted class name."""
+    p = re.sub(r"\.(java|kt|smali)$", "", str(path or "").replace("\\", "/"))
+    return p.replace("/", ".")
+
+
+def _same_class(sast_path: str, taint_class: str) -> bool:
+    """Whether a SAST relative path and a taint dotted class name denote the same
+    class. Matched by dotted-suffix so 'sources.com.app.Dao' aligns with
+    'com.app.Dao' without colliding on bare simple names."""
+    tc = str(taint_class or "").split("$", 1)[0].strip()
+    if not tc:
+        return False
+    dotted = _to_dotted_class(sast_path)
+    return dotted.endswith(tc) or tc.endswith(dotted)
+
+
+def _taint_sqlite_classes(results: dict) -> tuple[set, set]:
+    """(classes with a SQLite taint FINDING, classes with a SQLite taint FLOW).
+
+    A finding guarantees the sink is already represented in results['findings'];
+    a flow only confirms reachability. Both are read from the taint engine's own
+    output — never from this rule."""
+    finding_classes: set = set()
+    flow_classes: set = set()
+
+    def _is_sqlite(sink: str) -> bool:
+        return str(sink or "").replace(" ", "").lower() in ("sqlite", "sql")
+
+    for tf in results.get("taint_flows") or []:
+        if isinstance(tf, dict) and _is_sqlite(tf.get("sink_cat")):
+            c = str(tf.get("class_name") or tf.get("class") or "").split("$", 1)[0]
+            if c:
+                flow_classes.add(c)
+    for f in results.get("findings") or []:
+        if not isinstance(f, dict):
+            continue
+        rid = str(f.get("rule_id", "")).upper()
+        tflow = f.get("taint_flow") or {}
+        if rid.startswith("TAINT-") and _is_sqlite(tflow.get("sink_cat")):
+            c = str(f.get("file_path") or tflow.get("class_name") or "").split("$", 1)[0]
+            if c:
+                finding_classes.add(c)
+                flow_classes.add(c)
+    return finding_classes, flow_classes
+
+
+def resolve_sql_raw_query_severity(results: dict) -> dict:
+    """Reconcile android_sqlite_raw_query severity with the actual evidence.
+
+    For each such finding, in priority order:
+      1. A SQLite taint FINDING already covers this class → drop the SAST finding
+         (the taint finding, with its data-flow proof, represents the sink once).
+      2. A SQLite taint FLOW reaches this class → HIGH (tainted source → sink).
+      3. String building in the SQL argument (concatenation / String.format /
+         Kotlin interpolation) → HIGH.
+      4. Otherwise (only '?' placeholders / selectionArgs) → downgrade to INFO.
+
+    Runs after the taint stage so branches 1-2 have data; deterministic and
+    idempotent. Returns a small stats dict."""
+    findings = results.get("findings") or []
+    finding_classes, flow_classes = _taint_sqlite_classes(results)
+    stats = {"deduped_taint": 0, "taint_high": 0, "concat_high": 0, "downgraded_info": 0}
+    kept: list = []
+    changed = False
+
+    for f in findings:
+        if not isinstance(f, dict) or f.get("rule_id") != "android_sqlite_raw_query":
+            kept.append(f)
+            continue
+        fpath = f.get("file_path") or ""
+
+        if any(_same_class(fpath, tc) for tc in finding_classes):
+            stats["deduped_taint"] += 1
+            changed = True
+            continue  # dropped — covered by the taint finding
+
+        if any(_same_class(fpath, tc) for tc in flow_classes):
+            f["severity"] = "high"
+            f["sql_injection_evidence"] = "taint flow reaches SQLite sink"
+            stats["taint_high"] += 1
+            changed = True
+            kept.append(f)
+            continue
+
+        texts = [f.get("snippet", ""), f.get("code_context", "")]
+        texts += [fe.get("snippet", "") for fe in (f.get("file_evidence") or []) if isinstance(fe, dict)]
+        if any(_has_sql_string_building(t) for t in texts):
+            if f.get("severity") != "high":
+                changed = True
+            f["severity"] = "high"
+            f["sql_injection_evidence"] = "string-building in SQL argument (concatenation/format/interpolation)"
+            stats["concat_high"] += 1
+        else:
+            f["severity"] = "info"
+            f["title"] = "Raw SQL Query (Parameterized) — No Injection Evidence"
+            f["description"] = (
+                "Raw SQLite API used, but the query argument shows no string "
+                "concatenation, String.format or interpolation — only '?' placeholders "
+                "with selectionArgs. No evidence of SQL injection."
+            )
+            f["recommendation"] = (
+                "No action required for the injection risk. Keep binding all "
+                "user-controlled values through '?' placeholders / selectionArgs."
+            )
+            f["sql_injection_evidence"] = "parameterized (no string-building detected)"
+            f["severity_downgraded_reason"] = "parameterized raw query"
+            stats["downgraded_info"] += 1
+            changed = True
+        kept.append(f)
+
+    if changed:
+        results["findings"] = kept
+    results["sql_raw_query_resolution"] = stats
+    return stats
+
 try:
     import sys as _sys
     _sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))

@@ -33,7 +33,7 @@ from .source_corpus import SourceCorpus
 from . import reachability_engine
 from . import trust_engine
 from . import finding_model
-from .code_analyzer import run_android_sast
+from .code_analyzer import run_android_sast, resolve_sql_raw_query_severity
 from .semgrep_runner import run_semgrep, semgrep_available
 from .osv_scanner import scan_dependencies
 from .string_analyzer import analyze_strings
@@ -567,6 +567,16 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
             _record_module_metric(results, "taint_analysis", taint_started, error=str(_te))
             results.setdefault("taint_flows", [])
         _stage(scan_id, "taint", taint_started)
+
+        # ── Raw-SQL severity reconciliation ──────────────────────────────────
+        # Now that taint has run, decide android_sqlite_raw_query severity from
+        # real evidence (taint reach or string-building), downgrade parameterized
+        # queries to INFO, and drop the SAST finding where a taint SQLite finding
+        # already represents the same sink (no double count).
+        try:
+            resolve_sql_raw_query_severity(results)
+        except Exception:
+            log.exception("[sast] raw-SQL severity reconciliation failed")
 
         # ── VirusTotal hash lookup ────────────────────────────────────────────
         vt_started = time.perf_counter()

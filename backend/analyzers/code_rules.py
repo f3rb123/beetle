@@ -353,6 +353,10 @@ CODE_RULES = [
     {
         "id":          "android_sqlite_raw_query",
         "title":       "Raw SQL Query — SQL Injection Risk",
+        # Fires on every raw-SQL sink; severity is reconciled downstream by
+        # code_analyzer.resolve_sql_raw_query_severity — HIGH only when a taint flow
+        # reaches the sink or the SQL argument is string-built (concatenation /
+        # String.format / Kotlin interpolation); parameterized queries downgrade to INFO.
         "pattern":     r"rawQuery\(|execSQL\(|compileStatement\(",
         "severity":    "high",
         "category":    "Data Storage",
