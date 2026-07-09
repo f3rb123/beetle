@@ -316,9 +316,50 @@ def build_developer_summary(results: dict) -> dict:
     }
 
 
+# ─── False-positive / suppression accounting ─────────────────────────────────
+def build_finding_accounting(results: dict) -> dict:
+    """Name the two easily-confused suppression counts ONCE, with explicit keys.
+
+    The report shows two numbers that both used the word "false positive" but have
+    different denominators:
+
+      * fp_removed_pre_triage       — detections classified as false positives by
+        the FP-suppression rules and dropped before triage (the Signal-Quality
+        funnel's "false positives removed"). FP-only.
+      * findings_suppressed_display — EVERY finding withheld from the default
+        application view: false positives PLUS library/framework noise, low
+        confidence and low-value flows. A strict superset of the first.
+
+    Defining them here, each with its own key and human label, lets every report
+    surface refer to the same named metric instead of relabeling a raw count."""
+    es = results.get("executive_summary") or {}
+    stats = results.get("finding_quality_stats") or {}
+    return {
+        "fp_removed_pre_triage": int(es.get("false_positives_suppressed", 0) or 0),
+        "findings_suppressed_display": int(stats.get("suppressed_count", 0) or 0),
+        "labels": {
+            "fp_removed_pre_triage": "False positives removed before triage",
+            "findings_suppressed_display": "Findings hidden from the default view",
+        },
+        "help": {
+            "fp_removed_pre_triage":
+                "Detections identified as false positives by the suppression rules "
+                "and dropped before triage.",
+            "findings_suppressed_display":
+                "All findings withheld from the application view — false positives "
+                "plus library/framework noise, low-confidence and low-value flows.",
+        },
+    }
+
+
 # ─── Entry point ─────────────────────────────────────────────────────────────
 def annotate(results: dict) -> None:
     """Populate results["ciso_summary"] and results["developer_summary"]."""
+    try:
+        results["finding_accounting"] = build_finding_accounting(results)
+    except Exception:
+        log.exception("[report_summaries] finding accounting failed")
+        results["finding_accounting"] = {}
     try:
         results["ciso_summary"] = build_ciso_summary(results)
     except Exception:

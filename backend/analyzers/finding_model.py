@@ -1843,7 +1843,7 @@ def log_quality_stats(stats: dict, *, platform: str = "android") -> None:
         f"Raw findings:            {stats.get('raw_total', 0)}",
         f"Collapsed duplicates:    {stats.get('collapsed_duplicates', 0)}",
         f"Reclassified controls:   {stats.get('reclassified_controls', 0)}",
-        f"Suppressed FPs:          {stats.get('suppressed_count', 0)}",
+        f"Suppressed (all reasons): {stats.get('suppressed_count', 0)}",
         f"Kept (all ownership):    {stats.get('kept_total', 0)}",
         f"Application-only:        {stats.get('application_only_count', 0)}",
         f"High confidence (>=70):  {stats.get('high_confidence_count', 0)}",

@@ -259,17 +259,39 @@ def _score_from_factors(factors: list[str]) -> int:
     return min(sum(_FACTOR_WEIGHTS.get(x, 0) for x in set(factors)), 100)
 
 
-def _reason_from_factors(factors: list[str], context: str = "") -> str:
+# Rating + its qualitative label are a PURE function of the score bucket, so the
+# number, the one-word rating and the sentence lead can never disagree.
+_RATING_BUCKETS = (
+    (80, "critical", "Critical exploitability"),
+    (60, "high",     "High exploitability"),
+    (35, "medium",   "Moderate exploitability"),
+    (0,  "low",      "Limited exploitability"),
+)
+
+
+def _rating_for(score: int) -> tuple[str, str]:
+    for threshold, rating, label in _RATING_BUCKETS:
+        if score >= threshold:
+            return rating, label
+    return "low", "Limited exploitability"
+
+
+def _reason_from_factors(score: int, factors: list[str], context: str = "") -> str:
+    """A sentence whose qualitative claim is fixed by the SCORE bucket and whose
+    body enumerates the SAME factors that produced that score. Because both the
+    lead and the score come from one factor set, the prose cannot contradict the
+    number."""
+    _, label = _rating_for(score)
     uniq = [x for x in _FACTOR_WEIGHTS if x in set(factors)]  # weight order
     if not uniq:
-        return "Limited exploitability — no externally reachable attacker path identified."
+        return f"{label} — no externally reachable attacker path identified."
     phrases = [_FACTOR_PHRASE[x] for x in uniq[:5]]
     lead = (context + ": ") if context else ""
     if len(phrases) == 1:
         body = phrases[0]
     else:
         body = ", ".join(phrases[:-1]) + " and " + phrases[-1]
-    return f"{lead}Attack path combines {body}."
+    return f"{label} — {lead}attack path combines {body}."
 
 
 def compute_exploitability(results: dict) -> None:
@@ -290,41 +312,43 @@ def compute_exploitability(results: dict) -> None:
                 f.setdefault("exploitability_factors", sorted(set(factors)))
 
     # Overall = the strongest attacker path: best chain, else best component /
-    # critical finding. Reason is generated from the dominant contributor.
-    candidates: list[tuple[int, str]] = []
+    # critical finding. Each candidate is (factors, context); its score AND its
+    # reason are both derived from that ONE factor set below, so a candidate can
+    # never pair a high number with a "no path" sentence. A candidate that
+    # contributes no recognized factors carries no score and is dropped — the score
+    # is always explained by the same factors the sentence names.
+    candidates: list[tuple[list[str], str]] = []
     for c in chains:
-        candidates.append((
-            int(c.get("exploitability", 0) or 0),
-            _reason_from_factors(
-                # derive factors from the chain's step titles
-                [x for step in c.get("steps", []) for x in _finding_factors(step)],
-                context=c.get("title", "Attack chain"),
-            ),
-        ))
+        factors = [x for step in c.get("steps", []) for x in _finding_factors(step)]
+        candidates.append((factors, c.get("title", "Attack chain")))
     for hr in results.get("high_risk_components", []):
         factors = ["exported"]
         if hr.get("browsable") or hr.get("deeplinks"):
             factors.append("user_controlled")
         if hr.get("type") == "provider":
             factors.append("storage_access")
-        candidates.append((
-            _score_from_factors(factors),
-            _reason_from_factors(factors, context=f"Exported {hr.get('type','component')} {hr.get('short_name','')}"),
-        ))
+        candidates.append((factors, f"Exported {hr.get('type','component')} {hr.get('short_name','')}".strip()))
     for f in findings:
-        if isinstance(f, dict) and f.get("severity") == "critical" and f.get("exploitability"):
-            candidates.append((int(f["exploitability"]),
-                               _reason_from_factors(_finding_factors(f), context=f.get("title", "Critical finding"))))
+        if isinstance(f, dict) and not f.get("is_attack_chain") and f.get("severity") == "critical":
+            factors = _finding_factors(f)
+            if factors:
+                candidates.append((factors, f.get("title", "Critical finding")))
 
-    if candidates:
-        score, reason = max(candidates, key=lambda t: t[0])
+    # Score every candidate from its own factors; keep only those that actually
+    # contribute a recognized, reachable factor.
+    scored = [(_score_from_factors(fac), fac, ctx) for fac, ctx in candidates]
+    scored = [t for t in scored if t[1] and t[0] > 0]
+
+    if scored:
+        score, factors, context = max(scored, key=lambda t: t[0])
+        reason = _reason_from_factors(score, factors, context)
     else:
-        score, reason = 0, "No exploitable attacker path identified."
+        score, reason = 0, _reason_from_factors(0, [], "")
 
+    rating, _ = _rating_for(score)
     results["exploitability_score"] = {
         "score": int(score),
-        "rating": ("critical" if score >= 80 else "high" if score >= 60
-                   else "medium" if score >= 35 else "low"),
+        "rating": rating,
         "reason": reason,
     }
 

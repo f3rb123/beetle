@@ -350,13 +350,17 @@ def _executive_summary(story, results, T, styles):
     if es:
         story.append(Spacer(1, 6 * mm))
         story.append(Paragraph("Signal Quality", styles["body"]))
+        acct = results.get("finding_accounting") or {}
         funnel = [
-            ("Raw detections",                  es.get("raw_detections", 0)),
-            ("Duplicates grouped",              es.get("duplicates_grouped", 0)),
-            ("Library findings hidden",         es.get("library_findings_hidden", 0)),
-            ("False positives removed",         es.get("false_positives_suppressed", 0)),
-            ("Low-value data flows pruned",     es.get("low_value_flows_pruned", 0)),
-            ("High-signal findings presented",  es.get("high_signal_findings", 0)),
+            ("Raw detections",                       es.get("raw_detections", 0)),
+            ("Duplicates grouped",                   es.get("duplicates_grouped", 0)),
+            ("Library findings hidden",              es.get("library_findings_hidden", 0)),
+            # FP-only: detections dropped by the FP-suppression rules before triage.
+            # Distinct from the "hidden from this view" total in the Findings header.
+            ("False positives removed (pre-triage)", acct.get("fp_removed_pre_triage",
+                                                              es.get("false_positives_suppressed", 0))),
+            ("Low-value data flows pruned",          es.get("low_value_flows_pruned", 0)),
+            ("High-signal findings presented",       es.get("high_signal_findings", 0)),
         ]
         srows = [["Stage", "Count"]] + [
             [Paragraph(escape(k), styles["table_cell"]),
@@ -777,14 +781,21 @@ def _findings_section(story, results, T, styles):
 
     scope = results.get("_report_findings_scope", "application")
     stats = results.get("finding_quality_stats") or {}
+    acct = results.get("finding_accounting") or {}
     if scope == "application" and stats:
         story.append(Spacer(1, 2 * mm))
+        # This is the TOTAL withheld from the view (false positives + library noise +
+        # low confidence + low-value flows), NOT the FP-only count. It is deliberately
+        # labeled "hidden from this view" so it never reads as the Signal-Quality
+        # funnel's "false positives removed (pre-triage)" figure, which is FP-only.
+        hidden = acct.get("findings_suppressed_display", stats.get("suppressed_count", 0))
         story.append(Paragraph(
             f"Showing {len(findings)} high-signal, application-owned finding(s). "
-            f"{stats.get('suppressed_count', 0)} false positive(s) suppressed, "
+            f"{hidden} finding(s) hidden from this view (false positives, library / "
+            f"framework noise, low confidence), "
             f"{stats.get('collapsed_duplicates', 0)} duplicate(s) grouped, "
             f"{stats.get('reclassified_controls', 0)} security control(s) reclassified. "
-            f"Library / framework / low-confidence findings are available in the full export.",
+            f"Hidden findings are available in the full export.",
             styles["caption"],
         ))
     story.append(Spacer(1, 6 * mm))
