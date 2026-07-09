@@ -572,6 +572,10 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     try:
         from . import attack_chains
         attack_chains.annotate(results)
+        # Project v2 chains onto the findings list (mark members + first-class chain
+        # findings) so the iOS findings list and PDF chain section reference the same
+        # v2 chains, with computed confidence.
+        attack_chains.annotate_findings(results)
     except Exception:
         log.exception("[attack_chains_v2] failed; no v2 chains emitted")
     # ── Phase 1.8: Bug Bounty Intelligence — reportability guidance for every
@@ -2138,6 +2142,9 @@ def _build_ios_quick_summary(results: dict):
     webview  = results.get("ios_webview", {})
     fws      = results.get("embedded_frameworks", [])
 
+    from .attack_chains import to_quick_summary
+    chain_summary = to_quick_summary(results)
+
     results["quick_summary"] = {
         "total_findings":      len(findings),
         "critical":            sev_ss.get("critical", 0),
@@ -2153,4 +2160,7 @@ def _build_ios_quick_summary(results: dict):
         "weak_crypto":         bool(crypto.get("weak_algorithms")),
         "binary_pie":          results.get("app_info", {}).get("binary_protections", {}).get("pie"),
         "debug_build":         results.get("app_info", {}).get("debug_build", False),
+        "attack_chain":        chain_summary,
+        "chain_count":         len(chain_summary),
+        "chain_severity":      chain_summary[0]["severity"] if chain_summary else "none",
     }

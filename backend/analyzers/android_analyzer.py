@@ -56,7 +56,7 @@ from .evidence_scanner import (
     scan_directory_for_jwts, extract_urls
 )
 from .path_utils import relativize_path, normalize_relative_path, make_file_evidence
-from .chain_analyzer import synthesize_attack_chains, correlate_attack_chains
+from .chain_analyzer import synthesize_attack_chains
 from . import posture_analyzer
 from .secret_validator import validate_secrets
 from .taint_analyzer import run_taint_analysis
@@ -310,10 +310,13 @@ def _build_quick_summary(results: dict):
     if certificate_overview.get("overall_status") == "secure":
         secure_signals.append("Modern APK signature scheme detected")
 
-    # Attack chain synthesis — reuse the data computed during finalize (Phase 6
-    # Task 2) so chains are synthesized once; fall back for any caller that runs
-    # this before finalize.
+    # Attack chains come from the v2 engine (projected to legacy keys so existing
+    # readers keep working). The legacy _chain_data survives ONLY as a hint feeder
+    # for pentest hints; it no longer defines quick_summary.attack_chain.
+    from .attack_chains import to_quick_summary
+    chain_summary = to_quick_summary(results)
     chain_data = results.pop("_chain_data", None) or synthesize_attack_chains(results)
+    chain_severity = chain_summary[0]["severity"] if chain_summary else "none"
 
     results["quick_summary"] = {
         "total_vulnerabilities": len([finding for finding in findings if finding.get("severity") != "info"]),
@@ -321,10 +324,10 @@ def _build_quick_summary(results: dict):
         "key_critical_issues": key_issues[:6],
         "highlight_count": len(key_issues),
         "secure_signals": secure_signals,
-        "attack_chain":   chain_data.get("attack_chains", []),
+        "attack_chain":   chain_summary,
         "pentest_hints":  chain_data.get("pentest_playbook", []),
-        "chain_count":    chain_data.get("chain_count", 0),
-        "chain_severity": chain_data.get("highest_chain_severity", "none"),
+        "chain_count":    len(chain_summary),
+        "chain_severity": chain_severity,
     }
     results["view_modes"] = {
         "quick": {"recommended_tabs": ["dashboard", "findings", "manifest", "surface", "cert"]},
@@ -918,13 +921,14 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     results["findings"], results["manifest_evidence_stats"] = finding_model.enforce_manifest_evidence(
         results["findings"], scan_id, results.get("manifest_xml", ""),
     )
-    # ── Phase 6 Task 2: attack-chain correlation — mark members + first-class findings ──
-    _chain_data = correlate_attack_chains(results)
-    results["_chain_data"] = _chain_data
-    _chain_findings = _chain_data.get("attack_chain_findings", [])
-    if _chain_findings:
-        finding_model.canonicalize_findings(_chain_findings, _app_pkg)
-        results["findings"] = _chain_findings + results["findings"]
+    # ── Attack-chain correlation HINTS only ──────────────────────────────────
+    # The legacy synthesizer is demoted to a correlation-hint feeder: it produces
+    # results["_chain_data"] (still consumed by posture exploitability, the attack
+    # graph and pentest hints) but NO LONGER injects first-class chain findings and
+    # NO LONGER sets quick_summary.attack_chain. The displayed chains — findings
+    # list, PDF section, dashboard, AI context — all come from the v2 engine below,
+    # via attack_chains.annotate_findings, so one engine drives every surface.
+    results["_chain_data"] = synthesize_attack_chains(results)
     results["ownership_metrics"] = finding_model.emit_diagnostics(
         results["findings"], platform="android", app_package=_app_pkg,
     )
@@ -1049,6 +1053,14 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     try:
         from . import attack_chains
         attack_chains.annotate(results)
+        # Project v2 chains onto the findings list: mark participating findings
+        # (in_attack_chain) and prepend one first-class finding per chain, carrying
+        # v2's COMPUTED confidence. This is what makes the findings list and the PDF
+        # chain section reference the same (v2) chains instead of the legacy engine.
+        _n_chain_findings = attack_chains.annotate_findings(results)
+        if _n_chain_findings:
+            finding_model.canonicalize_findings(
+                [f for f in results["findings"] if f.get("is_attack_chain")], _app_pkg)
     except Exception:
         log.exception("[attack_chains_v2] failed; no v2 chains emitted")
     # ── Phase 1.8: Bug Bounty Intelligence — reportability guidance for every

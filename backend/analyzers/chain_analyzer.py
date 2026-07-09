@@ -861,6 +861,31 @@ CHAIN_MEMBER_KEYWORDS = {
 }
 
 
+def _member_confidence(member: dict) -> int:
+    """A member finding's own numeric confidence (0-100), defaulting to 50."""
+    for key in ("overall_confidence", "confidence_score", "confidence"):
+        v = member.get(key)
+        if v not in (None, ""):
+            try:
+                return max(0, min(100, int(round(float(v)))))
+            except (TypeError, ValueError):
+                continue
+    return 50
+
+
+def _legacy_chain_confidence(members: list, evidenced: int, total: int) -> int:
+    """Numeric confidence for a legacy-synthesized chain, from member evidence only.
+
+    = mean(member confidence) discounted by the fraction of members that carry
+    locatable evidence: fully-evidenced chains keep their members' mean confidence,
+    an unevidenced chain is halved. Deterministic; never a constant."""
+    if total <= 0 or not members:
+        return 0
+    mean_conf = sum(_member_confidence(m) for m in members) / total
+    evidence_ratio = evidenced / total
+    return max(0, min(100, round(mean_conf * (0.5 + 0.5 * evidence_ratio))))
+
+
 def _member_evidence(member: dict) -> list:
     """Pull whatever locatable evidence a member finding carries."""
     ev = []
@@ -937,9 +962,15 @@ def build_attack_chain_findings(findings: list, chains: list) -> list:
         else:
             ratio = evidenced / total_members
             chain_confidence = "HIGH" if ratio >= 0.7 else ("MEDIUM" if ratio >= 0.34 else "LOW")
+        # Numeric confidence derived from the members' OWN confidence, discounted by
+        # how many carry locatable evidence — never a constant. A chain built purely
+        # from unevidenced signals is heavily discounted; one whose members are all
+        # evidenced keeps their mean confidence.
+        chain_confidence_score = _legacy_chain_confidence(members, evidenced, total_members)
         # Mirror onto the source chain dict so the dashboard / attack paths
         # (which read quick_summary.attack_chain) can show it too.
         chain["chain_confidence"] = chain_confidence
+        chain["confidence"] = chain_confidence_score
 
         cf = {
             # cid is the chain detector's stable slug (chain.get("id")), so the
@@ -952,8 +983,10 @@ def build_attack_chain_findings(findings: list, chains: list) -> list:
             "chain_confidence": chain_confidence,
             "attack_chain_id": cid,
             "attack_chain_members": member_refs,
-            "confidence": 90,
-            "confidence_score": 90,
+            # Computed from member evidence (see _legacy_chain_confidence) — the old
+            # flat 90% is gone. A chain is only as trustworthy as its evidenced links.
+            "confidence": chain_confidence_score,
+            "confidence_score": chain_confidence_score,
             "description": chain.get("narrative", ""),
             "impact": chain.get("impact", ""),
             "recommendation": (
