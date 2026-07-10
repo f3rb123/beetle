@@ -531,6 +531,32 @@ def classify(finding: CanonicalFinding, ctx: OwnershipContext | None = None) -> 
     return get_engine().classify(finding, ctx)
 
 
+# Owner types that denote library / framework / generated code — i.e. NOT the
+# application's own code. Mirrors finding_model._LIB_OWNER_TYPES.
+_LIBRARY_OWNER_TYPES = frozenset((
+    OwnerType.THIRD_PARTY_SDK, OwnerType.ANDROID_FRAMEWORK, OwnerType.GOOGLE_SDK,
+    OwnerType.APPLE_FRAMEWORK, OwnerType.VENDOR_SDK, OwnerType.OPEN_SOURCE_LIBRARY,
+    OwnerType.GENERATED_CODE,
+))
+
+
+def is_library_owner(owner_type: str) -> bool:
+    """True when an owner_type denotes library/framework/generated code (not the app)."""
+    return owner_type in _LIBRARY_OWNER_TYPES
+
+
+def classify_component_class(fqn: str, platform: str = "android",
+                             ctx: OwnershipContext | None = None) -> OwnershipResult:
+    """Ownership of a manifest component from its implementing class FQN.
+
+    Reuses the shared engine + fingerprint DB — never a bespoke classifier — so a
+    component backed by a library (androidx / io.flutter / com.google) is labeled
+    identically to any other finding that points at that class.
+    """
+    return get_engine().classify(
+        CanonicalFinding(title="_", class_name=fqn, platform=platform), ctx)
+
+
 def enrich(finding: CanonicalFinding, ctx: OwnershipContext | None = None) -> CanonicalFinding:
     """Set ownership fields on a CanonicalFinding in place; returns it."""
     res = get_engine().classify(finding, ctx)

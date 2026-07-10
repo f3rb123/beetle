@@ -891,6 +891,13 @@ def _finding_library_owned(f: dict) -> bool:
     return str(f.get("ownership_label") or "").upper() in _LIB_OWNER_LABELS
 
 
+# Manifest exported-component finding rule_ids that are not caught by the
+# "manifest_exported_" prefix but still describe a component's exposed surface.
+_COMPONENT_SURFACE_RULE_IDS = frozenset((
+    "manifest_weak_exported_permission", "manifest_custom_scheme_deeplink",
+))
+
+
 def demote_library_code_findings(results: dict) -> dict:
     """Fix 2 — make severity/eligibility consume ownership.
 
@@ -912,12 +919,17 @@ def demote_library_code_findings(results: dict) -> dict:
             continue
         if not _finding_library_owned(f):
             continue
-        # Generic code-pattern hit: a SAST / code-rule match (not a manifest-derived
-        # finding, a validated secret, or a first-class data-flow finding).
+        # Generic code-pattern hit: a SAST / code-rule match (not a validated secret
+        # or a first-class data-flow finding). OR a manifest exported-component
+        # finding whose implementing class is library code — an androidx/Flutter/
+        # Firebase component the app merely bundles is the library vendor's surface,
+        # not a high-risk app finding, unless attacker-controlled data reaches app
+        # code (checked below).
         rid = str(f.get("rule_id") or f.get("id") or "")
         is_code_pattern = (str(f.get("source") or "").upper() == "SAST"
                            or rid.startswith(("android_", "ios_")))
-        if not is_code_pattern:
+        is_component = rid.startswith("manifest_exported_") or rid in _COMPONENT_SURFACE_RULE_IDS
+        if not (is_code_pattern or is_component):
             continue
         # App-owned reachability evidence keeps it (a real, reachable weakness).
         if f.get("taint_flow") or f.get("call_chain"):

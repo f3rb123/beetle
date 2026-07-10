@@ -22,7 +22,7 @@ from xml.etree import ElementTree as ET
 from urllib.parse import urlparse
 
 from .common import (
-    ns, DANGEROUS_PERMISSIONS, SDK_SIGNATURES,
+    ns, DANGEROUS_PERMISSIONS, SDK_SIGNATURES, is_signature_or_system_permission,
     scan_files_for_secrets, scan_text_for_secrets,
     extract_urls, sort_findings, sort_findings_by_priority, SEVERITY_ORDER,
     shannon_entropy, rule_slug,
@@ -36,7 +36,7 @@ from . import finding_model
 from .code_analyzer import run_android_sast, resolve_sql_raw_query_severity
 from .semgrep_runner import run_semgrep, semgrep_available
 from .osv_scanner import scan_dependencies
-from .string_analyzer import analyze_strings
+from .string_analyzer import analyze_strings, suppress_crypto_string_presence_duplicates
 from .cert_analyzer import analyze_certificate
 from .elf_analyzer import analyze_elf_binaries
 from .scoring import calculate_score
@@ -627,6 +627,13 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
                     }
         results["scan_metrics"]["summary"]["parallel_phase_ms"] = int((time.perf_counter() - parallel_started) * 1000)
         _stage(scan_id, "strings_parallel", parallel_started)
+
+        # Drop string-presence crypto signals for files already covered by an
+        # authoritative code_rules crypto finding (SAST ran above) — no double count.
+        try:
+            suppress_crypto_string_presence_duplicates(results)
+        except Exception:
+            log.exception("[string_analysis] crypto-presence dedupe failed")
 
         # ── Phase 1.99: Network Intelligence — enrich the raw IP hits (classify,
         # owner-attribute via the Ownership Engine, suppress noise, merge duplicates,
@@ -1284,28 +1291,16 @@ def _check_app_flags(app_elem, results):
             "reason": "android:debuggable is explicitly disabled in the manifest.",
         }
     else:
+        # android:debuggable is ABSENT. It defaults to false for every build —
+        # absent == the secure default, NOT an unknown/at-risk state. Treat it as
+        # false everywhere downstream (no "missing" state, no finding, no chain).
         manifest_security["debuggable"] = {
-            "value": "missing",
-            "state": "missing",
-            "status": "Missing (Potential Risk)",
-            "severity": "low",
-            "reason": "The manifest does not explicitly set android:debuggable. Build-time configuration should be verified.",
+            "value": "absent",
+            "state": "false",
+            "status": "Not Debuggable (default)",
+            "severity": "info",
+            "reason": "android:debuggable is absent; it defaults to false. App is not debuggable.",
         }
-        results["findings"].append({
-            "rule_id":        "manifest_debuggable_flag_missing",
-            "title":          "Potentially Debuggable (Flag Missing)",
-            "severity":       "low",
-            "category":       "Binary Hardening",
-            "description":    "android:debuggable is not explicitly declared in the manifest. Release builds normally resolve this to false, but the missing flag increases the risk of an insecure build configuration or misconfigured signing pipeline.",
-            "impact":         "A misconfigured release pipeline could accidentally ship a debuggable build without the manifest making that intent explicit.",
-            "recommendation": "Set android:debuggable=\"false\" explicitly for production releases and verify the final merged manifest in CI.",
-            "cwe":            "CWE-16",
-            "masvs":          "MASVS-CODE-2",
-            "owasp":          "M7",
-            "confidence":     55,
-            "validation_status": "heuristic",
-            "manifest_evidence_spec": {"anchor": "application"},
-        })
 
     allow_backup = attr("allowBackup")
     if allow_backup is None or allow_backup.lower() in ("true", "1"):
@@ -1577,12 +1572,20 @@ def _process_component(elem, comp_type, pkg, results):
     _component_finding_start = len(results["findings"])
 
     if permission and permission_level in {"normal", "dangerous", "unknown"}:
+        # Protection-level-aware copy: never claim a third-party app can hold a
+        # signature/system permission — that guard is the {normal,dangerous,unknown}
+        # gate above (signature-protected components never reach this branch).
+        _reach_note = {
+            "normal":    "Any third-party app can request and hold a `normal`-level permission, so this boundary does not restrict who can reach the component.",
+            "dangerous": "A `dangerous` permission is grantable to any third-party app (subject to a runtime user grant), so a malicious app can obtain it and reach the component.",
+            "unknown":   "The protection level of this permission could not be resolved, so it cannot be relied on as an access boundary.",
+        }.get(permission_level, "The protection level of this permission does not reliably restrict access.")
         results["findings"].append({
             "rule_id":        "manifest_weak_exported_permission",
             "title":          f"Weak Exported Component Permission Protection — {short_name}",
             "severity":       "medium",
             "category":       "Attack Surface",
-            "description":    f"Exported {comp_type} `{short_name}` is protected only by `{permission}` with protection level `{permission_level}`. Third-party apps can often obtain or satisfy this permission.",
+            "description":    f"Exported {comp_type} `{short_name}` is protected only by `{permission}` with protection level `{permission_level}`. {_reach_note}",
             "impact":         "This component may remain externally reachable despite a declared permission boundary.",
             "recommendation": "Use signature-level permissions for exported privileged components or set android:exported=\"false\".",
             "cwe":            "CWE-926",
@@ -1679,16 +1682,32 @@ def _process_component(elem, comp_type, pkg, results):
             })
 
     # Phase B: point each exported-component finding at the component's class so
-    # the source resolver can locate decompiled source and offer View Code.
+    # the source resolver can locate decompiled source and offer View Code, AND
+    # attach the component class's OWNERSHIP (owner_type + ownership_label) resolved
+    # by the SAME shared classifier the rest of the pipeline uses — so a component
+    # implemented by a library (androidx / io.flutter / com.google) is labeled at
+    # creation instead of silently defaulting to "Application".
     if full_name and "." in full_name:
+        from . import ownership as _ownership
+        _own = _ownership.classify_component_class(full_name, platform="android")
+        _is_lib = _ownership.is_library_owner(_own.owner_type)
+        _own_label = finding_model.classify_ownership_label(full_name, pkg)
         for f in results["findings"][_component_finding_start:]:
             f.setdefault("file_path", full_name)
             f.setdefault("component", full_name)
-            # The exposure is the app's responsibility even when the component
-            # class is implemented by a library (e.g. an exported service backed
-            # by net.gotev.uploadservice) — keep it application-owned so it is
-            # not hidden as library noise. View Code still opens the impl class.
-            f["app_owned_exposure"] = True
+            f.setdefault("owner_type", _own.owner_type)
+            if _own.owner_name:
+                f.setdefault("owner_name", _own.owner_name)
+            f.setdefault("ownership_label", _own_label)
+            # A manifest-declared exposure is the APP's responsibility even when the
+            # implementing class is library code — but only claim that for app / unknown
+            # code. A RECOGNIZED library/framework/SDK component (androidx, Firebase,
+            # Flutter, …) is the library vendor's surface, not a high-risk app finding:
+            # leave it library-owned so the 5.6a demotion path can hide it as library
+            # noise unless it carries app-owned reachability. View Code still opens the
+            # impl class either way.
+            if not _is_lib:
+                f["app_owned_exposure"] = True
 
 
 # ─── SDK detection ────────────────────────────────────────────────────────────
@@ -1756,9 +1775,14 @@ def _normalize_protection_level(protection: str) -> str:
 def _permission_protection_level(permission: str, results: dict) -> str:
     if not permission:
         return "none"
+    # A self-declared custom permission's real protectionLevel wins.
     for perm in results.get("manifest_permissions", []):
         if perm.get("name") == permission:
             return perm.get("protection_level", "unknown")
+    # AOSP signature/privileged/system permissions (DUMP, WRITE_SECURE_SETTINGS,
+    # BIND_*, …) are NOT grantable to an ordinary third-party app — never "normal".
+    if is_signature_or_system_permission(permission):
+        return "signature"
     if permission.startswith("android.permission."):
         return "dangerous" if permission in DANGEROUS_PERMISSIONS else "normal"
     return "unknown"
@@ -1884,6 +1908,57 @@ def _detect_session_recording_sdk_issues(tmpdir: str, all_packages: set[str], tr
             })
 
 
+# A behavior capability is only exercisable at runtime when the app actually holds
+# the prerequisite permission. A code-only match with no permission is dead/framework
+# capability, not a HIGH privacy finding — the app literally cannot use it. Values
+# are the uses-permission(s); ANY one present satisfies the prerequisite.
+_BEHAVIOR_PERMISSION_PREREQS = {
+    "Audio Record":        ("android.permission.RECORD_AUDIO",),
+    "GPS Location":        ("android.permission.ACCESS_FINE_LOCATION",
+                            "android.permission.ACCESS_COARSE_LOCATION"),
+    "Get SMS Messages":    ("android.permission.READ_SMS",
+                            "android.permission.RECEIVE_SMS"),
+    "Read/Write Contacts": ("android.permission.READ_CONTACTS",
+                            "android.permission.WRITE_CONTACTS"),
+    "Get Cell Information": ("android.permission.READ_PHONE_STATE",),
+    "Get Subscriber ID":    ("android.permission.READ_PHONE_STATE",),
+}
+_ACCESSIBILITY_BIND_PERMISSION = "android.permission.BIND_ACCESSIBILITY_SERVICE"
+
+
+def _behavior_prereq_met(category: str, results: dict) -> tuple[bool, str]:
+    """Whether a behavior category's runtime prerequisite is actually declared.
+
+    Held permissions come from results["permissions"]["all"] (the app's
+    uses-permissions — NOT results["manifest_permissions"], which lists custom
+    <permission> DECLARATIONS). Accessibility additionally requires a real bound
+    <service>; the BIND_ACCESSIBILITY_SERVICE permission alone is not enough.
+
+    Returns (met, reason) — reason is a human note used when the prerequisite is
+    absent. Categories with no gated prerequisite always return met=True.
+    """
+    held = {p for p in results.get("permissions", {}).get("all", []) if p}
+
+    if category == "Accessibility Service":
+        services = results.get("attack_surface", {}).get("services", []) or []
+        has_bound = any((s.get("permission") or "") == _ACCESSIBILITY_BIND_PERMISSION
+                        for s in services)
+        if has_bound:
+            return True, ""
+        return False, ("accessibility/semantics APIs are present in code but no <service> "
+                       "declares android:permission=\"android.permission.BIND_ACCESSIBILITY_SERVICE\", "
+                       "so no accessibility service is bound at runtime")
+
+    reqs = _BEHAVIOR_PERMISSION_PREREQS.get(category)
+    if not reqs:
+        return True, ""
+    if any(r in held for r in reqs):
+        return True, ""
+    pretty = " or ".join(r.split(".")[-1] for r in reqs)
+    return False, (f"capability present in code but the app declares no {pretty} "
+                   "permission, so it cannot be exercised at runtime")
+
+
 def _build_behavior_findings(results: dict):
     api_results = results.get("android_api", {})
     api_evidence = results.get("android_api_evidence", {})
@@ -1905,16 +1980,26 @@ def _build_behavior_findings(results: dict):
         evidence = [e for e in api_evidence.get(category, [])
                     if e.get("path") and not _is_binary(e.get("path")) and e.get("line") and e.get("snippet")]
 
+        # Permission/service gate: a privacy capability the app is not permissioned
+        # to use (no RECORD_AUDIO, no bound accessibility service, …) is code-only
+        # and cannot run — downgrade it to INFO with a note rather than presenting a
+        # HIGH capability the app cannot exercise. A declared prerequisite keeps the
+        # rule's real severity.
+        met, prereq_note = _behavior_prereq_met(category, results)
+        severity = rule["severity"] if met else "info"
+        description = rule["description"] if met else f"{rule['description']} Note: {prereq_note}."
+
         behavior_entries.append({
             "category": category,
             "title": rule["title"],
-            "severity": rule["severity"],
-            "description": rule["description"],
+            "severity": severity,
+            "description": description,
             "files": source_files[:10],
             "file_count": len(source_files),
             "cwe": rule["cwe"],
             "masvs": rule["masvs"],
             "owasp": rule["owasp"],
+            "prerequisite_met": met,
         })
         if rule["title"] in seen_titles:
             continue
@@ -1926,14 +2011,15 @@ def _build_behavior_findings(results: dict):
             # Stable id per behaviour CATEGORY (the rule key), not its title.
             "rule_id": rule_slug("behavior", category),
             "title": rule["title"],
-            "severity": rule["severity"],
+            "severity": severity,
             "category": "Behavior Analysis",
-            "description": rule["description"],
+            "description": description,
             "impact": rule["impact"],
             "recommendation": rule["recommendation"],
             "cwe": rule["cwe"],
             "masvs": rule["masvs"],
             "owasp": rule["owasp"],
+            "prerequisite_met": met,
             "file_path": primary["path"],
             "line": primary["line"],
             "snippet": primary["snippet"],

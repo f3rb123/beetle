@@ -36,9 +36,39 @@ def _is_namespace_url(val: str) -> bool:
     ))
 
 
+def _is_real_email(val: str) -> bool:
+    """Reject code-identifier noise the loose regex matches as an email.
+
+    Kills FPs like ``_Double@0150898.fromInteger`` (leading-underscore local,
+    all-digit domain label, camelCase pseudo-TLD) and ``n@d.Ce`` (1-char domain
+    label, mixed-case pseudo-TLD). A real TLD is 2-24 letters in a single case
+    (``com`` / ``COM``, never ``fromInteger`` / ``Ce``).
+    """
+    v = (val or "").strip()
+    if v.count("@") != 1:
+        return False
+    local, domain = v.split("@", 1)
+    if not local or local[0] == "_":       # code identifiers, not addresses
+        return False
+    labels = domain.split(".")
+    if len(labels) < 2:
+        return False
+    tld = labels[-1]
+    if not (2 <= len(tld) <= 24 and tld.isalpha()):
+        return False
+    if not (tld.islower() or tld.isupper()):  # camelCase → a method call, not a TLD
+        return False
+    if any(lbl.isdigit() for lbl in labels[:-1]):  # all-digit domain label
+        return False
+    if len(labels[-2]) < 2:                 # 1-char registrable label ("d.Ce")
+        return False
+    return True
+
+
 # Category -> value validator. A match is dropped when the validator returns False.
 _VALUE_VALIDATORS = {
     "Hardcoded IP Address": _is_real_ip,
+    "Email Address": _is_real_email,
     "Hidden URL / API Endpoint": lambda v: not _is_namespace_url(v),
 }
 
@@ -47,8 +77,10 @@ STRING_PATTERNS = [
     {
         "category":    "Hardcoded IP Address",
         "pattern":     r'\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b',
-        "severity":    "low",
-        "description": "Hardcoded IP address found. May indicate dev/test server endpoints left in production.",
+        "severity":    "info",
+        "description": "Dotted-quad string found. Detection is HEURISTIC — many dotted-quads are "
+                       "version numbers or byte sequences, not IPs. Reserved/test/documentation ranges "
+                       "are filtered; confirm the value is a real endpoint before acting on it.",
         "exclude":     [r'^0\.0\.0\.0$', r'^127\.0\.0\.1$', r'^255\.255\.255\.\d+$'],
     },
     {
@@ -58,29 +90,54 @@ STRING_PATTERNS = [
         "description": "Email address embedded in app. May expose developer or internal contact details.",
         "exclude":     [r'example\.com$', r'test\.com$', r'@android\.com$', r'@google\.com$'],
     },
+    # ── Crypto ALGORITHM STRING presence (INFO only) ──────────────────────────
+    # These match a bare algorithm token anywhere (a string constant, class name,
+    # comment). Token presence is NOT proof of insecure USAGE, so they are INFO
+    # signals only. The authoritative weak-crypto findings come from code_rules.py
+    # (android_weak_hash_md5 etc., which match MessageDigest.getInstance("MD5")) and
+    # keep their real severity; the string-presence copy for the same file is
+    # suppressed downstream to avoid double-counting.
     {
-        "category":    "Weak Crypto — MD5",
-        "pattern":     r'\bMD5\b|MessageDigest\.getInstance\("MD5"\)',
-        "severity":    "high",
-        "description": "MD5 usage detected in code. Cryptographically broken.",
+        "category":    "Crypto Algorithm String Present — MD5",
+        "pattern":     r'\bMD5\b',
+        "severity":    "info",
+        "description": "The token 'MD5' appears in app strings/code. String-presence signal only — "
+                       "not proof MD5 is used for a security purpose. Confirm actual usage "
+                       "(e.g. MessageDigest.getInstance(\"MD5\")); the authoritative weak-hash finding "
+                       "comes from code analysis.",
     },
     {
-        "category":    "Weak Crypto — SHA1",
-        "pattern":     r'\bSHA-1\b|\bSHA1\b|MessageDigest\.getInstance\("SHA-1"\)',
-        "severity":    "medium",
-        "description": "SHA-1 usage detected. Deprecated for security use.",
+        "category":    "Crypto Algorithm String Present — SHA-1",
+        "pattern":     r'\bSHA-1\b|\bSHA1\b',
+        "severity":    "info",
+        "description": "The token 'SHA-1' appears in app strings/code. String-presence signal only — "
+                       "not proof SHA-1 is used for a security purpose. Confirm actual usage; the "
+                       "authoritative weak-hash finding comes from code analysis.",
     },
     {
-        "category":    "Weak Cipher — DES",
-        "pattern":     r'Cipher\.getInstance\("DES|DESede|TripleDES',
-        "severity":    "high",
-        "description": "DES or 3DES cipher usage detected.",
+        "category":    "Crypto Algorithm String Present — DES",
+        "pattern":     r'\bDES\b',
+        "severity":    "info",
+        "description": "The token 'DES' (single DES) appears in app strings/code. String-presence "
+                       "signal only — not proof single-DES is used. Distinct from 3DES/TripleDES. "
+                       "Confirm actual usage; the authoritative weak-cipher finding comes from code analysis.",
     },
     {
-        "category":    "Weak Cipher — ECB Mode",
-        "pattern":     r'Cipher\.getInstance\("[^"]+/ECB/',
-        "severity":    "high",
-        "description": "ECB cipher mode detected — deterministic, pattern-leaking.",
+        "category":    "Crypto Algorithm String Present — 3DES/TripleDES",
+        "pattern":     r'\bDESede\b|\bTripleDES\b|\b3DES\b',
+        "severity":    "info",
+        "description": "The token '3DES/TripleDES' appears in app strings/code. String-presence signal "
+                       "only. 3DES is weak-but-distinct from single DES. Confirm actual usage; the "
+                       "authoritative weak-cipher finding comes from code analysis.",
+    },
+    {
+        "category":    "Crypto Algorithm String Present — ECB Mode",
+        "pattern":     r'\bECB\b',
+        "severity":    "info",
+        "description": "The token 'ECB' appears in app strings/code. String-presence signal only — "
+                       "ECB is deterministic/pattern-leaking WHEN used as a cipher mode. Confirm actual "
+                       "usage (e.g. Cipher.getInstance(\".../ECB/...\")); the authoritative finding comes "
+                       "from code analysis.",
     },
     {
         "category":    "Debug/Logging — Log.d/e/i/v/w",
@@ -216,6 +273,79 @@ STRING_PATTERNS = [
         "description": "Intent scheme URL processing detected — potential intent hijacking.",
     },
 ]
+
+
+# A string-presence crypto category is redundant once an authoritative code_rules
+# finding (matching MessageDigest.getInstance("MD5") etc.) exists for the SAME file.
+# Maps the category to the substring(s) that identify the covering code rule_id.
+_CRYPTO_PRESENCE_TO_RULE_TOKENS = {
+    "Crypto Algorithm String Present — MD5":              ("md5",),
+    "Crypto Algorithm String Present — SHA-1":            ("sha1",),
+    "Crypto Algorithm String Present — DES":              ("cipher_des",),
+    "Crypto Algorithm String Present — 3DES/TripleDES":   ("cipher_des",),
+    "Crypto Algorithm String Present — ECB Mode":         ("ecb",),
+}
+
+
+def _finding_files(f: dict) -> set:
+    files = set()
+    if f.get("file_path"):
+        files.add(f["file_path"])
+    for p in (f.get("files") or []):
+        if p:
+            files.add(p)
+    for e in (f.get("file_evidence") or []):
+        if isinstance(e, dict) and e.get("path"):
+            files.add(e["path"])
+    return files
+
+
+def suppress_crypto_string_presence_duplicates(results: dict) -> int:
+    """Drop string-presence crypto matches for files that already have an
+    authoritative code_rules crypto finding for the same algorithm — no double count.
+
+    Additive/non-destructive: only prunes results["string_analysis"] entries whose
+    file is covered by a real code finding; leaves everything else untouched.
+    """
+    sa = results.get("string_analysis") or {}
+    if not sa:
+        return 0
+    covered: dict = {}  # rule token -> set(files)
+    for f in results.get("findings") or []:
+        if not isinstance(f, dict):
+            continue
+        rid = str(f.get("rule_id") or f.get("id") or "").lower()
+        if not rid:
+            continue
+        files = _finding_files(f)
+        for tok in ("md5", "sha1", "cipher_des", "ecb"):
+            if tok in rid and files:
+                covered.setdefault(tok, set()).update(files)
+
+    removed = 0
+    for cat, tokens in _CRYPTO_PRESENCE_TO_RULE_TOKENS.items():
+        entry = sa.get(cat)
+        if not entry:
+            continue
+        covered_files = set()
+        for t in tokens:
+            covered_files |= covered.get(t, set())
+        if not covered_files:
+            continue
+        new_matches = []
+        for m in entry.get("matches", []):
+            kept = [p for p in (m.get("files") or []) if p not in covered_files]
+            if kept:
+                m["files"] = kept
+                new_matches.append(m)
+            else:
+                removed += 1
+        if new_matches:
+            entry["matches"] = new_matches
+            entry["count"] = len(new_matches)
+        else:
+            sa.pop(cat, None)
+    return removed
 
 
 def analyze_strings(tmpdir: str, platform: str, *, corpus: SourceCorpus | None = None) -> dict:

@@ -2,6 +2,7 @@ import zipfile
 import struct
 import hashlib
 import os
+import re
 from datetime import datetime
 
 try:
@@ -12,6 +13,20 @@ try:
     CRYPTO_AVAILABLE = True
 except ImportError:
     CRYPTO_AVAILABLE = False
+
+
+def _format_signature_algorithm(hash_name: str, key_class_name: str) -> str:
+    """Compose the signature algorithm from the hash + KEY ALGORITHM only.
+
+    ('SHA256', '_RSAPublicKey') -> 'SHA256withRSA'. The public-key class name
+    carries a 'PublicKey' suffix that must NOT leak into the signature algorithm
+    (which previously produced 'SHA256withRSAPUBLICKEY'). The key TYPE is reported
+    separately as cert_info['key_type'].
+    """
+    key_algo = re.sub(r'PublicKey.*$', '', (key_class_name or "").lstrip("_"))
+    if key_algo.lower().startswith("ellipticcurve"):
+        key_algo = "ECDSA"
+    return f"{(hash_name or '').upper()}with{key_algo}"
 
 
 def analyze_certificate(apk_path: str, results: dict):
@@ -105,10 +120,16 @@ def analyze_certificate(apk_path: str, results: dict):
             cert_info["debug_cert"] = any(kw in subject_cn or kw in subject_o
                                           for kw in ["android debug", "test", "debug"])
 
-            # Signature algorithm
+            # Signature algorithm — hash + KEY ALGORITHM only (e.g. SHA256withRSA).
+            # The public-key CLASS name is "_RSAPublicKey"; naively concatenating it
+            # produced "SHA256withRSAPUBLICKEY" (the key TYPE leaking into the sig
+            # algorithm). Strip the "PublicKey" suffix so only the algorithm remains;
+            # the key type is reported separately in cert_info["key_type"] below.
             cert_info["signature_algo"] = cert.signature_algorithm_oid.dotted_string
             try:
-                cert_info["signature_algo"] = cert.signature_hash_algorithm.name.upper() + "with" + cert.public_key().__class__.__name__.replace("_", "").upper()
+                cert_info["signature_algo"] = _format_signature_algorithm(
+                    cert.signature_hash_algorithm.name,
+                    cert.public_key().__class__.__name__)
             except Exception:
                 pass
 

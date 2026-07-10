@@ -523,6 +523,51 @@ DANGEROUS_PERMISSIONS = {
     "android.permission.INTERNET":              ("info",     "Internet access (expected but noted)"),
 }
 
+# ─── Signature / privileged / system permissions ─────────────────────────────
+# AOSP platform permissions whose protectionLevel is signature, signature|privileged,
+# signature|system, internal, or development — i.e. NOT grantable to an ordinary
+# third-party app (only to apps signed with the platform key, on the system/priv-app
+# partition, holding a matching signature, or granted via adb/root). Seeded from the
+# AOSP framework AndroidManifest.xml (frameworks/base/core/res). Authoritative lookup
+# table, NOT a guess. Bare names (no "android.permission." prefix); match on suffix.
+SIGNATURE_OR_SYSTEM_PERMISSIONS = frozenset({
+    # Diagnostics / logs / debug
+    "DUMP", "READ_LOGS", "READ_FRAME_BUFFER", "CAPTURE_AUDIO_OUTPUT",
+    "CAPTURE_VIDEO_OUTPUT", "CAPTURE_SECURE_VIDEO_OUTPUT", "DEVICE_POWER",
+    "FACTORY_TEST", "SET_TIME", "SET_TIME_ZONE", "REBOOT", "MASTER_CLEAR",
+    # Package / component management
+    "INSTALL_PACKAGES", "DELETE_PACKAGES", "CLEAR_APP_USER_DATA",
+    "INSTALL_LOCATION_PROVIDER", "MANAGE_DEVICE_ADMINS", "INSTALL_GRANT_RUNTIME_PERMISSIONS",
+    "GRANT_RUNTIME_PERMISSIONS", "REVOKE_RUNTIME_PERMISSIONS",
+    # Settings / secure config
+    "WRITE_SECURE_SETTINGS", "WRITE_APN_SETTINGS", "WRITE_GSERVICES",
+    "CHANGE_CONFIGURATION", "MODIFY_PHONE_STATE", "CALL_PRIVILEGED",
+    "CONTROL_LOCATION_UPDATES", "STATUS_BAR", "STATUS_BAR_SERVICE",
+    # Storage / filesystem / hardware
+    "MOUNT_UNMOUNT_FILESYSTEMS", "MOUNT_FORMAT_FILESYSTEMS", "MANAGE_USB",
+    "ACCESS_USB", "HARDWARE_TEST", "BRICK", "NET_ADMIN", "MODIFY_NETWORK_ACCOUNTING",
+    # Cross-user / privileged process
+    "INTERACT_ACROSS_USERS", "INTERACT_ACROSS_USERS_FULL", "MANAGE_USERS",
+    "MANAGE_APP_TOKENS", "INJECT_EVENTS", "SET_ACTIVITY_WATCHER",
+    "STOP_APP_SWITCHES", "READ_PRIVILEGED_PHONE_STATE",
+    # BIND_* service permissions (signature — only the system binds these)
+    "BIND_ACCESSIBILITY_SERVICE", "BIND_DEVICE_ADMIN",
+    "BIND_NOTIFICATION_LISTENER_SERVICE", "BIND_VPN_SERVICE",
+    "BIND_INPUT_METHOD", "BIND_WALLPAPER", "BIND_DEVICE_ADMIN_SERVICE",
+    "BIND_APPWIDGET", "BIND_CARRIER_SERVICES", "BIND_TELECOM_CONNECTION_SERVICE",
+})
+
+
+def is_signature_or_system_permission(permission: str) -> bool:
+    """True when a permission is signature/privileged/system/internal/development —
+    i.e. an ordinary third-party app cannot hold it. Matches on the bare suffix so
+    both `android.permission.DUMP` and a stray `DUMP` resolve correctly."""
+    if not permission:
+        return False
+    short = permission.rsplit(".", 1)[-1]
+    return short in SIGNATURE_OR_SYSTEM_PERMISSIONS
+
+
 # ─── SDK Signatures ──────────────────────────────────────────────────────────
 SDK_SIGNATURES = {
     "com.google.firebase":              ("Firebase",                    "Analytics/Backend", "info"),

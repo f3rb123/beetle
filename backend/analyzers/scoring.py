@@ -2,6 +2,7 @@
 # Weighted score 0-100 with letter grade
 
 from .security_controls import is_present
+from .common import compute_severity_summary
 
 SEVERITY_WEIGHTS = {
     "critical": 15,
@@ -39,7 +40,12 @@ def calculate_score(results: dict) -> dict:
     """
     findings = results.get("findings", [])
     secrets  = results.get("secrets",  [])
-    ss       = results.get("severity_summary", {})
+    # Recompute the severity rollup from the CURRENT (post-triage) findings and write
+    # it back, so the report header, CISO summary, and this deduction table — which
+    # all read results["severity_summary"] — are derived from one identical snapshot
+    # and can never disagree (e.g. header MEDIUM == score-table MEDIUM).
+    ss = compute_severity_summary(findings)
+    results["severity_summary"] = ss
 
     deductions = {}
     total_deducted = 0
@@ -121,6 +127,7 @@ def calculate_score(results: dict) -> dict:
         "risk":           risk,
         "total_deducted": total_deducted,
         "deductions":     deductions,
+        "secret_deductions": secret_deductions,
         "bonuses":        bonuses,
         "total_bonus":    total_bonus,
         "factors":        factors,

@@ -878,12 +878,43 @@ def _findings_section(story, results, T, styles):
             story.append(KeepTogether([header_table, Spacer(1, 5 * mm)]))
 
 
+# UTF-8 text that was decoded as latin-1/cp1252 upstream renders as mojibake
+# ("â€"" for an em-dash). Fixed substitutions for the residual cases the round-trip
+# repair below can't reach.
+_MOJIBAKE_FIXES = {
+    "â€”": "—", "â€“": "–", "â€™": "’", "â€˜": "‘",
+    "â€œ": "“", "â€\x9d": "”", "â€¦": "…", "â€": "—",
+    "Â\xa0": " ", "Â ": " ",
+}
+
+
+def _repair_mojibake(s: str) -> str:
+    """Repair UTF-8-decoded-as-latin-1 mojibake so the PDF shows real punctuation
+    (em-dash "—", not "â€""). Conservative: the latin-1→utf-8 round-trip is only
+    attempted when the classic marker "â€" is present and it introduces no
+    replacement chars, so genuinely-latin text is never corrupted."""
+    if not s:
+        return s
+    if "â€" in s:
+        try:
+            repaired = s.encode("latin-1", "ignore").decode("utf-8")
+            if "�" not in repaired:
+                s = repaired
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    for bad, good in _MOJIBAKE_FIXES.items():
+        if bad in s:
+            s = s.replace(bad, good)
+    return s
+
+
 def _safe(text) -> str:
     """HTML-escape dynamic text for reportlab Paragraph, preserving newlines as
     <br/>. reportlab parses Paragraph content as XML, so any raw <, >, & in
     findings (code snippets, generics like List<String>, XML) would otherwise
-    raise and abort PDF generation."""
-    return escape(str(text)).replace("\n", "<br/>")
+    raise and abort PDF generation. Also repairs mojibake so mis-decoded UTF-8
+    (domain risk flags, resource strings) renders correctly."""
+    return escape(_repair_mojibake(str(text))).replace("\n", "<br/>")
 
 
 def _format_finding_evidence(finding: dict) -> str:
@@ -1112,10 +1143,10 @@ def _domain_intel_section(story, results, T, styles):
     for item in intel[:30]:
         rows.append([
             Paragraph(_safe(item.get("domain", "")), styles["table_cell_mono"]),
-            Paragraph(_safe(item.get("ip", "")) or "â€”", styles["table_cell"]),
-            Paragraph(_safe(item.get("country", "")) or "â€”", styles["table_cell"]),
+            Paragraph(_safe(item.get("ip", "")) or "—", styles["table_cell"]),
+            Paragraph(_safe(item.get("country", "")) or "—", styles["table_cell"]),
             Paragraph(_safe(item.get("reputation", "") or item.get("status", "")), styles["table_cell"]),
-            Paragraph(_safe(", ".join(item.get("risk_flags", [])[:4])) or "â€”", styles["table_cell"]),
+            Paragraph(_safe(", ".join(item.get("risk_flags", [])[:4])) or "—", styles["table_cell"]),
         ])
 
     t = Table(rows, colWidths=[45 * mm, 25 * mm, 25 * mm, 25 * mm, 40 * mm])
@@ -1437,6 +1468,10 @@ def _score_section(story, results, T, styles):
     risk         = score.get("risk", "")
     bonuses      = score.get("bonuses", [])
     deductions   = score.get("deductions", {})
+    secret_ded   = int(score.get("secret_deductions", 0) or 0)
+    chain_pen    = int(score.get("chain_penalty", 0) or 0)
+    total_bonus  = int(score.get("total_bonus", 0) or 0)
+    total_ded    = int(score.get("total_deducted", 0) or 0)
 
     GRADE_COLORS = {
         "A": HexColor("#16a34a"), "B": HexColor("#2563eb"),
@@ -1463,22 +1498,56 @@ def _score_section(story, results, T, styles):
     story.append(t)
     story.append(Spacer(1, 4*mm))
 
-    if deductions:
-        rows = [["Severity", "Findings", "Points/item", "Total Deducted"]]
-        for sev, info in deductions.items():
-            color = SEVERITY_COLORS.get(sev, HexColor("#64748B"))
-            rows.append([
-                Paragraph(f'<font color="{color.hexval()}"><b>{sev.upper()}</b></font>', styles["table_cell"]),
-                Paragraph(str(info["count"]),      styles["table_cell"]),
-                Paragraph(str(info["per_item"]),   styles["table_cell"]),
-                Paragraph(f'<b>-{info["total"]}</b>', styles["table_cell"]),
-            ])
-        t2 = Table(rows, colWidths=[40*mm, 30*mm, 35*mm, 50*mm])
+    # Complete, reconciling deduction table: every component that moves the score
+    # (per-severity findings, secrets, attack-chain penalty, good-practice bonuses)
+    # so Σ(rows) == 100 − final score. Nothing that affects the score is invisible.
+    rows = [["Item", "Findings", "Points/item", "Total"]]
+    for sev, info in deductions.items():
+        color = SEVERITY_COLORS.get(sev, HexColor("#64748B"))
+        rows.append([
+            Paragraph(f'<font color="{color.hexval()}"><b>{sev.upper()}</b></font>', styles["table_cell"]),
+            Paragraph(str(info["count"]),      styles["table_cell"]),
+            Paragraph(str(info["per_item"]),   styles["table_cell"]),
+            Paragraph(f'<b>-{info["total"]}</b>', styles["table_cell"]),
+        ])
+    if secret_ded:
+        rows.append([
+            Paragraph("<b>Secrets</b>", styles["table_cell"]),
+            Paragraph("—", styles["table_cell"]),
+            Paragraph("—", styles["table_cell"]),
+            Paragraph(f'<b>-{secret_ded}</b>', styles["table_cell"]),
+        ])
+    if chain_pen:
+        rows.append([
+            Paragraph("<b>Attack-chain penalty</b>", styles["table_cell"]),
+            Paragraph("—", styles["table_cell"]),
+            Paragraph("—", styles["table_cell"]),
+            Paragraph(f'<b>-{chain_pen}</b>', styles["table_cell"]),
+        ])
+    if total_bonus:
+        rows.append([
+            Paragraph("<b>Good-practice bonuses</b>", styles["table_cell"]),
+            Paragraph("—", styles["table_cell"]),
+            Paragraph("—", styles["table_cell"]),
+            Paragraph(f'<font color="#16a34a"><b>+{total_bonus}</b></font>', styles["table_cell"]),
+        ])
+    if len(rows) > 1:
+        t2 = Table(rows, colWidths=[45*mm, 25*mm, 35*mm, 50*mm])
         t2.setStyle(_table_style(T))
         story.append(t2)
 
+    # Reconciliation line — the numbers visibly add up to the final score.
+    computed = max(0, min(100, 100 - total_ded + total_bonus))
+    recon = (f'Base <b>100</b>  −  total deductions <b>{total_ded}</b>  +  '
+             f'total bonus <b>{total_bonus}</b>  =  <b>{computed}</b>/100  '
+             f'(final score: <b>{score_val}</b>/100)')
+    if computed != score_val:
+        recon += "  — clamped to the 0–100 range."
+    story.append(Spacer(1, 3*mm))
+    story.append(Paragraph(recon, styles["caption"]))
+
     if bonuses:
-        story.append(Spacer(1, 3*mm))
+        story.append(Spacer(1, 2*mm))
         bonus_text = "Good practices detected: " + ", ".join(f'{b[0]} (+{b[1]})' for b in bonuses)
         story.append(Paragraph(bonus_text, styles["caption"]))
 

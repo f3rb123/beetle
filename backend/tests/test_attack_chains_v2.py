@@ -143,7 +143,8 @@ def test_hardcoded_secret_abuse():
 
 def test_backup_debuggable_storage_crypto():
     backup = _by_type(_chains([F("android:allowBackup is true", "Configuration", cid="bk")]), "Backup Abuse")
-    dbg = _by_type(_chains([F("Application is debuggable", "Configuration", cid="db")]), "Debuggable Abuse")
+    dbg = _by_type(_chains([F("Application is debuggable", "Configuration", cid="db",
+                               rule_id="manifest_debuggable")]), "Debuggable Abuse")
     store = _by_type(_chains([F("Sensitive data in SharedPreferences", "Data Storage", cid="st")]),
                      "Insecure Storage")
     crypto = _by_type(_chains([F("Weak cipher MD5 used", "Cryptography", cid="cr",

@@ -204,7 +204,16 @@ def tag_capabilities(f: dict, results: dict | None = None) -> set:
         caps.add("INSECURE_STORAGE")
     if "allowbackup" in blob or "backup enabled" in blob or "backup allowed" in blob:
         caps.add("BACKUP")
-    if "debuggable" in blob:
+    # DEBUGGABLE only when the app is ACTUALLY debuggable — never from a textual
+    # mention (e.g. a "not declared" breadcrumb). Absent android:debuggable
+    # defaults to false. Mirrors the allowBackup discipline: real =true only,
+    # resolved from the authoritative manifest_security state, not the blob.
+    _dbg_state = ""
+    if results is not None:
+        _dbg_state = str(
+            ((results.get("manifest_security") or {}).get("debuggable") or {}).get("state") or ""
+        ).lower()
+    if rule_id == "manifest_debuggable" or ("debuggable" in blob and _dbg_state == "true"):
         caps.add("DEBUGGABLE")
     if cat == "binary hardening" or str(f.get("file_path") or "").endswith((".so", ".dylib")):
         caps.add("NATIVE")
