@@ -151,6 +151,62 @@ function legacyView(finding) {
   }
 }
 
+// ── chain evidence normalization ──────────────────────────────────────────────
+// Attack-chain (is_attack_chain) findings aggregate evidence differently from
+// regular findings: evidence_references[] ({file, line, evidence_id}) and per-step
+// steps[].evidence ("path:line" strings), with affected_files[] as a last resort —
+// NOT the regular file_path/file_evidence[].line shape. These helpers translate the
+// chain shape into the same (file, line) targets the code viewer jumps to, so
+// view-code on a chain (and each of its steps) lands on the exact line.
+
+// Parse a step's "path:line" (or bare "path") evidence string into {file, line}.
+export function parseStepEvidence(ev) {
+  if (typeof ev !== 'string') return null
+  const s = ev.trim()
+  if (!s) return null
+  const m = s.match(/^(.*):(\d+)$/)   // trailing :<line> (greedy path allows drive-less paths)
+  if (m) return { file: m[1], line: num(m[2]) }
+  return { file: s, line: 0 }
+}
+
+// Ordered, de-duplicated (file, line, snippet, source) viewer targets for a chain
+// finding. evidence_references first (they carry the corrected file + line), then
+// each step's own evidence, then affected_files (no line → graceful "open file").
+export function chainEvidenceTargets(finding) {
+  const f = finding || {}
+  const out = []
+  const seen = new Set()
+  const add = (file, line, snippet, source) => {
+    if (!file) return
+    const ln = num(line)
+    const key = ln ? `${file}#${ln}` : `${file}#${source}`
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push({ file, line: ln, snippet: snippet || '', source })
+  }
+  for (const r of (Array.isArray(f.evidence_references) ? f.evidence_references : [])) {
+    if (r && r.file) add(r.file, r.line, r.evidence_id, 'chain evidence')
+  }
+  for (const s of (Array.isArray(f.steps) ? f.steps : [])) {
+    const t = parseStepEvidence(s && s.evidence)
+    if (t) add(t.file, t.line, (s && (s.title || s.description)) || '', 'chain step')
+  }
+  if (!out.length) {
+    for (const p of (Array.isArray(f.affected_files) ? f.affected_files : [])) {
+      if (p) add(p, 0, '', 'chain file')   // no line — viewer opens the file, no jump
+    }
+  }
+  return out
+}
+
+// The single primary (file, line) target for a chain finding's "View Code":
+// the first reference that carries a real line, else the first target of any kind
+// (file-only → open without jumping), else null when the chain has no proof file.
+export function chainViewerTarget(finding) {
+  const targets = chainEvidenceTargets(finding)
+  return targets.find(t => t.line > 0) || targets[0] || null
+}
+
 // ── trust score (display-only roll-up) ────────────────────────────────────────
 // A single 0-100 "how much should I trust this finding" number from the signals
 // the backend already computed: overall confidence (dominant), fusion corroboration

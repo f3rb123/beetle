@@ -267,6 +267,7 @@ def scan_directory_for_secrets(
     patterns: list = None,
     *,
     corpus: SourceCorpus = None,
+    resource_id_sink: set = None,
 ) -> list:
     """
     Walk base_dir (and extra_dirs) scanning text files for secrets.
@@ -276,7 +277,13 @@ def scan_directory_for_secrets(
     is unchanged). Callers may pass a combined catalog (native + APKLeaks via
     ``secret_catalog.combined()``) to scan ALL sources in this SINGLE walk; each
     returned finding then carries ``provenance`` / ``kind`` for the routing layer.
+
+    Decompiled resource-ID constant classes (R.java, incl. obfuscated ``a.java``)
+    are skipped: their 0x7f resource-ID integers are never secrets. When
+    ``resource_id_sink`` is provided, each skipped class's relative path is added to
+    it so later stages (evidence selection, chains) can exclude it too.
     """
+    from .code_analyzer import is_resource_id_class
     corpus = corpus or SourceCorpus()
     if patterns is None:
         patterns = SECRET_PATTERNS_EVIDENCE
@@ -329,6 +336,13 @@ def scan_directory_for_secrets(
                         continue
                     files_scanned += 1
                     rel_path = relativize_path(fpath, scan_dir)
+                    # A resource-ID constant class (R.java / obfuscated) holds only
+                    # 0x7f resource IDs — never secrets. Skip it, and record it so
+                    # evidence selection / chains never point at it either.
+                    if is_resource_id_class(content):
+                        if resource_id_sink is not None:
+                            resource_id_sink.add(rel_path.replace("\\", "/"))
+                        continue
                     file_findings = scan_file_for_patterns(rel_path, content, patterns)
                     for finding in file_findings:
                         key = f"{finding.get('provenance','')}:{finding['name']}:{finding.get('value','')[:30]}"

@@ -2582,7 +2582,14 @@ def _scan_precise_source_secrets(results: dict, source_dirs: list[str], *, corpu
     from . import secret_catalog
     from .detection_sources import routing, fusion
 
-    hits = ev_secrets("", source_dirs, patterns=secret_catalog.combined(), corpus=corpus or SourceCorpus())
+    # Collect the resource-ID constant classes skipped during the secret walk so
+    # evidence selection / chains can exclude them as proof locations too.
+    res_id_sink: set = set()
+    hits = ev_secrets("", source_dirs, patterns=secret_catalog.combined(),
+                      corpus=corpus or SourceCorpus(), resource_id_sink=res_id_sink)
+    if res_id_sink:
+        existing = set(results.get("resource_id_classes") or [])
+        results["resource_id_classes"] = sorted(existing | res_id_sink)
     native_hits, apk = routing.extract_apkleaks(hits)
     results["secrets"] = _reshape_native_secrets(native_hits)
     fusion.merge_secret_streams(results, apk.secrets)

@@ -45,40 +45,45 @@ def _exploit(results):
     return results["exploitability_score"]
 
 
-def test_high_scored_chain_with_no_factors_does_not_contradict_itself():
-    """The exact reported bug: a chain carrying exploitability=82 whose step titles
-    yield no recognized factors must NOT print an 82 next to a 'no path' sentence."""
+def test_v2_chain_with_no_token_factors_attributes_the_path_not_a_contradiction():
+    """A v2 chain carries the engine's overall_exploitability. Even when its step
+    titles yield no recognized token factors, the number must NOT sit next to a
+    'no externally reachable path' sentence — the path is attributed to the chain."""
     results = {
         "findings": [],
         "high_risk_components": [],
-        "_chain_data": {"attack_chains": [{
-            "title": "Mystery chain", "exploitability": 82,
+        "attack_chains_v2": [{
+            "name": "Mystery chain", "overall_exploitability": 82,
+            "entry_point": {"label": "do a thing"},
             "steps": [{"title": "do a thing"}, {"title": "another thing"}],
-        }]},
+        }],
     }
     es = _exploit(results)
-    # No factors → cannot carry a high score; the candidate is dropped.
-    _check(es["score"] < 60, f"a factorless candidate must not keep a high score, got {es['score']}")
-    _check(not (es["score"] >= 60 and "no externally reachable" in es["reason"]),
-           f"number {es['score']} contradicts sentence: {es['reason']!r}")
+    _check(es["score"] == 82, f"a v2 chain keeps the engine's exploitability, got {es['score']}")
+    _check("no externally reachable" not in es["reason"],
+           f"number {es['score']} must not contradict the sentence: {es['reason']!r}")
+    _check("Mystery chain" in es["reason"], "the path is attributed to the chain")
 
 
 def test_reason_lead_matches_score_bucket_for_real_path():
+    # Exploitability sources its dominant chain from the v2 engine (attack_chains_v2),
+    # naming the displayed #1 chain and carrying the engine's overall_exploitability.
     results = {
         "findings": [],
         "high_risk_components": [{"type": "activity", "short_name": "Main", "browsable": True}],
-        "_chain_data": {"attack_chains": [{
-            "title": "WebView RCE", "exploitability": 5,
-            "steps": [{"title": "Exported browsable activity"},
-                      {"title": "WebView with JavaScript enabled"}],
-        }]},
+        "attack_chains_v2": [{
+            "name": "WebView JavaScript Bridge RCE", "overall_exploitability": 80,
+            "entry_point": {"label": "Attacker delivers a crafted URL to a browsable activity"},
+            "steps": [{"title": "WebView enables JavaScript"},
+                      {"title": "WebView exposes a native JavaScript interface"}],
+        }],
     }
     es = _exploit(results)
     rating, label = P._rating_for(es["score"])
     _check(es["rating"] == rating, f"rating must be the pure bucket of the score: {es['rating']} vs {rating}")
     _check(es["reason"].startswith(label),
            f"sentence lead must match the score bucket label {label!r}: {es['reason']!r}")
-    _check("WebView" in es["reason"], "reason should name the contributing factors")
+    _check("WebView JavaScript Bridge RCE" in es["reason"], "reason should name the #1 v2 chain")
 
 
 def test_no_candidates_yields_zero_and_limited_sentence():

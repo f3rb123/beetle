@@ -46,6 +46,71 @@ _SAST_MATCH_VALIDATORS = {
 }
 
 
+# ── Resource-ID constant class detection (decompiled R.java) ──────────────────
+# A decompiled `R` class (often obfuscated to e.g. N0/a.java) is nothing but
+# `public static final int NAME = 0x7f######;` — Android resource IDs in the
+# 0x7f000000–0x7fffffff range (R.drawable/string/id/layout) — plus int[] styleable
+# arrays. Those integers are never secrets and the class is never app logic, yet a
+# long value like 2130837504 can look like a secret candidate and the class can be
+# picked as chain/secret evidence. This flags such classes so they can be excluded.
+_RES_ID_MIN = 0x7F000000
+_RES_ID_MAX = 0x7FFFFFFF
+_RES_ID_MIN_COUNT = 3            # need a meaningful number of resource-ID constants
+_RES_LOGIC_TOLERANCE = 1         # a stray private ctor is fine; real logic is not
+
+_INT_SCALAR_RE = re.compile(r"\bint\s+\w+\s*=\s*(0x[0-9a-fA-F]+|\d+)\s*;")
+_INT_ARRAY_RE = re.compile(r"\bint\s*\[\s*\]\s+\w+\s*=\s*\{([^}]*)\}\s*;")
+_NUM_RE = re.compile(r"0x[0-9a-fA-F]+|\d+")
+# A generated R class contains NO string literals. Any substantial quoted string
+# means the class holds real data (e.g. a secret) — never treat it as an R class.
+_STR_LITERAL_RE = re.compile(r'"[^"\n]{8,}"')
+# Tokens that indicate real executable logic — absent from a pure constant class.
+_LOGIC_RE = re.compile(
+    r"\b(?:if|for|while|switch|synchronized|throw|catch)\b"
+    r"|\breturn\s+\S"
+    r"|\bnew\s+\w"
+    r"|\.\w+\s*\("
+)
+
+
+def _in_res_range(token: str) -> bool:
+    try:
+        n = int(token, 16) if token.lower().startswith("0x") else int(token)
+    except ValueError:
+        return False
+    return _RES_ID_MIN <= n <= _RES_ID_MAX
+
+
+def is_resource_id_class(source_text: str) -> bool:
+    """True when a class body is dominated by Android resource-ID int constants
+    (values in the 0x7f resource range) and carries essentially no logic — i.e. a
+    decompiled ``R`` class (R.drawable/string/id/layout), even when obfuscated.
+
+    Such a class is never a secret and never app logic, so it must not be a secret
+    candidate or a chain/evidence location."""
+    if not source_text or _STR_LITERAL_RE.search(source_text):
+        return False
+
+    scalars = _INT_SCALAR_RE.findall(source_text)
+    res_scalars = sum(1 for v in scalars if _in_res_range(v))
+
+    res_arrays = 0
+    for body in _INT_ARRAY_RE.findall(source_text):
+        vals = _NUM_RE.findall(body)
+        if vals and all(_in_res_range(v) for v in vals):
+            res_arrays += 1
+
+    res_ids = res_scalars + res_arrays
+    if res_ids < _RES_ID_MIN_COUNT:
+        return False
+    # Nearly every scalar int constant must be a resource ID (a real class with
+    # numeric config would have non-0x7f ints and drop this ratio).
+    if scalars and res_scalars / len(scalars) < 0.8:
+        return False
+    # And the class must carry no meaningful executable logic.
+    return len(_LOGIC_RE.findall(source_text)) <= _RES_LOGIC_TOLERANCE
+
+
 # ── Raw-SQL severity resolution (android_sqlite_raw_query) ────────────────────
 # rawQuery/execSQL/compileStatement fire on EVERY raw query, including safe
 # parameterized calls like rawQuery("… WHERE id = ?", args). HIGH must require

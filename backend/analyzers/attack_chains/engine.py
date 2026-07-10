@@ -63,6 +63,29 @@ _EXTERNAL_SOURCE_CATS = frozenset(("user input", "intent", "contentprovider", "c
 
 PROOF_PROVEN, PROOF_HEURISTIC, PROOF_MANIFEST = "proven", "heuristic", "manifest-only"
 
+_LAUNCHER_ACTION = "android.intent.action.main"
+_LAUNCHER_CATEGORY = "android.intent.category.launcher"
+
+
+def _is_launcher_only_activity(c: dict) -> bool:
+    """An exported activity whose ONLY intent-filter action is MAIN (the home-screen
+    launcher entry). Such an activity is reachable from the launcher, NOT
+    attacker-deliverable IPC — a malicious app cannot 'send it an intent' as an
+    injection entry point, so it must not satisfy an EXPORTED/DEEPLINK entry cap.
+
+    A MAIN activity that ALSO exposes a deep link (browsable / a scheme / a non-MAIN
+    action) is genuinely reachable and is NOT treated as launcher-only."""
+    if not isinstance(c, dict):
+        return False
+    if c.get("browsable") or c.get("schemes") or c.get("deeplinks"):
+        return False
+    actions = {str(a).strip().lower() for a in (c.get("actions") or []) if str(a).strip()}
+    if actions:
+        return not (actions - {_LAUNCHER_ACTION})   # only MAIN → launcher-only
+    # No declared action, but flagged with the LAUNCHER category → still launcher-only.
+    cats = {str(x).strip().lower() for x in (c.get("categories") or []) if str(x).strip()}
+    return _LAUNCHER_CATEGORY in cats
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Capability tagging (deterministic) + eligibility
@@ -82,11 +105,35 @@ _STRUCTURAL_CAPS = frozenset(("WEBVIEW", "WEBVIEW_JS", "JS_INTERFACE", "WEBVIEW_
                               "NATIVE", "NETWORK"))
 
 
-def tag_capabilities(f: dict) -> set:
-    """Deterministic capability tags for a finding (the chaining vocabulary)."""
+# CERT_BYPASS requires POSITIVE evidence of actually-disabled TLS validation. A
+# method that merely forwards a passed-in factory (setSSLSocketFactory / setSSLContext
+# pass-through) is NOT a bypass, so neither the bare setter token nor a generic
+# "certificate validation" mention qualifies.
+_CERT_BYPASS_RULE_IDS = frozenset((
+    "android_webview_ignore_ssl",             # onReceivedSslError → handler.proceed()
+    "android_trust_all_certs",                # custom X509TrustManager accepts all
+    "android_trust_manager_accept_all",       # empty checkServerTrusted body
+    "android_allow_all_hostname",             # AllowAllHostnameVerifier
+    "android_smali_insecure_hostname_verifier",
+))
+_CERT_BYPASS_TOKENS = (
+    "allowallhostnameverifier", "allow_all_hostname", "nullhostnameverifier",
+    "trustallcerts", "trust all cert", "trust-all", "trustall",
+    "accepts all cert", "accept all cert", "nooptrustmanager",
+    "onreceivedsslerror", "setdefaulthostnameverifier",
+)
+
+
+def tag_capabilities(f: dict, results: dict | None = None) -> set:
+    """Deterministic capability tags for a finding (the chaining vocabulary).
+
+    ``results`` (when supplied) lets state-dependent caps consult the authoritative
+    ``security_controls`` resolution — e.g. CLEARTEXT is never tagged when cleartext
+    is resolved to ``blocked``."""
     caps: set = set()
     cat = (f.get("category") or "").lower()
     blob = _blob(f)
+    rule_id = str(f.get("rule_id") or f.get("id") or "")
     tf = f.get("taint_flow") or {}
     sink = str(tf.get("sink_cat") or "").replace(" ", "").lower()
     src = str(tf.get("source_cat") or "").lower()
@@ -132,13 +179,18 @@ def tag_capabilities(f: dict) -> set:
         if "token" in st or "jwt" in st or "bearer" in blob or "session" in blob:
             caps.add("TOKEN")
     # Network / crypto / cert
+    # CLEARTEXT only when cleartext is ACTUALLY permitted: never when the
+    # authoritative resolution says it's blocked, and only for a finding that
+    # ASSERTS it's permitted (not one that says it's disabled, and not a mere
+    # mention). Reuses the security_controls negation guard.
     if "cleartext" in blob:
-        caps.add("CLEARTEXT")
-    # CERT_BYPASS requires evidence of DISABLED validation — never a generic
-    # certificate finding (a debug cert, or "pinning detected", is not a bypass).
-    if any(k in blob for k in ("certificate validation", "trustmanager", "trust all",
-                               "trustall", "onreceivedsslerror", "hostnameverifier",
-                               "allow_all_hostname", "disable ssl", "ignore ssl")):
+        blocked = results is not None and security_controls.state_of(results, "cleartext") == "blocked"
+        if not blocked and security_controls.finding_asserts_absent(f, "cleartext"):
+            caps.add("CLEARTEXT")
+    # CERT_BYPASS requires POSITIVE evidence of disabled validation (a trust-all
+    # TrustManager, an allow-all HostnameVerifier, an onReceivedSslError that
+    # proceeds, …) — a pass-through setSSLSocketFactory/setSSLContext does not qualify.
+    if rule_id in _CERT_BYPASS_RULE_IDS or any(t in blob for t in _CERT_BYPASS_TOKENS):
         caps.add("CERT_BYPASS")
     if cat == "network security":
         caps.add("NETWORK")
@@ -201,13 +253,20 @@ class ChainContext:
         # from chain membership.
         self.taint_flows: list[dict] = self._collect_taint_flows(results)
 
+        # Launcher-only (MAIN/LAUNCHER) activities are the home entry, not
+        # attacker-deliverable IPC — never an injection/RCE external entry.
+        self._launcher_only_names = {
+            c.get("name") for c in (self.surface.get("activities") or [])
+            if isinstance(c, dict) and c.get("name") and _is_launcher_only_activity(c)
+        }
+
         # Tag + role each finding once (deterministic).
         self.tagged: list[dict] = []
         for f in self.findings:
             role = chain_role(f)
             if role == "excluded":
                 continue
-            self.tagged.append({"f": f, "caps": tag_capabilities(f), "role": role,
+            self.tagged.append({"f": f, "caps": tag_capabilities(f, results), "role": role,
                                 "id": _finding_id(f)})
         # Stable ordering: strongest first (confidence, then evidence), then id.
         self.tagged.sort(key=lambda t: (-_conf(t["f"]), C.EVIDENCE_RANK.get(_equality(t["f"]), 4), t["id"]))
@@ -274,12 +333,18 @@ class ChainContext:
             return ({"label": template.entry_label, "kind": "external",
                      "component": comp["name"], "reachable": True}, "external_reachable")
         ft = self._first_with_caps(template.entry_caps)
-        if ft and self._is_app_entry(ft["f"].get("component") or ft["f"].get("title", "")):
-            reach = str(ft["f"].get("reachability") or "").upper()
-            key = "external_reachable" if reach == "YES" else "external"
-            return ({"label": template.entry_label, "kind": "external",
-                     "component": ft["f"].get("component") or ft["f"].get("title", ""),
-                     "reachable": reach in ("YES", "MAYBE", "")}, key)
+        if ft:
+            comp_name = ft["f"].get("component") or ft["f"].get("title", "")
+            # Reject a launcher-only activity here too: it is not attacker-deliverable
+            # IPC even when a finding references it (Part B).
+            if (self._is_app_entry(comp_name)
+                    and ft["f"].get("component") not in self._launcher_only_names
+                    and not _is_launcher_only_activity(ft["f"])):
+                reach = str(ft["f"].get("reachability") or "").upper()
+                key = "external_reachable" if reach == "YES" else "external"
+                return ({"label": template.entry_label, "kind": "external",
+                         "component": comp_name,
+                         "reachable": reach in ("YES", "MAYBE", "")}, key)
         return None, ""
 
     def _surface_entry(self, caps: frozenset) -> dict | None:
@@ -295,6 +360,11 @@ class ChainContext:
                     continue
                 name = c.get("name", key)
                 if not self._is_app_entry(name):
+                    continue
+                # A launcher-only activity (MAIN/LAUNCHER) is the home entry, not
+                # attacker-deliverable IPC — it never satisfies an injection/RCE
+                # EXPORTED/DEEPLINK entry (Part B). Skip it as a candidate entry.
+                if key == "activities" and _is_launcher_only_activity(c):
                     continue
                 if want_provider and key == "providers":
                     return {"name": name, "type": key}
@@ -470,8 +540,15 @@ def _aggregate_evidence(findings: list[dict]):
         # Phase 1.97: prefer the Evidence Selection primary (application-owned, not a
         # framework/library file) so chains never present a library-only node as
         # proof. Falls back to the evidence bundle / file_path when selection is absent.
-        sel_file, _sel_line, _sel_snip = _selection_primary(f)
-        fp = sel_file or prim.get("relative_path") or prim.get("file_path") or f.get("file_path")
+        sel_file, sel_line, _sel_snip = _selection_primary(f)
+        # File AND line must come from the SAME source: when selection corrected the
+        # file, its line must accompany it (the bundle line belongs to the old file).
+        # This is what lets "view code" on a chain land on the exact evidence line.
+        if sel_file:
+            fp, line = sel_file, sel_line
+        else:
+            fp = prim.get("relative_path") or prim.get("file_path") or f.get("file_path")
+            line = prim.get("line") or f.get("line") or f.get("line_number")
         if fp and fp not in files:
             files.append(fp)
         loc = prim.get("locator") or {}
@@ -479,9 +556,14 @@ def _aggregate_evidence(findings: list[dict]):
             classes.append(loc["class"])
         if loc.get("method") and loc["method"] not in methods:
             methods.append(loc["method"])
-        if eb.get("evidence_id"):
-            refs.append({"finding": _finding_id(f), "evidence_id": eb["evidence_id"],
-                         "file": fp, "line": prim.get("line")})
+        # Emit a reference whenever we have a proof file so the chain carries a
+        # per-member (file, line) the viewer can jump to. When no line is known,
+        # carry None so the frontend omits the jump gracefully rather than opening
+        # at the top with no indication.
+        if fp:
+            refs.append({"finding": _finding_id(f),
+                         "evidence_id": eb.get("evidence_id") or f"EV-{_finding_id(f)}",
+                         "file": fp, "line": (line or None)})
     return files, classes, methods, refs
 
 
@@ -526,19 +608,36 @@ def _build_narrative(template, entry: dict, required: list[dict], goal_label: st
     steps = [{"order": 1, "title": "Entry point", "description": entry.get("label", ""),
               "finding": "", "evidence": entry.get("component", "")}]
     for i, f in enumerate(required):
-        eb = f.get("evidence_bundle") or {}
-        prim = eb.get("primary") or {}
-        ev = ""
-        if prim.get("relative_path") or prim.get("file_path"):
-            ev = (prim.get("relative_path") or prim.get("file_path"))
-            if prim.get("line"):
-                ev += f":{prim['line']}"
+        # Per-step evidence targets THIS step's own file:line, from the same
+        # (corrected) Evidence Selection primary the aggregated references use — so a
+        # step's "view code" lands on its exact line, not a stale bundle location.
+        sel_file, sel_line, _ = _selection_primary(f)
+        if sel_file:
+            ev = f"{sel_file}:{sel_line}" if sel_line else sel_file
+        else:
+            eb = f.get("evidence_bundle") or {}
+            prim = eb.get("primary") or {}
+            ev = ""
+            fp = prim.get("relative_path") or prim.get("file_path") or f.get("file_path")
+            if fp:
+                ln = prim.get("line") or f.get("line") or f.get("line_number")
+                ev = f"{fp}:{ln}" if ln else fp
         label = template.slot_labels[i] if i < len(template.slot_labels) else f.get("title", "")
         steps.append({"order": i + 2, "title": label, "description": f.get("title", ""),
                       "finding": _finding_id(f), "evidence": ev})
     steps.append({"order": len(required) + 2, "title": "Objective achieved",
                   "description": goal_label, "finding": "", "evidence": ""})
     return steps
+
+
+def _template_suppressed_by_controls(tmpl, results: dict) -> bool:
+    """Authoritative-state veto: a template must never be emitted when the security
+    control it depends on contradicts it. The CLEARTEXT-MITM-TOKEN chain cannot exist
+    when cleartext is resolved to ``blocked`` (usesCleartextTraffic="false" / NSC
+    cleartextTrafficPermitted="false"). Belt-and-suspenders to the CLEARTEXT cap gate."""
+    if tmpl.id == "CLEARTEXT-MITM-TOKEN":
+        return security_controls.state_of(results, "cleartext") == "blocked"
+    return False
 
 
 def _summary_counts(findings: list[dict], key_path) -> dict:
@@ -566,6 +665,8 @@ class AttackChainEngine:
         emitted_member_sets: list[frozenset] = []
 
         for tmpl in self._templates:
+            if _template_suppressed_by_controls(tmpl, results):
+                continue
             entry, reach_key = ctx.entry_point(tmpl)
             if entry is None:
                 continue

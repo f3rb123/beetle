@@ -438,20 +438,73 @@ def build_explanation(finding: dict) -> dict:
 
 
 # ─── Attack-chain explanation (Task 3) ───────────────────────────────────────
+def _cloud_exposure_confirmed(chain: dict) -> bool:
+    """True only when an ACTUAL public exposure of the linked asset was confirmed by
+    a probe (live_checks / cloud probe: validation_result == 'valid'), or a component
+    carries a confirmed exposure state. Extracting a credential from an APK is NOT an
+    exposure — the "confirmed public exposure → cloud data access" narrative must
+    never be asserted without this signal."""
+    if chain.get("validated") is True or str(chain.get("validation_result") or "").lower() == "valid":
+        return True
+    if chain.get("exposure_confirmed") is True or chain.get("public_exposure_confirmed") is True:
+        return True
+    for c in chain.get("components") or []:
+        if isinstance(c, dict):
+            kind = str(c.get("kind") or "").lower()
+            state = str(c.get("state") or "").lower()
+            if kind in ("exposure", "validation") and state in ("valid", "confirmed", "public", "open", "exposed"):
+                return True
+    return False
+
+
 def build_chain_explanation(chain: dict) -> dict:
+    """Explanation for a CLOUD attack path (results['cloud_attack_paths']).
+
+    The "credential + confirmed public exposure → reachable cloud data access"
+    narrative is asserted ONLY when the exposure is actually confirmed by a probe.
+    Otherwise the path is described honestly as an extractable credential (a
+    credential-hygiene issue), never fabricating the exposure step."""
     provider = chain.get("provider", "cloud")
     confidence = chain.get("confidence", "MEDIUM")
     steps = [c.get("label", "") for c in chain.get("components", []) if c.get("label")]
     flow = " → ".join(steps) if steps else chain.get("summary", "")
-    validated = any(c.get("kind") == "validation" and c.get("state") == "valid"
-                    for c in chain.get("components", []))
     title = chain.get("title", "this attack path")
-    why = (
-        f"{title}: {flow}. "
-        f"A {provider} credential recovered from the app combines with a confirmed public "
-        f"exposure, so an attacker moves from a string in the binary to actual data access "
-        f"with no device and no user — a chain that is materially worse than any of its steps alone."
-    )
+    exposure_confirmed = _cloud_exposure_confirmed(chain)
+
+    if exposure_confirmed:
+        why = (
+            f"{title}: {flow}. "
+            f"A {provider} credential recovered from the app combines with a confirmed public "
+            f"exposure, so an attacker moves from a string in the binary to actual data access "
+            f"with no device and no user — a chain that is materially worse than any of its steps alone."
+        )
+        attack_scenario = (
+            f"Attacker extracts the {provider} credential from the app bundle, confirms the linked "
+            f"public exposure, and reads the exposed data directly from the internet."
+        )
+        prerequisites = ["Credential recoverable from the app bundle",
+                         "Linked cloud asset is publicly reachable"]
+        impact = "Direct disclosure (or, for public write, modification) of cloud-hosted data."
+        fp_notes = ("The exposure was probe-confirmed; this is a proven data-exposure path, "
+                    "not merely a credential-hygiene issue.")
+    else:
+        why = (
+            f"{title}: {flow}. "
+            f"A {provider} credential is extractable from the distributed app. No public exposure of a "
+            f"linked asset has been confirmed, so this is a credential-hygiene issue — treat the key as "
+            f"compromised and rotate it — NOT a proven path to cloud data access."
+        )
+        attack_scenario = (
+            f"Attacker unpacks the distributed app and recovers the {provider} credential. Whether it "
+            f"grants access depends on the credential's scope and the backend's controls; no reachable "
+            f"public exposure has been confirmed."
+        )
+        prerequisites = ["Credential recoverable from the app bundle"]
+        impact = ("Exposure of an embedded credential; real-world impact depends on the key's scope "
+                  "and server-side controls (no confirmed public data exposure).")
+        fp_notes = ("No public exposure was confirmed. Do not assert reachable cloud data access — "
+                    "rotate the key and verify its server-side scope.")
+
     conf_reason = (
         "Confidence HIGH: the credential was validated AND the exposure was confirmed by a read-only probe."
         if confidence == "HIGH" else
@@ -463,23 +516,142 @@ def build_chain_explanation(chain: dict) -> dict:
         "title": chain.get("title", "Cloud Attack Path"),
         "category_template": "ATTACK_CHAIN",
         "why_it_matters": why,
-        "attack_scenario": (
-            f"Attacker extracts the {provider} credential from the app bundle, confirms the linked "
-            f"public exposure, and reads the exposed data directly from the internet."
-        ),
-        "prerequisites": ["Credential recoverable from the app bundle",
-                          "Linked cloud asset is publicly reachable"],
-        "impact": "Direct disclosure (or, for public write, modification) of cloud-hosted data.",
+        "attack_scenario": attack_scenario,
+        "prerequisites": prerequisites,
+        "impact": impact,
+        "exposure_confirmed": exposure_confirmed,
         "remediation": {
             "summary": "Rotate the credential, lock down the exposed asset's access policy/rules, and move secret material server-side.",
             "masvs": "MASVS-NETWORK-1", "owasp": "M8",
         },
         "references": ["OWASP MASVS-STORAGE-2", "OWASP Mobile Top 10 M8"],
-        "false_positive_notes": (
-            "If the exposure was not confirmed (LOW chain), this is a credential-hygiene issue, "
-            "not a proven data-exposure path."
-        ),
+        "false_positive_notes": fp_notes,
         "confidence_reason": conf_reason,
+    }
+
+
+# ─── V2 attack-chain explanation (engine-built chains, NOT cloud paths) ──────
+def is_v2_chain(chain: dict) -> bool:
+    """A v2 (engine-built) attack chain, distinguished from a cloud_attack_path by
+    the engine's own fields: reachability_proof / entry_point / overall_confidence /
+    ordered steps. Cloud paths instead carry provider + linked components."""
+    return bool(
+        "reachability_proof" in chain
+        or "entry_point" in chain
+        or "overall_confidence" in chain
+        or chain.get("steps")
+    )
+
+
+def is_cloud_path(chain: dict) -> bool:
+    """A cloud attack path: a provider credential linked to components, with none of
+    the v2 engine fields. Only these may use the cloud narrative."""
+    return (not is_v2_chain(chain)
+            and bool(chain.get("provider"))
+            and bool(chain.get("components")))
+
+
+# Reachability-proof → the honest phrase used in the v2 confidence sentence.
+_PROOF_PHRASE = {
+    "proven": "a taint flow links external input to the sink (data-flow proven)",
+    "heuristic": "reachability is heuristic — required capabilities co-occur but no "
+                 "data-flow was proven",
+    "manifest-only": "reachability rests on manifest/config declarations, not a "
+                     "proven data-flow",
+}
+
+# Generic bookend step titles the engine adds around the real links; dropped from
+# the scenario so it reads as the chain's actual steps.
+_GENERIC_STEP_TITLES = {"entry point", "objective achieved"}
+
+
+def _v2_confidence_reason(chain: dict) -> str:
+    """Confidence sentence from the chain's OWN proof signals — member confidence,
+    member evidence quality and reachability_proof — never the cloud PII/credential/
+    exposure rubric."""
+    conf = chain.get("overall_confidence")
+    if conf is None:
+        conf = chain.get("confidence_score") or chain.get("confidence")
+    label = chain.get("chain_confidence") or _band(conf)
+
+    parts: list[str] = []
+    whyc = (chain.get("confidence_explanation") or {}).get("why_confidence") or {}
+    mmc = whyc.get("mean_member_confidence")
+    mme = whyc.get("mean_member_evidence")
+    if mmc is not None:
+        try:
+            parts.append(f"required links average {int(round(float(mmc)))}% member confidence")
+        except (TypeError, ValueError):
+            pass
+    if mme is not None:
+        try:
+            parts.append(f"average member evidence score {int(round(float(mme)))}")
+        except (TypeError, ValueError):
+            pass
+    proof = str(chain.get("reachability_proof") or "").lower()
+    if proof in _PROOF_PHRASE:
+        parts.append(_PROOF_PHRASE[proof])
+    if chain.get("blocked"):
+        blockers = ", ".join(str(b) for b in (chain.get("blocked_by") or [])) or "a security control"
+        parts.append(f"a mitigation ({blockers}) partially breaks the chain")
+    joined = "; ".join(parts) if parts else "scored from member confidence, evidence quality and reachability"
+    return f"Confidence {label}: {joined}."
+
+
+def build_v2_chain_explanation(chain: dict) -> dict:
+    """Analyst explanation for a v2 attack chain, built from the chain's OWN
+    summary / overall_impact / steps / entry_point / confidence_explanation. Each
+    chain describes ITS OWN type — never the fixed cloud-exfiltration narrative."""
+    title = chain.get("title") or chain.get("name") or "Attack Chain"
+    summary = str(chain.get("summary") or chain.get("description") or "").strip()
+    impact = str(chain.get("overall_impact") or chain.get("impact") or "").strip()
+
+    why = summary
+    if impact and impact.lower() not in why.lower():
+        why = f"{why} Impact: {impact}" if why else impact
+    if not why:
+        why = f"{title}: a correlated, multi-step attack path assembled from evidenced findings."
+
+    # attack_scenario = the real entry point followed by the ordered step titles,
+    # deduplicated and without the generic bookend labels.
+    entry = chain.get("entry_point") or {}
+    entry_label = str(entry.get("label") or entry.get("component") or "").strip()
+    scenario_bits: list[str] = [entry_label] if entry_label else []
+    for s in (chain.get("steps") or chain.get("narrative") or []):
+        if isinstance(s, dict):
+            t = str(s.get("title") or "").strip()
+            if t and t.lower() not in _GENERIC_STEP_TITLES:
+                scenario_bits.append(t)
+    seen: set = set()
+    ordered_bits = [b for b in scenario_bits if not (b in seen or seen.add(b))]
+    attack_scenario = " → ".join(ordered_bits) if ordered_bits else why
+
+    proof = str(chain.get("reachability_proof") or "").lower()
+    fp_note = {
+        "proven": "Reachability is data-flow proven; this is a concrete path, not co-occurrence.",
+        "heuristic": "Reachability is heuristic — the links co-occur but no data-flow was "
+                     "proven; confirm the path before reporting.",
+        "manifest-only": "Reachability is inferred from manifest/config only; verify the "
+                         "runtime path before treating the chain as proven.",
+    }.get(proof, "Confirm each required link participates before treating the chain as proven.")
+
+    return {
+        "title": title,
+        "category_template": "ATTACK_CHAIN_V2",
+        "why_it_matters": why,
+        "attack_scenario": attack_scenario,
+        "prerequisites": list(chain.get("prerequisites") or []),
+        "impact": impact or "Compromise achieved by chaining the required findings.",
+        "remediation": {
+            "summary": (chain.get("recommendation")
+                        or "Break the chain by remediating any one required link; "
+                           "prioritise the highest-severity step."),
+            "masvs": chain.get("masvs", ""),
+            "owasp": chain.get("owasp", ""),
+        },
+        "references": ["OWASP Mobile Top 10"],
+        "false_positive_notes": fp_note,
+        "confidence_reason": _v2_confidence_reason(chain),
     }
 
 
@@ -528,7 +700,13 @@ def annotate(results: dict) -> dict:
     findings = [f for f in (results.get("findings") or []) if isinstance(f, dict)]
     for f in findings:
         if f.get("is_attack_chain"):
-            f["analyst_explanation"] = build_chain_explanation(f)
+            # v2 (engine) chains carry their own type-correct summary/steps/impact and
+            # must NOT be narrated with the cloud-exfiltration template. The cloud
+            # narrative is reserved for genuine cloud_attack_paths below.
+            f["analyst_explanation"] = (
+                build_chain_explanation(f) if is_cloud_path(f)
+                else build_v2_chain_explanation(f)
+            )
         else:
             f["analyst_explanation"] = build_explanation(f)
 

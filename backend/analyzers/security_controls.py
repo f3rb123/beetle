@@ -74,6 +74,7 @@ __all__ = [
     "corpus_asserts",
     "state_of",
     "is_present",
+    "finding_asserts_absent",
 ]
 
 # ── States ───────────────────────────────────────────────────────────────────
@@ -149,7 +150,7 @@ _SPECS: tuple = (
         }),
         positive_titles=("cleartext disabled", "cleartext traffic blocked"),
         negative_titles=("cleartext http traffic permitted", "cleartext http permitted",
-                         "permits cleartext", "cleartext permitted",
+                         "cleartext traffic permitted", "permits cleartext", "cleartext permitted",
                          "app transport security disabled"),
         code_patterns=('cleartexttrafficpermitted="false"', 'usescleartexttraffic="false"'),
         present_state=BLOCKED,
@@ -451,3 +452,18 @@ def is_present(results: dict, control: str) -> bool:
     cannot be relied on to block an attack chain.
     """
     return state_of(results, control) in (PRESENT, BLOCKED)
+
+
+def finding_asserts_absent(finding: dict, control: str) -> bool:
+    """Does THIS finding assert `control` is absent (NEGATIVE evidence)?
+
+    Reuses the exact rule-id / assertive-title / negation-guard logic ``resolve``
+    uses, so callers get one consistent notion of "asserts the control is missing".
+    For ``cleartext`` the control's job is to BLOCK, so NEGATIVE == cleartext is
+    ALLOWED — i.e. this returns True for a finding that asserts cleartext is
+    permitted, and False for one that says it is disabled or merely mentions it.
+    """
+    spec = _BY_KEY.get(control)
+    if not spec or not isinstance(finding, dict):
+        return False
+    return any(e["polarity"] == NEGATIVE for e in _finding_evidence(spec, [finding]))

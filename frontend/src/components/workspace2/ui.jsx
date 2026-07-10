@@ -1,5 +1,6 @@
 // Shared atoms + data helpers for the Phase 13 workspace. Presentation only.
 import { useEffect } from 'react'
+import { chainEvidenceTargets } from './evidence-model.js'
 
 export const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info']
 export const SEV_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
@@ -150,6 +151,15 @@ export function buildEvidence(finding) {
       className: classFromPath(path),
       titleKeywords: kws,
     })
+  }
+  // 0. Chain findings aggregate evidence as evidence_references[] + steps[].evidence,
+  // not the regular file_path/file_evidence shape. Normalize them so "View Code"
+  // lands on the exact line like a regular finding (each step's own file:line).
+  if (f.is_attack_chain || f.in_attack_chain) {
+    for (const t of chainEvidenceTargets(f)) {
+      push({ path: t.file, lineStart: t.line || null, lineEnd: t.line || null, snippet: t.snippet, source: 'chain evidence' })
+    }
+    if (out.length) return out   // a chain's proof is its references/steps, nothing else
   }
   // 1. Analyst evidence_locations — most precise (carry true ranges).
   for (const l of (Array.isArray(ex.evidence_locations) ? ex.evidence_locations : [])) {

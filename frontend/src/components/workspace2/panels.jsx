@@ -21,7 +21,7 @@ import {
 import {
   getEvidenceView, detectionSources, trustScore, trustBand, confidenceContributions,
   reachabilityLabel, matchesFilters, findingDetectionSourceSet, findingFrameworkSet,
-  OWNERSHIP_OPTIONS,
+  OWNERSHIP_OPTIONS, parseStepEvidence,
 } from './evidence-model.js'
 import { useWorkspaceNav } from './workspace-context.jsx'
 
@@ -1013,7 +1013,17 @@ export function ChainsPanel({ results, onOpenCode }) {
       {chains.map((c, i) => {
         const ex = c.analyst_explanation || {}
         const comps = c.components || []
-        const steps = comps.length ? comps : (c.call_chain || []).map(s => ({ label: s, kind: 'step' }))
+        // Cloud paths carry components (with file/line); v2 chain findings carry
+        // steps[] whose evidence is a "path:line" string — parse each so a step's
+        // own file:line drives its View Code, not the chain's first file.
+        const steps = comps.length ? comps
+          : (Array.isArray(c.steps) && c.steps.length
+              ? c.steps.map(s => {
+                  const t = parseStepEvidence(s.evidence)
+                  return { label: s.title || s.description || '', kind: s.type,
+                           file: t ? t.file : '', line: t ? t.line : 0 }
+                })
+              : (c.call_chain || []).map(s => ({ label: s, kind: 'step' })))
         return (
           <div key={i} className="ws-chain">
             <div className="ws-chain__head">
