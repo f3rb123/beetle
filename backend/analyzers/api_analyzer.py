@@ -2,6 +2,8 @@ import re
 import os
 from .tracker_db import ANDROID_API_CATEGORIES
 from .path_utils import normalize_relative_path
+from .source_corpus import SourceCorpus, printable_text
+from . import regex_prefilter
 
 
 EMAIL_PATTERN = re.compile(
@@ -42,7 +44,7 @@ def _is_valid_email_candidate(email: str) -> bool:
     return True
 
 
-def analyze_android_apis(tmpdir: str, results: dict, source_dirs=None):
+def analyze_android_apis(tmpdir: str, results: dict, source_dirs=None, *, corpus: SourceCorpus | None = None):
     """
     Scan extracted APK content for Android API usage categories.
     Returns grouped API findings with file references.
@@ -52,6 +54,7 @@ def analyze_android_apis(tmpdir: str, results: dict, source_dirs=None):
     to real .java/.smali source paths instead of the binary classes.dex.
     """
     # Prefer decompiled source roots; fall back to the raw extraction.
+    corpus = corpus or SourceCorpus()
     roots = [d for d in (source_dirs or []) if d and os.path.exists(d)] or [tmpdir]
 
     # Collect all text content, keyed by source-root-relative path so the code
@@ -62,33 +65,29 @@ def analyze_android_apis(tmpdir: str, results: dict, source_dirs=None):
     seen_hashes = set()
     duplicate_skips = 0
     for base in roots:
-        for root, _, files in os.walk(base):
+        for root, _, files in corpus.walk(base):
             for fname in files:
                 ext = os.path.splitext(fname)[1].lower()
                 fpath = os.path.join(root, fname)
                 rel = normalize_relative_path(os.path.relpath(fpath, base))
                 if ext in ('.smali', '.java', '.kt', '.js', '.bundle'):
-                    try:
-                        with open(fpath, 'r', errors='replace') as f:
-                            content = f.read()
-                        content_hash = hash(content)
-                        if content_hash in seen_hashes:
-                            duplicate_skips += 1
-                            continue
-                        seen_hashes.add(content_hash)
-                        content_map[rel] = content
-                        if ext in ('.java', '.kt', '.smali'):
-                            has_source = True
-                    except Exception:
+                    content = corpus.read_text(fpath)
+                    if content is None:
                         continue
+                    content_hash = hash(content)
+                    if content_hash in seen_hashes:
+                        duplicate_skips += 1
+                        continue
+                    seen_hashes.add(content_hash)
+                    content_map[rel] = content
+                    if ext in ('.java', '.kt', '.smali'):
+                        has_source = True
                 elif ext == '.dex':
-                    try:
-                        with open(fpath, 'rb') as f:
-                            raw = f.read()
-                        text = "".join(chr(b) if 32 <= b < 127 else " " for b in raw)
-                        dex_blobs[rel] = text
-                    except Exception:
+                    raw = corpus.read_bytes(fpath)
+                    if raw is None:
                         continue
+                    text = printable_text(raw)
+                    dex_blobs[rel] = text
 
     # Only fall back to raw classes.dex strings when no real source was found —
     # otherwise classes.dex pollutes the API file lists with a binary path.
@@ -101,37 +100,53 @@ def analyze_android_apis(tmpdir: str, results: dict, source_dirs=None):
             seen_hashes.add(content_hash)
             content_map[rel] = text
 
-    api_results = {}
-    api_evidence = {}  # category -> [{path, line, snippet}]  (Phase 6 Task 4)
-
     # Source roots only — never attribute behaviour evidence to a binary dump.
     def _is_source(rel):
         return not str(rel).lower().endswith((".dex", ".so", ".dylib", ".arsc"))
 
+    # Compile every category pattern once (invalid patterns can never match —
+    # same effect as the historical per-search re.error skip).
+    compiled_cats = []
     for category, patterns in ANDROID_API_CATEGORIES.items():
-        matching_files = []
-        seen_files = set()
-        evidence = []
+        plist = []
+        for pattern in patterns:
+            try:
+                plist.append((pattern, re.compile(pattern, re.IGNORECASE)))
+            except re.error:
+                continue
+        compiled_cats.append((category, plist, [], set(), []))  # files, seen, evidence
 
-        for rel, content in content_map.items():
-            for pattern in patterns:
-                try:
-                    m = re.search(pattern, content, re.IGNORECASE)
-                except re.error:
+    # Files OUTER so the prefilter's casefolded content and the splitlines()
+    # used for evidence snippets are built once per file, not once per
+    # (category, file) — profiling showed 2.4M re.search calls here.
+    for rel, content in content_map.items():
+        folded = regex_prefilter.fold(content)
+        src_lines = None
+        is_src = _is_source(rel)
+        for category, plist, matching_files, seen_files, evidence in compiled_cats:
+            for pattern, cre in plist:
+                if not regex_prefilter.may_match(pattern, folded):
                     continue
+                m = cre.search(content)
                 if not m:
                     continue
                 if rel not in seen_files:
                     seen_files.add(rel)
                     matching_files.append(rel)
                 # Record exact line + snippet for the first source-file match.
-                if _is_source(rel) and len(evidence) < 10:
+                if is_src and len(evidence) < 10:
                     line_no = content[:m.start()].count("\n") + 1
-                    src_lines = content.splitlines()
+                    if src_lines is None:
+                        src_lines = content.splitlines()
                     snippet = src_lines[line_no - 1].strip()[:240] if line_no <= len(src_lines) else m.group(0)
                     evidence.append({"path": rel, "line": line_no, "snippet": snippet})
                 break
 
+    # Emit in ANDROID_API_CATEGORIES order — identical to the historical
+    # category-outer loop.
+    api_results = {}
+    api_evidence = {}  # category -> [{path, line, snippet}]  (Phase 6 Task 4)
+    for category, _plist, matching_files, _seen, evidence in compiled_cats:
         if matching_files:
             api_results[category] = sorted(matching_files)
         if evidence:
@@ -145,12 +160,13 @@ def analyze_android_apis(tmpdir: str, results: dict, source_dirs=None):
     }
 
 
-def extract_emails_from_app(tmpdir: str, apk_path: str) -> list:
+def extract_emails_from_app(tmpdir: str, apk_path: str, *, corpus: SourceCorpus | None = None) -> list:
     """Extract email addresses from all app files with their source paths."""
+    corpus = corpus or SourceCorpus()
     found = {}  # email -> list of file paths
     seen_hashes = set()
 
-    for root, _, files in os.walk(tmpdir):
+    for root, _, files in corpus.walk(tmpdir):
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             if ext not in ('.java', '.kt', '.smali', '.xml', '.json',
@@ -159,8 +175,9 @@ def extract_emails_from_app(tmpdir: str, apk_path: str) -> list:
                 continue
             fpath = os.path.join(root, fname)
             try:
-                with open(fpath, 'r', errors='replace') as f:
-                    content = f.read()
+                content = corpus.read_text(fpath)
+                if content is None:
+                    continue
                 content_hash = hash(content)
                 if content_hash in seen_hashes:
                     continue
@@ -177,15 +194,16 @@ def extract_emails_from_app(tmpdir: str, apk_path: str) -> list:
                 continue
 
     # Scan SO binaries
-    for root, _, files in os.walk(tmpdir):
+    for root, _, files in corpus.walk(tmpdir):
         for fname in files:
             if not fname.endswith('.so'):
                 continue
             fpath = os.path.join(root, fname)
             try:
-                with open(fpath, 'rb') as f:
-                    raw = f.read()
-                text = "".join(chr(b) if 32 <= b < 127 else " " for b in raw)
+                raw = corpus.read_bytes(fpath)
+                if raw is None:
+                    continue
+                text = printable_text(raw)
                 content_hash = hash(text)
                 if content_hash in seen_hashes:
                     continue
@@ -204,11 +222,12 @@ def extract_emails_from_app(tmpdir: str, apk_path: str) -> list:
     return [{"email": email, "files": paths} for email, paths in found.items()]
 
 
-def detect_apkid_features(tmpdir: str) -> dict:
+def detect_apkid_features(tmpdir: str, *, corpus: SourceCorpus | None = None) -> dict:
     """
     Detect anti-VM, anti-debug, compiler, packer features from DEX strings.
     Mimics APKiD behaviour without requiring the tool.
     """
+    corpus = corpus or SourceCorpus()
     APKID_PATTERNS = {
         "Anti-VM": {
             "Build.FINGERPRINT check":     r"Build\.FINGERPRINT",
@@ -242,17 +261,15 @@ def detect_apkid_features(tmpdir: str) -> dict:
     }
 
     dex_files = {}
-    for root, _, files in os.walk(tmpdir):
+    for root, _, files in corpus.walk(tmpdir):
         for fname in files:
             if fname.endswith('.dex'):
                 fpath = os.path.join(root, fname)
-                try:
-                    with open(fpath, 'rb') as f:
-                        raw = f.read()
-                    text = "".join(chr(b) if 32 <= b < 127 else " " for b in raw)
-                    dex_files[fname] = text
-                except Exception:
+                raw = corpus.read_bytes(fpath)
+                if raw is None:
                     continue
+                text = printable_text(raw)
+                dex_files[fname] = text
 
     results = {}
     for dex_name, content in dex_files.items():

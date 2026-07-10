@@ -22,6 +22,7 @@ Public API:
         chain_role, CHAIN_VERSION,
     )
 """
+from .bridge import annotate_findings, to_first_class_findings, to_quick_summary
 from .config import CHAIN_VERSION
 from .engine import (
     AttackChainEngine,
@@ -38,4 +39,5 @@ __all__ = [
     "AttackChainEngine", "AttackChain", "ChainTemplate", "ChainGraph",
     "ChainNode", "ChainEdge", "build_chains", "annotate", "get_engine",
     "register", "tag_capabilities", "chain_role", "CHAIN_VERSION",
+    "annotate_findings", "to_first_class_findings", "to_quick_summary",
 ]

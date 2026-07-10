@@ -19,6 +19,8 @@ from __future__ import annotations
 import hashlib
 import logging
 
+from .. import security_controls
+from ..ownership import OwnerType, context_from_results, get_engine as _get_ownership_engine
 from . import config as C
 from . import templates as T
 from .model import (
@@ -26,6 +28,63 @@ from .model import (
 )
 
 log = logging.getLogger("cortex.attack_chains_v2")
+
+# Owners that are NOT the application. A manifest component owned by any of these
+# is library/framework/generated code and must never anchor a chain as its entry
+# node (Flaw A): on a Flutter app the first exported component is androidx
+# ProfileInstallReceiver, which used to anchor a fabricated "Intent -> SQLi" chain.
+# APPLICATION and UNKNOWN are allowed — an unfingerprinted custom component is the
+# app's own code far more often than a library's.
+_NON_APP_OWNERS = frozenset((
+    OwnerType.THIRD_PARTY_SDK, OwnerType.ANDROID_FRAMEWORK, OwnerType.GOOGLE_SDK,
+    OwnerType.APPLE_FRAMEWORK, OwnerType.VENDOR_SDK, OwnerType.OPEN_SOURCE_LIBRARY,
+    OwnerType.GENERATED_CODE,
+))
+
+# ── Reachability gate (Flaw B) ───────────────────────────────────────────────
+# Injection/RCE sink capabilities. A template requiring any of these asserts that
+# attacker input reaches a dangerous sink — a claim that must be backed by an
+# actual taint flow, not mere co-occurrence of an exported component and a sink.
+_GATED_SINK_CAPS = frozenset(("SQL_SINK", "CMD_SINK", "FILE_SINK", "CODE_LOADING", "JS_INTERFACE"))
+
+# Gated sink capability -> taint-engine sink categories (lowercased) that satisfy it.
+# CODE_LOADING has no corresponding taint sink category today, so a code-loading
+# chain is always heuristic — correctly, since we cannot prove the dataflow.
+_SINK_CAP_TAINT_CATS = {
+    "SQL_SINK":     frozenset(("sqlite", "sql")),
+    "CMD_SINK":     frozenset(("execution", "command")),
+    "FILE_SINK":    frozenset(("filesystem", "file")),
+    "CODE_LOADING": frozenset(("reflection", "dynamicloading", "dynamic_loading")),
+    "JS_INTERFACE": frozenset(("webview",)),
+}
+
+# Taint source categories that count as attacker-controllable external input.
+_EXTERNAL_SOURCE_CATS = frozenset(("user input", "intent", "contentprovider", "content provider"))
+
+PROOF_PROVEN, PROOF_HEURISTIC, PROOF_MANIFEST = "proven", "heuristic", "manifest-only"
+
+_LAUNCHER_ACTION = "android.intent.action.main"
+_LAUNCHER_CATEGORY = "android.intent.category.launcher"
+
+
+def _is_launcher_only_activity(c: dict) -> bool:
+    """An exported activity whose ONLY intent-filter action is MAIN (the home-screen
+    launcher entry). Such an activity is reachable from the launcher, NOT
+    attacker-deliverable IPC — a malicious app cannot 'send it an intent' as an
+    injection entry point, so it must not satisfy an EXPORTED/DEEPLINK entry cap.
+
+    A MAIN activity that ALSO exposes a deep link (browsable / a scheme / a non-MAIN
+    action) is genuinely reachable and is NOT treated as launcher-only."""
+    if not isinstance(c, dict):
+        return False
+    if c.get("browsable") or c.get("schemes") or c.get("deeplinks"):
+        return False
+    actions = {str(a).strip().lower() for a in (c.get("actions") or []) if str(a).strip()}
+    if actions:
+        return not (actions - {_LAUNCHER_ACTION})   # only MAIN → launcher-only
+    # No declared action, but flagged with the LAUNCHER category → still launcher-only.
+    cats = {str(x).strip().lower() for x in (c.get("categories") or []) if str(x).strip()}
+    return _LAUNCHER_CATEGORY in cats
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -46,11 +105,35 @@ _STRUCTURAL_CAPS = frozenset(("WEBVIEW", "WEBVIEW_JS", "JS_INTERFACE", "WEBVIEW_
                               "NATIVE", "NETWORK"))
 
 
-def tag_capabilities(f: dict) -> set:
-    """Deterministic capability tags for a finding (the chaining vocabulary)."""
+# CERT_BYPASS requires POSITIVE evidence of actually-disabled TLS validation. A
+# method that merely forwards a passed-in factory (setSSLSocketFactory / setSSLContext
+# pass-through) is NOT a bypass, so neither the bare setter token nor a generic
+# "certificate validation" mention qualifies.
+_CERT_BYPASS_RULE_IDS = frozenset((
+    "android_webview_ignore_ssl",             # onReceivedSslError → handler.proceed()
+    "android_trust_all_certs",                # custom X509TrustManager accepts all
+    "android_trust_manager_accept_all",       # empty checkServerTrusted body
+    "android_allow_all_hostname",             # AllowAllHostnameVerifier
+    "android_smali_insecure_hostname_verifier",
+))
+_CERT_BYPASS_TOKENS = (
+    "allowallhostnameverifier", "allow_all_hostname", "nullhostnameverifier",
+    "trustallcerts", "trust all cert", "trust-all", "trustall",
+    "accepts all cert", "accept all cert", "nooptrustmanager",
+    "onreceivedsslerror", "setdefaulthostnameverifier",
+)
+
+
+def tag_capabilities(f: dict, results: dict | None = None) -> set:
+    """Deterministic capability tags for a finding (the chaining vocabulary).
+
+    ``results`` (when supplied) lets state-dependent caps consult the authoritative
+    ``security_controls`` resolution — e.g. CLEARTEXT is never tagged when cleartext
+    is resolved to ``blocked``."""
     caps: set = set()
     cat = (f.get("category") or "").lower()
     blob = _blob(f)
+    rule_id = str(f.get("rule_id") or f.get("id") or "")
     tf = f.get("taint_flow") or {}
     sink = str(tf.get("sink_cat") or "").replace(" ", "").lower()
     src = str(tf.get("source_cat") or "").lower()
@@ -96,13 +179,18 @@ def tag_capabilities(f: dict) -> set:
         if "token" in st or "jwt" in st or "bearer" in blob or "session" in blob:
             caps.add("TOKEN")
     # Network / crypto / cert
+    # CLEARTEXT only when cleartext is ACTUALLY permitted: never when the
+    # authoritative resolution says it's blocked, and only for a finding that
+    # ASSERTS it's permitted (not one that says it's disabled, and not a mere
+    # mention). Reuses the security_controls negation guard.
     if "cleartext" in blob:
-        caps.add("CLEARTEXT")
-    # CERT_BYPASS requires evidence of DISABLED validation — never a generic
-    # certificate finding (a debug cert, or "pinning detected", is not a bypass).
-    if any(k in blob for k in ("certificate validation", "trustmanager", "trust all",
-                               "trustall", "onreceivedsslerror", "hostnameverifier",
-                               "allow_all_hostname", "disable ssl", "ignore ssl")):
+        blocked = results is not None and security_controls.state_of(results, "cleartext") == "blocked"
+        if not blocked and security_controls.finding_asserts_absent(f, "cleartext"):
+            caps.add("CLEARTEXT")
+    # CERT_BYPASS requires POSITIVE evidence of disabled validation (a trust-all
+    # TrustManager, an allow-all HostnameVerifier, an onReceivedSslError that
+    # proceeds, …) — a pass-through setSSLSocketFactory/setSSLContext does not qualify.
+    if rule_id in _CERT_BYPASS_RULE_IDS or any(t in blob for t in _CERT_BYPASS_TOKENS):
         caps.add("CERT_BYPASS")
     if cat == "network security":
         caps.add("NETWORK")
@@ -154,16 +242,82 @@ class ChainContext:
         self.findings = [f for f in (results.get("findings") or []) if isinstance(f, dict)]
         self.mitigations = _detect_mitigations(results)
 
+        # Ownership: used to reject library/framework components as entry nodes and
+        # to require the proven taint sink to live in application code.
+        self._own_engine = _get_ownership_engine()
+        self._own_ctx = context_from_results(results)
+        self._own_cache: dict[str, str] = {}
+
+        # Independent taint evidence for the reachability gate: the taint engine's
+        # own flow list, plus any finding that carries a taint_flow. Never derived
+        # from chain membership.
+        self.taint_flows: list[dict] = self._collect_taint_flows(results)
+
+        # Launcher-only (MAIN/LAUNCHER) activities are the home entry, not
+        # attacker-deliverable IPC — never an injection/RCE external entry.
+        self._launcher_only_names = {
+            c.get("name") for c in (self.surface.get("activities") or [])
+            if isinstance(c, dict) and c.get("name") and _is_launcher_only_activity(c)
+        }
+
         # Tag + role each finding once (deterministic).
         self.tagged: list[dict] = []
         for f in self.findings:
             role = chain_role(f)
             if role == "excluded":
                 continue
-            self.tagged.append({"f": f, "caps": tag_capabilities(f), "role": role,
+            self.tagged.append({"f": f, "caps": tag_capabilities(f, results), "role": role,
                                 "id": _finding_id(f)})
         # Stable ordering: strongest first (confidence, then evidence), then id.
         self.tagged.sort(key=lambda t: (-_conf(t["f"]), C.EVIDENCE_RANK.get(_equality(t["f"]), 4), t["id"]))
+
+    def _collect_taint_flows(self, results: dict) -> list[dict]:
+        """Gather taint flows from the taint engine's list and any finding carrying
+        a taint_flow, normalized to {source_cat, sink_cat, class}. Deterministic."""
+        flows: list[dict] = []
+        seen: set = set()
+
+        def _add(source_cat, sink_cat, cls):
+            source_cat = str(source_cat or "").strip().lower()
+            sink_cat = str(sink_cat or "").replace(" ", "").strip().lower()
+            key = (source_cat, sink_cat, str(cls or ""))
+            if not source_cat or not sink_cat or key in seen:
+                return
+            seen.add(key)
+            flows.append({"source_cat": source_cat, "sink_cat": sink_cat, "class": str(cls or "")})
+
+        for tf in results.get("taint_flows") or []:
+            if isinstance(tf, dict):
+                _add(tf.get("source_cat"), tf.get("sink_cat"), tf.get("class_name") or tf.get("class"))
+        for f in self.findings:
+            tf = f.get("taint_flow")
+            if isinstance(tf, dict):
+                _add(tf.get("source_cat"), tf.get("sink_cat"),
+                     tf.get("class_name") or tf.get("class") or f.get("file_path"))
+        flows.sort(key=lambda x: (x["source_cat"], x["sink_cat"], x["class"]))
+        return flows
+
+    def _owner_of(self, name: str) -> str:
+        """Ownership type of a class/package FQN, cached. '' when unclassifiable."""
+        if not name:
+            return ""
+        if name not in self._own_cache:
+            try:
+                res = self._own_engine.classify_package(name, platform=self.platform, ctx=self._own_ctx)
+                self._own_cache[name] = res.owner_type or ""
+            except Exception:  # noqa: BLE001 — ownership must never break chaining
+                self._own_cache[name] = ""
+        return self._own_cache[name]
+
+    def _is_app_entry(self, name: str) -> bool:
+        """True unless the component is owned by a known library/framework/generated
+        source. APPLICATION and UNKNOWN pass; library owners are rejected (Flaw A)."""
+        return self._owner_of(name) not in _NON_APP_OWNERS
+
+    def _is_app_owned_class(self, name: str) -> bool:
+        """Strict: the class must classify as APPLICATION. Used to require the proven
+        taint sink to live in application code, not a bundled SDK."""
+        return self._owner_of(name) == OwnerType.APPLICATION
 
     def entry_point(self, template) -> tuple[dict | None, str]:
         """Return (entry_dict, reach_key) or (None, '') when no entry exists."""
@@ -171,22 +325,32 @@ class ChainContext:
             return ({"label": template.entry_label, "kind": template.entry_kind,
                      "reachable": True, "component": ""},
                     "distribution" if template.entry_kind == "distribution" else "device")
-        # external — need a structural entry from components or findings.
+        # external — need an APPLICATION-owned structural entry. A library component
+        # must never become an entry node, so if none exists this template does not
+        # emit an "external_reachable" chain.
         comp = self._surface_entry(template.entry_caps)
         if comp:
             return ({"label": template.entry_label, "kind": "external",
                      "component": comp["name"], "reachable": True}, "external_reachable")
         ft = self._first_with_caps(template.entry_caps)
         if ft:
-            reach = str(ft["f"].get("reachability") or "").upper()
-            key = "external_reachable" if reach == "YES" else "external"
-            return ({"label": template.entry_label, "kind": "external",
-                     "component": ft["f"].get("component") or ft["f"].get("title", ""),
-                     "reachable": reach in ("YES", "MAYBE", "")}, key)
+            comp_name = ft["f"].get("component") or ft["f"].get("title", "")
+            # Reject a launcher-only activity here too: it is not attacker-deliverable
+            # IPC even when a finding references it (Part B).
+            if (self._is_app_entry(comp_name)
+                    and ft["f"].get("component") not in self._launcher_only_names
+                    and not _is_launcher_only_activity(ft["f"])):
+                reach = str(ft["f"].get("reachability") or "").upper()
+                key = "external_reachable" if reach == "YES" else "external"
+                return ({"label": template.entry_label, "kind": "external",
+                         "component": comp_name,
+                         "reachable": reach in ("YES", "MAYBE", "")}, key)
         return None, ""
 
     def _surface_entry(self, caps: frozenset) -> dict | None:
-        """First exported manifest component satisfying ANY requested entry cap."""
+        """First APPLICATION-owned exported manifest component satisfying ANY
+        requested entry cap. Library/framework components (androidx.*, com.google.*,
+        …) are skipped — they are not the app's declared attack surface (Flaw A)."""
         want_provider = "EXPORTED_PROVIDER" in caps
         want_deeplink = "DEEPLINK" in caps
         want_exported = "EXPORTED" in caps
@@ -194,13 +358,42 @@ class ChainContext:
             for c in sorted(self.surface.get(key) or [], key=lambda x: str(x.get("name", ""))):
                 if not c.get("exported"):
                     continue
+                name = c.get("name", key)
+                if not self._is_app_entry(name):
+                    continue
+                # A launcher-only activity (MAIN/LAUNCHER) is the home entry, not
+                # attacker-deliverable IPC — it never satisfies an injection/RCE
+                # EXPORTED/DEEPLINK entry (Part B). Skip it as a candidate entry.
+                if key == "activities" and _is_launcher_only_activity(c):
+                    continue
                 if want_provider and key == "providers":
-                    return {"name": c.get("name", key), "type": key}
+                    return {"name": name, "type": key}
                 if want_deeplink and (c.get("browsable") or c.get("schemes")):
-                    return {"name": c.get("name", key), "type": key}
+                    return {"name": name, "type": key}
                 if want_exported:
-                    return {"name": c.get("name", key), "type": key}
+                    return {"name": name, "type": key}
         return None
+
+    def reachability_proof(self, template, entry: dict) -> str:
+        """proven | heuristic | manifest-only for `template` given `entry` (Flaw B).
+
+        Non-injection templates make no dataflow claim → 'manifest-only'. An
+        injection/RCE template is 'proven' only when a taint flow links external
+        input to the template's sink category in an application-owned class;
+        otherwise 'heuristic'.
+        """
+        gated = _template_sink_caps(template)
+        if not gated:
+            return PROOF_MANIFEST
+        wanted_sinks: set = set()
+        for cap in gated:
+            wanted_sinks |= _SINK_CAP_TAINT_CATS.get(cap, frozenset())
+        for tf in self.taint_flows:
+            if (tf["source_cat"] in _EXTERNAL_SOURCE_CATS
+                    and tf["sink_cat"] in wanted_sinks
+                    and self._is_app_owned_class(tf["class"])):
+                return PROOF_PROVEN
+        return PROOF_HEURISTIC
 
     def _first_with_caps(self, caps: frozenset) -> dict | None:
         for t in self.tagged:
@@ -218,21 +411,40 @@ class ChainContext:
         return out
 
 
+# Chain blocker key -> the security control that implements it.
+_MITIGATION_CONTROLS = (
+    ("cert_pinning", "cert_pinning"),
+    ("root_detection", "root_detection"),
+    ("attestation", "safetynet_play_integrity"),
+)
+
+
 def _detect_mitigations(results: dict) -> set:
-    m: set = set()
-    blob = " ".join(str((f or {}).get("title", "")) for f in (results.get("findings") or [])).lower()
-    bonuses = " ".join(str(b) for b in ((results.get("score") or {}).get("bonuses") or [])).lower()
-    text = blob + " " + bonuses
-    if "certificate pinning" in text or "pinning detected" in text:
-        m.add("cert_pinning")
-    if "root detection" in text:
-        m.add("root_detection")
-    if "play integrity" in text or "safetynet" in text:
-        m.add("attestation")
-    return m
+    """Which chain blockers the app actually implements.
+
+    Read from the resolved security controls rather than re-derived. The old
+    substring scan blocked a MitM chain whenever any finding title contained
+    "certificate pinning" — including *"No Certificate Pinning Configured"*, which
+    is the reason to run the chain, not to suppress it. It also mixed in
+    `results["score"]["bonuses"]`, which is always empty here because chains are
+    built before scoring.
+
+    A `partial` control does not block: pinning that `debug-overrides` can switch
+    off, or that covers one domain out of five, is not a barrier an attacker meets.
+    """
+    return {blocker for blocker, control in _MITIGATION_CONTROLS
+            if security_controls.is_present(results, control)}
 
 
 # ── small accessors ──────────────────────────────────────────────────────────
+def _template_sink_caps(template) -> frozenset:
+    """Gated injection/RCE sink capabilities this template requires (possibly empty)."""
+    caps: set = set()
+    for slot in template.required_slots:
+        caps |= (set(slot) & _GATED_SINK_CAPS)
+    return frozenset(caps)
+
+
 def _coerce_int(v, default: int) -> int:
     try:
         return int(round(float(v)))
@@ -328,8 +540,15 @@ def _aggregate_evidence(findings: list[dict]):
         # Phase 1.97: prefer the Evidence Selection primary (application-owned, not a
         # framework/library file) so chains never present a library-only node as
         # proof. Falls back to the evidence bundle / file_path when selection is absent.
-        sel_file, _sel_line, _sel_snip = _selection_primary(f)
-        fp = sel_file or prim.get("relative_path") or prim.get("file_path") or f.get("file_path")
+        sel_file, sel_line, _sel_snip = _selection_primary(f)
+        # File AND line must come from the SAME source: when selection corrected the
+        # file, its line must accompany it (the bundle line belongs to the old file).
+        # This is what lets "view code" on a chain land on the exact evidence line.
+        if sel_file:
+            fp, line = sel_file, sel_line
+        else:
+            fp = prim.get("relative_path") or prim.get("file_path") or f.get("file_path")
+            line = prim.get("line") or f.get("line") or f.get("line_number")
         if fp and fp not in files:
             files.append(fp)
         loc = prim.get("locator") or {}
@@ -337,9 +556,14 @@ def _aggregate_evidence(findings: list[dict]):
             classes.append(loc["class"])
         if loc.get("method") and loc["method"] not in methods:
             methods.append(loc["method"])
-        if eb.get("evidence_id"):
-            refs.append({"finding": _finding_id(f), "evidence_id": eb["evidence_id"],
-                         "file": fp, "line": prim.get("line")})
+        # Emit a reference whenever we have a proof file so the chain carries a
+        # per-member (file, line) the viewer can jump to. When no line is known,
+        # carry None so the frontend omits the jump gracefully rather than opening
+        # at the top with no indication.
+        if fp:
+            refs.append({"finding": _finding_id(f),
+                         "evidence_id": eb.get("evidence_id") or f"EV-{_finding_id(f)}",
+                         "file": fp, "line": (line or None)})
     return files, classes, methods, refs
 
 
@@ -384,19 +608,36 @@ def _build_narrative(template, entry: dict, required: list[dict], goal_label: st
     steps = [{"order": 1, "title": "Entry point", "description": entry.get("label", ""),
               "finding": "", "evidence": entry.get("component", "")}]
     for i, f in enumerate(required):
-        eb = f.get("evidence_bundle") or {}
-        prim = eb.get("primary") or {}
-        ev = ""
-        if prim.get("relative_path") or prim.get("file_path"):
-            ev = (prim.get("relative_path") or prim.get("file_path"))
-            if prim.get("line"):
-                ev += f":{prim['line']}"
+        # Per-step evidence targets THIS step's own file:line, from the same
+        # (corrected) Evidence Selection primary the aggregated references use — so a
+        # step's "view code" lands on its exact line, not a stale bundle location.
+        sel_file, sel_line, _ = _selection_primary(f)
+        if sel_file:
+            ev = f"{sel_file}:{sel_line}" if sel_line else sel_file
+        else:
+            eb = f.get("evidence_bundle") or {}
+            prim = eb.get("primary") or {}
+            ev = ""
+            fp = prim.get("relative_path") or prim.get("file_path") or f.get("file_path")
+            if fp:
+                ln = prim.get("line") or f.get("line") or f.get("line_number")
+                ev = f"{fp}:{ln}" if ln else fp
         label = template.slot_labels[i] if i < len(template.slot_labels) else f.get("title", "")
         steps.append({"order": i + 2, "title": label, "description": f.get("title", ""),
                       "finding": _finding_id(f), "evidence": ev})
     steps.append({"order": len(required) + 2, "title": "Objective achieved",
                   "description": goal_label, "finding": "", "evidence": ""})
     return steps
+
+
+def _template_suppressed_by_controls(tmpl, results: dict) -> bool:
+    """Authoritative-state veto: a template must never be emitted when the security
+    control it depends on contradicts it. The CLEARTEXT-MITM-TOKEN chain cannot exist
+    when cleartext is resolved to ``blocked`` (usesCleartextTraffic="false" / NSC
+    cleartextTrafficPermitted="false"). Belt-and-suspenders to the CLEARTEXT cap gate."""
+    if tmpl.id == "CLEARTEXT-MITM-TOKEN":
+        return security_controls.state_of(results, "cleartext") == "blocked"
+    return False
 
 
 def _summary_counts(findings: list[dict], key_path) -> dict:
@@ -424,6 +665,8 @@ class AttackChainEngine:
         emitted_member_sets: list[frozenset] = []
 
         for tmpl in self._templates:
+            if _template_suppressed_by_controls(tmpl, results):
+                continue
             entry, reach_key = ctx.entry_point(tmpl)
             if entry is None:
                 continue
@@ -470,6 +713,19 @@ class AttackChainEngine:
         exploitability, expl_expl = _chain_exploitability(required, reach_key, app_control, blocked)
         evidence_q = _evidence_quality(required)
         severity = _chain_severity(tmpl.goal, exploitability, blocked)
+
+        # Reachability gate (Flaw B): an injection/RCE chain with no taint flow from
+        # external input to the matching sink is heuristic — it may exist, but it is
+        # capped below CRITICAL and below 60 confidence so it can never present as a
+        # proven critical finding on co-occurrence alone.
+        proof = ctx.reachability_proof(tmpl, entry)
+        if proof == PROOF_HEURISTIC:
+            if C.sev_rank(severity) < C.sev_rank("high"):
+                severity = "high"
+            confidence = min(confidence, C.HEURISTIC_CONFIDENCE_CAP)
+            conf_expl = {**conf_expl, "reachability_cap": C.HEURISTIC_CONFIDENCE_CAP,
+                         "reachability_proof": proof}
+
         files, classes, methods, refs = _aggregate_evidence(required + supporting)
         components = [entry["component"]] if entry.get("component") else []
 
@@ -484,6 +740,7 @@ class AttackChainEngine:
             required_findings=[_finding_id(f) for f in required],
             supporting_findings=[_finding_id(f) for f in supporting],
             blocked_by=blocked_by, mitigations=list(tmpl.mitigations), blocked=blocked,
+            reachability_proof=proof,
             overall_confidence=confidence, overall_evidence_quality=evidence_q,
             overall_exploitability=exploitability, overall_impact=tmpl.impact,
             severity=severity,

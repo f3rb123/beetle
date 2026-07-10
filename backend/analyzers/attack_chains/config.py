@@ -47,6 +47,11 @@ _SEV_BY_RANK = {0: "critical", 1: "high", 2: "medium", 3: "low", 4: "info"}
 # is hard to exploit); a blocked chain is also dropped one notch.
 SEVERITY_DOWNGRADE_EXPLOIT = 40
 
+# Confidence ceiling for an injection/RCE chain with no taint proof (reachability
+# gate, Flaw B). "cap confidence below 60" — a heuristic chain never reads as
+# high-confidence on capability co-occurrence alone.
+HEURISTIC_CONFIDENCE_CAP = 59
+
 
 # ── Eligibility — which findings may participate (SAFE CHAINING) ──────────────
 # Triage decisions (Phase 1.6) that exclude a finding from being a REQUIRED link.

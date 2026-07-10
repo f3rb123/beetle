@@ -102,6 +102,7 @@ def check_domains(endpoints: list, results: dict):
 
         if "ofac_country" in intel["risk_flags"]:
             results["findings"].append({
+                "rule_id": "domain_ofac_sanctioned_country",
                 "title": f"Domain Communicates With OFAC Sanctioned Country — {domain}",
                 "severity": "medium",
                 "category": "Network Intelligence",
@@ -114,6 +115,7 @@ def check_domains(endpoints: list, results: dict):
 
         if intel["risk_score"] >= 35 and "ofac_country" not in intel["risk_flags"]:
             results["findings"].append({
+                "rule_id": "domain_suspicious_infrastructure",
                 "title": f"Suspicious External Domain Infrastructure — {domain}",
                 "severity": "medium",
                 "category": "Network Intelligence",

@@ -146,6 +146,7 @@ def analyze_certificate(apk_path: str, results: dict):
     # ── Generate findings from cert analysis ──────────────────────────────────
     if not cert_info["available"]:
         results["findings"].append({
+            "rule_id":     "cert_analysis_unavailable",
             "title":       "Certificate Analysis Unavailable",
             "severity":    "info",
             "category":    "Certificate",
@@ -155,6 +156,7 @@ def analyze_certificate(apk_path: str, results: dict):
 
     if cert_info.get("debug_cert"):
         results["findings"].append({
+            "rule_id":        "cert_debug_certificate",
             "title":          "Debug Certificate Used to Sign APK",
             "severity":       "high",
             "category":       "Certificate",
@@ -172,6 +174,7 @@ def analyze_certificate(apk_path: str, results: dict):
     # the evidence block can carry the full computed fingerprints.
     if "SHA1" in cert_info.get("signature_algo", "").upper():
         results["findings"].append({
+            "rule_id":        "cert_sha1_signature_algorithm",
             "title":          "Certificate Signed with SHA-1 — Collision Risk",
             "severity":       "medium",
             "category":       "Certificate",
@@ -186,6 +189,7 @@ def analyze_certificate(apk_path: str, results: dict):
 
     if cert_info.get("expired"):
         results["findings"].append({
+            "rule_id":        "cert_expired",
             "title":          "Signing Certificate Expired",
             "severity":       "medium",
             "category":       "Certificate",
@@ -199,6 +203,7 @@ def analyze_certificate(apk_path: str, results: dict):
     key_type = cert_info.get("key_type", "")
     if key_size and "rsa" in key_type.lower() and key_size < 2048:
         results["findings"].append({
+            "rule_id":        "cert_weak_rsa_key",
             "title":          f"Weak RSA Signing Key — {key_size}-bit",
             "severity":       "medium",
             "category":       "Certificate",
@@ -217,6 +222,7 @@ def analyze_certificate(apk_path: str, results: dict):
     # flagged as a debug cert (the stronger, more specific signal).
     if cert_info.get("self_signed") and not cert_info.get("debug_cert"):
         results["findings"].append({
+            "rule_id":        "cert_self_signed",
             "title":          "Self-Signed Signing Certificate",
             "severity":       "info",
             "category":       "Certificate",
@@ -232,6 +238,7 @@ def analyze_certificate(apk_path: str, results: dict):
 
     if "v1" in cert_info["scheme"] and "v2" not in cert_info["scheme"]:
         results["findings"].append({
+            "rule_id":        "cert_v1_signature_only",
             "title":          "Only APK Signature Scheme v1 Used",
             "severity":       "medium",
             "category":       "Certificate",
@@ -242,6 +249,7 @@ def analyze_certificate(apk_path: str, results: dict):
         })
     elif not any(scheme in cert_info["scheme"] for scheme in ("v2", "v3", "v4")):
         results["findings"].append({
+            "rule_id":        "cert_weak_signature_scheme",
             "title":          "Only Weak APK Signature Scheme Detected",
             "severity":       "medium",
             "category":       "Certificate",

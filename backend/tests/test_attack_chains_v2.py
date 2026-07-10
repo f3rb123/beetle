@@ -71,16 +71,20 @@ _BROWSABLE = {"activities": [{"name": "com.app.WebActivity", "exported": True,
 
 # ── Realistic Android chains ──────────────────────────────────────────────────
 def test_webview_js_bridge_rce():
+    # No taint flow from external input into the JS bridge → the RCE chain may exist
+    # but is HEURISTIC: capped below CRITICAL and below 60 confidence (Flaw B). It is
+    # no longer allowed to present as a proven critical finding on co-occurrence alone.
     chains = _chains([
         F("WebView JavaScript Enabled", "WebView", cid="wv-js"),
         F("addJavascriptInterface used", "WebView", cid="wv-iface"),
     ], surface=_BROWSABLE)
     c = next((x for x in chains if x["name"].startswith("WebView JavaScript Bridge")), None)
     _check(c, f"no RCE chain in {[x['name'] for x in chains]}")
-    _check(c["severity"] == "critical", f"severity {c['severity']}")
+    _check(c["reachability_proof"] == "heuristic", f"proof {c['reachability_proof']}")
+    _check(c["severity"] != "critical", f"heuristic RCE must not be critical: {c['severity']}")
+    _check(c["overall_confidence"] < 60, f"heuristic confidence must be < 60: {c['overall_confidence']}")
     _check(len(c["required_findings"]) == 2, "two required links")
     _check(c["entry_point"]["component"] == "com.app.WebActivity", "entry component")
-    _check(c["overall_confidence"] >= 60 and c["overall_exploitability"] >= 60, "scored")
     _check(len(c["narrative"]) >= 4 and c["graph"]["nodes"], "narrative + graph")
 
 

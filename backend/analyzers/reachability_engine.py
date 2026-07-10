@@ -109,26 +109,21 @@ def _classify(f: dict, ep: dict) -> tuple[str, list[str]]:
     blob = _blob(f)
     tf = f.get("taint_flow") or {}
 
-    # 1. Already correlated into an attack chain → proven reachable.
-    if f.get("is_attack_chain") or f.get("in_attack_chain"):
-        steps = []
-        for s in (f.get("steps") or []):
-            if isinstance(s, dict) and s.get("title"):
-                steps.append(s["title"])
-        if not steps and ep.get("primary"):
-            steps = [ep["primary"], f.get("title", "Exploited")]
-        return YES, steps or [f.get("title", "Exploited")]
+    # Reachability is derived ONLY from independent taint / entry / manifest evidence
+    # (branches below). It must never be inferred from attack-chain membership: chains
+    # are BUILT from co-occurrence, so "reachable because it's in a chain" is circular
+    # self-confirmation (Flaw C). Chains consume reachability, never the reverse.
 
-    # 2. Exported component / deep link findings ARE the entry point.
+    # 1. Exported component / deep link findings ARE the entry point.
     if cat in ("Attack Surface", "Deeplinks"):
         comp = f.get("component") or f.get("title", "exported component")
         return YES, [ep.get("primary") or "Any app on the device", f"Reaches {comp}"]
 
-    # 3. Secrets & certificate material ship inside the APK.
+    # 2. Secrets & certificate material ship inside the APK.
     if cat in ("Certificate",) or f.get("source") in ("EVIDENCE", "SECRET") or "secret" in cat.lower():
         return YES, ["Attacker downloads the APK", "Extracts embedded material", f.get("title", "")]
 
-    # 4. Manifest / config posture.
+    # 3. Manifest / config posture.
     if "debuggable" in blob:
         return (YES, ["Attacker with ADB / physical access", "Attaches debugger", "Reads memory & secrets"])
     if "backup" in blob and "allowbackup" in blob.replace(" ", "") or "backup enabled" in blob:
@@ -136,7 +131,7 @@ def _classify(f: dict, ep: dict) -> tuple[str, list[str]]:
     if "cleartext" in blob:
         return (MAYBE, ["Attacker gains network position (same Wi-Fi / MitM)", "Intercepts cleartext HTTP", "Reads/modifies traffic"])
 
-    # 5. WebView findings — reachable when an external entry feeds the WebView.
+    # 4. WebView findings — reachable when an external entry feeds the WebView.
     if cat == "WebView" or any(t in blob for t in _WEBVIEW_TOKENS):
         if ep["any_external_component"]:
             path = [ep["primary"] or "External intent", "URL passed into WebView"]
@@ -149,7 +144,7 @@ def _classify(f: dict, ep: dict) -> tuple[str, list[str]]:
             return YES, path
         return MAYBE, ["WebView loads content", f.get("title", "")]
 
-    # 6. Taint flows — reachable when the source is externally controllable.
+    # 5. Taint flows — reachable when the source is externally controllable.
     if tf or cat == "Taint Analysis":
         src = str(tf.get("source_cat") or f.get("source_cat") or "").lower()
         externally_sourced = src in ("user input", "intent", "contentprovider")
@@ -162,11 +157,11 @@ def _classify(f: dict, ep: dict) -> tuple[str, list[str]]:
             return MAYBE, ["User-controlled input", f.get("title", "")]
         return MAYBE, [f.get("title", "")]
 
-    # 7. Library / framework code with no external entry → not app-reachable.
+    # 6. Library / framework code with no external entry → not app-reachable.
     if not _is_app_owned(f):
         return NO, []
 
-    # 8. App code, no identified external entry point.
+    # 7. App code, no identified external entry point.
     return MAYBE, []
 
 

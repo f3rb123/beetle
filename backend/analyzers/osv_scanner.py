@@ -368,6 +368,9 @@ def _vuln_to_finding(vuln: dict, dep: dict) -> dict:
     refs = [r.get("url", "") for r in (vuln.get("references") or []) if r.get("url")]
 
     return {
+        # One detector ("known-vulnerable dependency"); the vulnerable package
+        # and advisory identity live in `package` / `vuln_id`, not the rule id.
+        "rule_id":        "osv_vulnerable_dependency",
         "title":          title,
         "severity":       severity,
         "category":       "Supply Chain / Dependencies",

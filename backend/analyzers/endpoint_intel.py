@@ -30,6 +30,7 @@ import re
 from .evidence_scanner import (
     is_binary_dump_path, _ev_should_skip_dir, _EV_MAX_FILES, _EV_MAX_FILE_BYTES,
 )
+from .source_corpus import SourceCorpus
 
 # Source / resource / config / disassembly extensions — Android, iOS, Flutter, RN.
 _EP_EXTENSIONS = (
@@ -111,9 +112,10 @@ def _accept_deeplink(scheme: str, rest: str) -> bool:
     return bool(rest) and len(rest) >= 2 and bool(_DEEPLINK_HOST_RE.match(rest))
 
 
-def extract_endpoints(base_dir: str, extra_dirs: list | None = None) -> list[str]:
+def extract_endpoints(base_dir: str, extra_dirs: list | None = None, *, corpus: SourceCorpus | None = None) -> list[str]:
     """Broadly extract URLs + custom-scheme deep links from the decompiled tree.
     Returns a sorted, de-duplicated list (capped) for ``results["endpoints"]``."""
+    corpus = corpus or SourceCorpus()
     dirs: list[str] = []
     if extra_dirs:
         dirs.extend(d for d in extra_dirs if d and os.path.exists(d))
@@ -125,7 +127,7 @@ def extract_endpoints(base_dir: str, extra_dirs: list | None = None) -> list[str
     for scan_dir in dirs:
         if files_scanned >= _EV_MAX_FILES:
             break
-        for root, subdirs, files in os.walk(scan_dir):
+        for root, subdirs, files in corpus.walk(scan_dir):
             rel_root = os.path.relpath(root, scan_dir)
             if rel_root != "." and _ev_should_skip_dir(rel_root):
                 subdirs[:] = []
@@ -136,12 +138,8 @@ def extract_endpoints(base_dir: str, extra_dirs: list | None = None) -> list[str
                 if not fname.lower().endswith(_EP_EXTENSIONS) or is_binary_dump_path(fname):
                     continue
                 fpath = os.path.join(root, fname)
-                try:
-                    if os.path.getsize(fpath) > _EV_MAX_FILE_BYTES:
-                        continue
-                    with open(fpath, "r", errors="replace") as f:
-                        content = f.read()
-                except OSError:
+                content = corpus.read_text(fpath, max_bytes=_EV_MAX_FILE_BYTES)
+                if content is None:
                     continue
                 files_scanned += 1
                 low = content.lower()

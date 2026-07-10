@@ -350,13 +350,17 @@ def _executive_summary(story, results, T, styles):
     if es:
         story.append(Spacer(1, 6 * mm))
         story.append(Paragraph("Signal Quality", styles["body"]))
+        acct = results.get("finding_accounting") or {}
         funnel = [
-            ("Raw detections",                  es.get("raw_detections", 0)),
-            ("Duplicates grouped",              es.get("duplicates_grouped", 0)),
-            ("Library findings hidden",         es.get("library_findings_hidden", 0)),
-            ("False positives removed",         es.get("false_positives_suppressed", 0)),
-            ("Low-value data flows pruned",     es.get("low_value_flows_pruned", 0)),
-            ("High-signal findings presented",  es.get("high_signal_findings", 0)),
+            ("Raw detections",                       es.get("raw_detections", 0)),
+            ("Duplicates grouped",                   es.get("duplicates_grouped", 0)),
+            ("Library findings hidden",              es.get("library_findings_hidden", 0)),
+            # FP-only: detections dropped by the FP-suppression rules before triage.
+            # Distinct from the "hidden from this view" total in the Findings header.
+            ("False positives removed (pre-triage)", acct.get("fp_removed_pre_triage",
+                                                              es.get("false_positives_suppressed", 0))),
+            ("Low-value data flows pruned",          es.get("low_value_flows_pruned", 0)),
+            ("High-signal findings presented",       es.get("high_signal_findings", 0)),
         ]
         srows = [["Stage", "Count"]] + [
             [Paragraph(escape(k), styles["table_cell"]),
@@ -461,10 +465,36 @@ def _ciso_summary_section(story, results, T, styles):
     story.append(Spacer(1, 6 * mm))
 
 
-# ─── Attack Chains (Phase 11.95 Task 2) ──────────────────────────────────────
+# ─── Attack Chains — sourced from the v2 engine (results["attack_chains_v2"]) ──
+# Reachability-proof badge palette: a taint-proven chain and a co-occurrence
+# (heuristic) chain must be visually distinct so a reader never mistakes an
+# unproven chain for a proven one.
+_PROOF_BADGE = {
+    "proven":        ("PROVEN",  HexColor("#16A34A")),   # taint-linked, full trust
+    "heuristic":     ("HEURISTIC", HexColor("#D97706")), # co-occurrence, capped
+    "manifest-only": ("MANIFEST", HexColor("#0284C7")),  # structural, no dataflow claim
+}
+
+
+def _chain_step_evidence(step: dict, refs: list, idx: int, fallback_files: list) -> str:
+    """A concrete evidence pointer for one chain step. Prefers the step's own
+    file:line, then the aggregated evidence_references, then affected_files — so an
+    N-step chain surfaces >= N pointers instead of one file for the whole chain."""
+    ev = step.get("evidence")
+    if ev:
+        return str(ev)
+    if idx < len(refs):
+        ref = refs[idx]
+        path = ref.get("file") or ""
+        if path:
+            return f"{path}:{ref['line']}" if ref.get("line") else path
+    if idx < len(fallback_files):
+        return str(fallback_files[idx])
+    return "—"
+
+
 def _attack_chains_section(story, results, T, styles):
-    chains = [c for c in ((results.get("quick_summary") or {}).get("attack_chain") or [])
-              if isinstance(c, dict)]
+    chains = [c for c in (results.get("attack_chains_v2") or []) if isinstance(c, dict)]
     if not chains:
         return
     story.append(PageBreak())
@@ -472,47 +502,82 @@ def _attack_chains_section(story, results, T, styles):
     story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
     story.append(Spacer(1, 4 * mm))
     story.append(Paragraph(
-        f"{len(chains)} correlated exploit path(s) were synthesized from co-occurring findings. "
-        "Each chain links an entry point, an exploitable weakness and a concrete impact.",
+        f"{len(chains)} evidence-backed attacker path(s) built by the Attack Chain engine. "
+        "Each chain links an entry point, the required weaknesses (with per-step evidence) "
+        "and a concrete impact, scored by member confidence, evidence quality and reachability. "
+        "The reachability badge distinguishes taint-<b>proven</b> chains from <b>heuristic</b> "
+        "co-occurrence chains.",
         styles["body"]))
     story.append(Spacer(1, 4 * mm))
 
     for idx, chain in enumerate(chains, 1):
         sev = str(chain.get("severity", "high"))
         scolor = SEVERITY_COLORS.get(sev, SEVERITY_COLORS["high"])
-        block = [
-            Paragraph(
-                f'{idx}. <font color="{scolor.hexval()}"><b>{_safe(chain.get("title", "Attack Chain"))}</b></font>'
-                + (f'  ({int(chain["exploitability"])}% exploitable)' if chain.get("exploitability") is not None else "")
-                + (f'  &middot; {escape(str(chain.get("chain_confidence")))} confidence' if chain.get("chain_confidence") else ""),
-                styles["finding_title"]),
-        ]
-        if chain.get("narrative"):
-            block.append(Spacer(1, 2 * mm))
-            block.append(Paragraph(_safe(chain["narrative"]), styles["table_cell"]))
-        if chain.get("impact"):
+        title = chain.get("name") or chain.get("summary") or "Attack Chain"
+        conf = chain.get("overall_confidence")
+        expl = chain.get("overall_exploitability")
+
+        header = (
+            f'{idx}. <font color="{scolor.hexval()}"><b>{_safe(title)}</b></font>'
+            f'  <font color="{scolor.hexval()}">[{sev.upper()}]</font>'
+        )
+        if conf is not None:
+            header += f'  &middot; {int(conf)}% confidence'
+        if expl is not None:
+            header += f'  &middot; {int(expl)}% exploitable'
+        block = [Paragraph(header, styles["finding_title"])]
+
+        # Reachability-proof badge.
+        proof = str(chain.get("reachability_proof") or "")
+        label, bcolor = _PROOF_BADGE.get(proof, (proof.upper() or "—", T["text_sub"]))
+        badge = f'<font color="{bcolor.hexval()}"><b>Reachability: {escape(label)}</b></font>'
+        if chain.get("blocked"):
+            badge += f'  &middot; <font color="{SEVERITY_COLORS["low"].hexval()}"><b>BLOCKED</b></font> by ' \
+                     + escape(", ".join(str(b) for b in (chain.get("blocked_by") or [])))
+        block.append(Spacer(1, 1.5 * mm))
+        block.append(Paragraph(badge, styles["table_cell"]))
+
+        if chain.get("summary"):
             block.append(Spacer(1, 1.5 * mm))
-            block.append(Paragraph(f'<b>Impact:</b> {_safe(chain["impact"])}', styles["table_cell"]))
+            block.append(Paragraph(_safe(chain["summary"]), styles["table_cell"]))
+        if chain.get("overall_impact"):
+            block.append(Spacer(1, 1.5 * mm))
+            block.append(Paragraph(f'<b>Impact:</b> {_safe(chain["overall_impact"])}', styles["table_cell"]))
+        entry = chain.get("entry_point") or {}
+        if entry.get("label") or entry.get("component"):
+            entry_txt = _safe(entry.get("label", ""))
+            if entry.get("component"):
+                entry_txt += f' (<b>{_safe(entry["component"])}</b>)'
+            block.append(Paragraph(f'<b>Entry point:</b> {entry_txt}', styles["table_cell"]))
         prereq = chain.get("prerequisites") or []
         if prereq:
             block.append(Paragraph(f'<b>Prerequisites:</b> {_safe("; ".join(str(p) for p in prereq))}', styles["table_cell"]))
-        std = [f"OWASP {o}" for o in (chain.get("owasp") or [])] + list(chain.get("masvs") or [])
-        if std:
-            block.append(Paragraph(f'<b>Standards:</b> {escape(", ".join(std))}', styles["table_cell"]))
-        steps = chain.get("steps") or []
+
+        # Per-step table with an Evidence column — one evidenced row per step.
+        steps = chain.get("steps") or chain.get("narrative") or []
+        refs = chain.get("evidence_references") or []
+        fallback_files = chain.get("affected_files") or []
         if steps:
-            rows = [["Step", "Severity", "Type"]]
-            for s in steps:
-                ssev = str(s.get("severity", "info"))
+            rows = [["#", "Step", "Evidence"]]
+            for i, s in enumerate(steps):
                 rows.append([
-                    Paragraph(_safe(s.get("title", "")), styles["table_cell"]),
-                    Paragraph(f'<font color="{SEVERITY_COLORS.get(ssev, SEVERITY_COLORS["info"]).hexval()}"><b>{ssev.upper()}</b></font>', styles["table_cell"]),
-                    Paragraph(escape(str(s.get("type", "")).replace("_", " ")), styles["table_cell"]),
+                    Paragraph(str(s.get("order", i + 1)), styles["table_cell"]),
+                    Paragraph(_safe(s.get("title", "") + (f' — {s["description"]}' if s.get("description") else "")),
+                              styles["table_cell"]),
+                    Paragraph(_safe(_chain_step_evidence(s, refs, i, fallback_files)), styles["table_cell"]),
                 ])
-            t = Table(rows, colWidths=[95 * mm, 28 * mm, 32 * mm])
+            t = Table(rows, colWidths=[8 * mm, 92 * mm, 55 * mm])
             t.setStyle(_table_style(T))
             block.append(Spacer(1, 2 * mm))
             block.append(t)
+
+        # Mitigations that break the chain.
+        mits = chain.get("mitigations") or []
+        if mits:
+            block.append(Spacer(1, 1.5 * mm))
+            block.append(Paragraph(f'<b>Breaks the chain:</b> {_safe("; ".join(str(m) for m in mits))}',
+                                   styles["table_cell"]))
+
         story.append(KeepTogether(block))
         story.append(Spacer(1, 5 * mm))
 
@@ -682,6 +747,13 @@ def _visible_findings(results):
 
     visible = []
     for f in findings:
+        # Attack-chain findings are curated, app-level synthesized items and are
+        # always shown so the findings list and the Attack Chains section reference
+        # the same chains. Their (now computed) confidence sets how confident the
+        # chain reads — never whether it appears.
+        if f.get("is_attack_chain"):
+            visible.append(f)
+            continue
         label = f.get("ownership_label")
         conf = f.get("confidence_score")
         if label is None and conf is None:
@@ -709,14 +781,21 @@ def _findings_section(story, results, T, styles):
 
     scope = results.get("_report_findings_scope", "application")
     stats = results.get("finding_quality_stats") or {}
+    acct = results.get("finding_accounting") or {}
     if scope == "application" and stats:
         story.append(Spacer(1, 2 * mm))
+        # This is the TOTAL withheld from the view (false positives + library noise +
+        # low confidence + low-value flows), NOT the FP-only count. It is deliberately
+        # labeled "hidden from this view" so it never reads as the Signal-Quality
+        # funnel's "false positives removed (pre-triage)" figure, which is FP-only.
+        hidden = acct.get("findings_suppressed_display", stats.get("suppressed_count", 0))
         story.append(Paragraph(
             f"Showing {len(findings)} high-signal, application-owned finding(s). "
-            f"{stats.get('suppressed_count', 0)} false positive(s) suppressed, "
+            f"{hidden} finding(s) hidden from this view (false positives, library / "
+            f"framework noise, low confidence), "
             f"{stats.get('collapsed_duplicates', 0)} duplicate(s) grouped, "
             f"{stats.get('reclassified_controls', 0)} security control(s) reclassified. "
-            f"Library / framework / low-confidence findings are available in the full export.",
+            f"Hidden findings are available in the full export.",
             styles["caption"],
         ))
     story.append(Spacer(1, 6 * mm))
@@ -1469,9 +1548,10 @@ def _binary_section(story, results, T, styles):
             label = str(val) if isinstance(val, str) else ("✓" if val else "✗")
             return Paragraph(f'<font color="{color.hexval()}">{label}</font>', styles["table_cell"])
 
+        arch_label = ", ".join(b.get("architectures") or []) or b.get("arch", "")
         rows.append([
             Paragraph(b.get("name",""), styles["table_cell_mono"]),
-            Paragraph(b.get("arch",""), styles["table_cell"]),
+            Paragraph(arch_label, styles["table_cell"]),
             cell(b.get("pie",   False)),
             cell(b.get("nx",    False)),
             cell(b.get("stack_canary", False)),

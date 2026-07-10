@@ -111,6 +111,20 @@ AI features require a configured provider — they are not available until one i
 * Flutter Security Intelligence
 * React Native Security Intelligence
 
+### Detection & Analysis
+
+* Android static analysis & APK / IPA decompilation with shared source indexing
+* Secret & credential detection
+* Endpoint & URL extraction
+* Taint analysis (source-to-sink data-flow)
+* Certificate & code-signing analysis
+* Native binary hardening analysis (NX, PIE, RELRO, stack canary)
+* CVE enrichment for native libraries and dependencies
+* Domain intelligence
+* API behavior analysis
+* Attack Chain analysis
+* OWASP MASVS mapping
+
 ### Intelligence Engines
 
 * Secret Intelligence v2
@@ -248,21 +262,35 @@ git clone https://github.com/f3rb123/beetle.git
 cd beetle
 ```
 
-### Configure Beetle
+### Configure Beetle (optional)
 
-Create a `.env` file (or export environment variables) with at least:
+Beetle runs out of the box — no configuration is required to start scanning. A fresh installation ships with default **development** administrator credentials:
+
+| Username | Password |
+| -------- | -------- |
+| `beetle` | `beetle` |
+
+To use your own credentials, override them (in `docker-compose.yml` or the environment) **before the first startup**:
 
 ```env
-SECRET_KEY=<minimum-32-character-secret>
-CORTEX_ADMIN_PASS=<initial-admin-password>
+CORTEX_ADMIN_USERNAME=beetle
+CORTEX_ADMIN_PASSWORD=beetle
 ```
 
-Optional integrations:
+* Bootstrap credentials are applied **only when no administrator account exists** — existing accounts are **never overwritten** and passwords are never reset.
+* **Production deployments should override these values** with strong credentials (or change the password after the first login).
+
+Optional integrations (AI providers and threat intelligence) can be enabled with additional variables:
 
 ```env
 ANTHROPIC_API_KEY=...
+OPENAI_API_KEY=...
+GEMINI_API_KEY=...
+DEEPSEEK_API_KEY=...
 VIRUSTOTAL_API_KEY=...
 ```
+
+> The JWT signing secret is generated and persisted automatically on first run; set `CORTEX_JWT_SECRET` if you want to supply your own.
 
 ### Build the containers
 
@@ -276,59 +304,42 @@ docker compose build
 docker compose up
 ```
 
-The first startup may take several minutes while Docker builds and initializes the environment. Watch the startup logs until Beetle reports that the backend has started successfully, then open:
+Once the backend reports that it has started successfully, open:
 
 ```
 http://localhost:9005
 ```
 
-The initial administrator account is created automatically during the first startup. You may optionally set the password with `CORTEX_ADMIN_PASS`; otherwise Beetle generates a secure random password. In both cases, the administrator username and password are printed in the container logs during initialization.
+Sign in with the default administrator credentials:
+
+| Username | Password |
+| -------- | -------- |
+| `beetle` | `beetle` |
+
+The login page shows these default credentials on a fresh installation and hides them automatically once the password is changed. Change the password after your first login, and override the defaults for production deployments.
 
 Stop Beetle at any time with `Ctrl + C`.
 
-### Scan Duration
+### Scan Performance
 
-Typical scan times:
+Beetle's shared source-analysis architecture reads and indexes the decompiled application **once** and reuses it across every detection and intelligence engine. A typical scan completes in seconds to a few minutes.
 
-* Small applications: **5–10 minutes**
-* Large applications: **10–20+ minutes**
-
-> Initial scans may take longer because Beetle performs decompilation, framework detection, source indexing, evidence generation, intelligence correlation, attack-chain construction and report preparation before presenting results.
-
-Actual duration depends on:
-
-* CPU
-* Available RAM
-* Storage performance
-* Application size
-* Resource complexity
-
-Scan times are not fixed — they vary with the host system and the application under analysis.
+Actual duration depends on the application size and resource complexity, and on host resources (CPU, available RAM, and storage performance).
 
 ---
 
 ## Troubleshooting
 
-### Administrator password not displayed
+### Can't sign in / resetting the administrator account
 
-This usually happens because the Docker volumes already contain an initialized Beetle database. When the database already exists, initialization does not run again, so no new administrator credentials are generated or printed.
+The administrator account is created **only on first initialization**. If the database already contains an administrator, the bootstrap credentials are ignored and existing accounts are never modified — so changing `CORTEX_ADMIN_USERNAME` / `CORTEX_ADMIN_PASSWORD` on an existing installation has no effect.
 
-To completely reset Beetle:
+To reset Beetle to a clean state (this recreates the default `beetle` / `beetle` administrator):
 
 ```bash
 docker compose down -v
 docker compose up
 ```
-
-> **Do not use `-d` here.** Run it in the foreground so you can watch initialization complete. The first startup may take several minutes.
-
-Once initialization finishes, inspect the logs:
-
-```bash
-docker compose logs backend
-```
-
-The administrator username and generated password are printed **after initialization completes**.
 
 > ⚠️ **`docker compose down -v` is destructive.** It removes:
 >
@@ -356,9 +367,15 @@ The administrator username and generated password are printed **after initializa
 ## Current Capabilities
 
 * Android, iOS, Flutter & React Native Security Intelligence
-* Secret Intelligence v2
-* Network Intelligence
+* APK / IPA Decompilation & Shared Source Indexing
+* Secret Intelligence v2 & Endpoint Extraction
+* Taint Analysis (source-to-sink data-flow)
+* Certificate & Code-Signing Analysis
+* Native Binary Hardening Analysis
+* CVE Enrichment (native libraries & dependencies)
+* Network Intelligence & Domain Intelligence
 * Cloud Configuration Intelligence
+* API Behavior Analysis
 * APKLeaks Integration
 * Semgrep Intelligence
 * Ownership Engine
@@ -374,7 +391,7 @@ The administrator username and generated password are printed **after initializa
 * AI Assistant & AI Actions (optional)
 * Scan Target Architecture
 * Executive, Technical & Compliance Reports
-* SARIF Export & CycloneDX SBOM
+* SARIF Export, CycloneDX SBOM & JSON Export
 
 ---
 
@@ -382,7 +399,6 @@ The administrator username and generated password are printed **after initializa
 
 The following capabilities are planned for future releases:
 
-* AI Security Intelligence
 * Infrastructure-as-Code Intelligence
 * Dynamic Security Intelligence
 * Cloud Security Intelligence

@@ -21,6 +21,9 @@ import logging
 import os
 import re
 
+from .analyst_intel import is_v2_chain
+from .finding_model import evidence_dict
+
 log = logging.getLogger("cortex.workspaces")
 
 _WS = re.compile(r"^wss?://", re.I)
@@ -73,6 +76,27 @@ def _all_chains(results: dict) -> list:
     return chains
 
 
+_STRONG_EVIDENCE = frozenset(("HIGH", "Excellent", "Good"))
+
+
+def _v2_confidence_checks(chain: dict, evidence: list, has_runtime: bool) -> list:
+    """Confidence checklist for a v2 engine chain from its REAL proof signals —
+    reachability_proof, a reachable entry point, member evidence quality and whether
+    a security control blocks it — instead of the cloud PII/exposure rubric."""
+    proof = str(chain.get("reachability_proof") or "").lower()
+    entry = chain.get("entry_point") if isinstance(chain.get("entry_point"), dict) else {}
+    member_confs = [e.get("confidence") for e in evidence]
+    strong_members = bool(member_confs) and all(c in _STRONG_EVIDENCE for c in member_confs)
+    return [
+        {"label": "Reachability proven by data-flow (taint)", "met": proof == "proven"},
+        {"label": "Reachability supported (not manifest-only)", "met": proof in ("proven", "heuristic")},
+        {"label": "Externally reachable entry point", "met": bool(entry.get("reachable"))},
+        {"label": "Required links backed by strong evidence", "met": strong_members},
+        {"label": "Runtime / data-flow proof present", "met": bool(has_runtime)},
+        {"label": "Not blocked by a security control", "met": not bool(chain.get("blocked"))},
+    ]
+
+
 def _member_evidence(full: dict, member: dict):
     """(file, line, evidence_view) for a chain member — sourced from the Evidence
     Selection Engine so chains render the same primary proof as the finding does.
@@ -87,10 +111,14 @@ def _member_evidence(full: dict, member: dict):
                 return file, line, view
         except Exception:  # noqa: BLE001 — never let chain enrichment fail a scan
             view = None
+    # `evidence` is polymorphic (see finding_model.evidence_dict): certificate
+    # and chain findings carry proof TEXT here, not a location dict. Those
+    # findings legitimately have no file/line — the text stays on the finding.
+    ev = evidence_dict(full) if full else {}
     file = (member.get("file_path") or member.get("file")
             or (full.get("file_path") if full else "")
-            or ((full.get("evidence") or {}).get("file_path") if full else "") or "")
-    line = (full.get("line") if full else 0) or 0
+            or ev.get("file_path") or "")
+    line = (full.get("line") if full else 0) or ev.get("line") or 0
     return file, line, view
 
 
@@ -140,18 +168,30 @@ def enrich_chains(results: dict) -> None:
             (by_id.get(e["finding_id"]) or by_title.get(e["title"]) or {}).get("taint_flow")
             or e["line"] for e in evidence
         )
-        checks = [
-            {"label": "PII / sensitive source confirmed", "met": "pii_source" in roles},
-            {"label": "Transport / control weakness confirmed", "met": "transport_weakness" in roles},
-            {"label": "Exfiltration sink / endpoint found", "met": "exfil_sink" in roles},
-            {"label": "Usable credential present", "met": "credential" in roles},
-            {"label": "Public exposure confirmed", "met": "exposure" in roles},
-            {"label": "Runtime / data-flow proof", "met": bool(has_runtime)},
-        ]
-        conf = chain.get("chain_confidence") or chain.get("confidence") or "LOW"
+        # Type-aware "Why confidence is X" checklist: a v2 engine chain is scored on
+        # its OWN proof signals (reachability_proof, member evidence, blocking), NOT
+        # the cloud PII/credential/exposure rubric — that rubric belongs to cloud
+        # attack paths only.
+        if is_v2_chain(chain):
+            checks = _v2_confidence_checks(chain, evidence, has_runtime)
+            conf = chain.get("chain_confidence") or _conf(chain)
+        else:
+            checks = [
+                {"label": "PII / sensitive source confirmed", "met": "pii_source" in roles},
+                {"label": "Transport / control weakness confirmed", "met": "transport_weakness" in roles},
+                {"label": "Exfiltration sink / endpoint found", "met": "exfil_sink" in roles},
+                {"label": "Usable credential present", "met": "credential" in roles},
+                {"label": "Public exposure confirmed", "met": "exposure" in roles},
+                {"label": "Runtime / data-flow proof", "met": bool(has_runtime)},
+            ]
+            conf = chain.get("chain_confidence") or chain.get("confidence") or "LOW"
         met = [c["label"] for c in checks if c["met"]]
         missing = [c["label"] for c in checks if not c["met"]]
+        # Merge, so the engine's own confidence_explanation (why_members/why_confidence)
+        # is preserved alongside the rendered checklist rather than clobbered.
+        existing_cx = chain.get("confidence_explanation") if isinstance(chain.get("confidence_explanation"), dict) else {}
         chain["confidence_explanation"] = {
+            **existing_cx,
             "confidence": conf,
             "checks": checks,
             "summary": (

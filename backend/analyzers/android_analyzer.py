@@ -25,14 +25,15 @@ from .common import (
     ns, DANGEROUS_PERMISSIONS, SDK_SIGNATURES,
     scan_files_for_secrets, scan_text_for_secrets,
     extract_urls, sort_findings, sort_findings_by_priority, SEVERITY_ORDER,
-    shannon_entropy,
+    shannon_entropy, rule_slug,
     normalize_severity, compute_severity_summary, dedupe_findings,
 )
 from . import scan_storage
+from .source_corpus import SourceCorpus
 from . import reachability_engine
 from . import trust_engine
 from . import finding_model
-from .code_analyzer import run_android_sast
+from .code_analyzer import run_android_sast, resolve_sql_raw_query_severity
 from .semgrep_runner import run_semgrep, semgrep_available
 from .osv_scanner import scan_dependencies
 from .string_analyzer import analyze_strings
@@ -55,7 +56,7 @@ from .evidence_scanner import (
     scan_directory_for_jwts, extract_urls
 )
 from .path_utils import relativize_path, normalize_relative_path, make_file_evidence
-from .chain_analyzer import synthesize_attack_chains, correlate_attack_chains
+from .chain_analyzer import synthesize_attack_chains
 from . import posture_analyzer
 from .secret_validator import validate_secrets
 from .taint_analyzer import run_taint_analysis
@@ -309,10 +310,13 @@ def _build_quick_summary(results: dict):
     if certificate_overview.get("overall_status") == "secure":
         secure_signals.append("Modern APK signature scheme detected")
 
-    # Attack chain synthesis — reuse the data computed during finalize (Phase 6
-    # Task 2) so chains are synthesized once; fall back for any caller that runs
-    # this before finalize.
+    # Attack chains come from the v2 engine (projected to legacy keys so existing
+    # readers keep working). The legacy _chain_data survives ONLY as a hint feeder
+    # for pentest hints; it no longer defines quick_summary.attack_chain.
+    from .attack_chains import to_quick_summary
+    chain_summary = to_quick_summary(results)
     chain_data = results.pop("_chain_data", None) or synthesize_attack_chains(results)
+    chain_severity = chain_summary[0]["severity"] if chain_summary else "none"
 
     results["quick_summary"] = {
         "total_vulnerabilities": len([finding for finding in findings if finding.get("severity") != "info"]),
@@ -320,10 +324,10 @@ def _build_quick_summary(results: dict):
         "key_critical_issues": key_issues[:6],
         "highlight_count": len(key_issues),
         "secure_signals": secure_signals,
-        "attack_chain":   chain_data.get("attack_chains", []),
+        "attack_chain":   chain_summary,
         "pentest_hints":  chain_data.get("pentest_playbook", []),
-        "chain_count":    chain_data.get("chain_count", 0),
-        "chain_severity": chain_data.get("highest_chain_severity", "none"),
+        "chain_count":    len(chain_summary),
+        "chain_severity": chain_severity,
     }
     results["view_modes"] = {
         "quick": {"recommended_tabs": ["dashboard", "findings", "manifest", "surface", "cert"]},
@@ -377,6 +381,11 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         "decompile_info":   {"jadx_dir": jadx_dir, "apktool_dir": apktool_dir, "tools_used": []},
     }
     preferred_source_dirs = [d for d in [jadx_dir, apktool_dir] if d and os.path.exists(d)]
+
+    # Priority 1 — SourceCorpus: ONE walk + ONE read of the decompiled tree,
+    # shared by every text analyzer below. Each analyzer keeps its own filtering,
+    # so detections are unchanged; only the redundant filesystem I/O is removed.
+    corpus = SourceCorpus()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         extract_started = time.perf_counter()
@@ -451,7 +460,7 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         if preferred_source_dirs:
             # Phase 1.9: single combined walk (Beetle Native + APKLeaks) sets
             # results["secrets"] (native) and fuses APKLeaks secrets/findings/endpoints.
-            _scan_precise_source_secrets(results, preferred_source_dirs)
+            _scan_precise_source_secrets(results, preferred_source_dirs, corpus=corpus)
         else:
             results["secrets"] = scan_files_for_secrets(tmpdir)
             # Only fall back to raw DEX strings when JADX source is unavailable.
@@ -471,7 +480,7 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         # ── Endpoint extraction ───────────────────────────────────────────────
         resource_started = time.perf_counter()
         log.info(f"[{scan_id}] stage=resource_scan start")
-        _extract_endpoints(tmpdir, results, preferred_source_dirs)
+        _extract_endpoints(tmpdir, results, preferred_source_dirs, corpus=corpus)
 
         # ── Network security config ───────────────────────────────────────────
         _analyze_network_security_config(tmpdir, results)
@@ -512,7 +521,7 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
             sast_roots.append(tmpdir)
         code_started = time.perf_counter()
         log.info(f"[{scan_id}] stage=sast start")
-        run_android_sast(sast_roots, results)
+        run_android_sast(sast_roots, results, corpus=corpus)
         _record_module_metric(results, "code_scanning", code_started, sast_findings=len([finding for finding in results.get("findings", []) if finding.get("source") == "SAST" or finding.get("rule_id")]))
         _stage(scan_id, "sast", code_started)
 
@@ -559,6 +568,16 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
             results.setdefault("taint_flows", [])
         _stage(scan_id, "taint", taint_started)
 
+        # ── Raw-SQL severity reconciliation ──────────────────────────────────
+        # Now that taint has run, decide android_sqlite_raw_query severity from
+        # real evidence (taint reach or string-building), downgrade parameterized
+        # queries to INFO, and drop the SAST finding where a taint SQLite finding
+        # already represents the same sink (no double count).
+        try:
+            resolve_sql_raw_query_severity(results)
+        except Exception:
+            log.exception("[sast] raw-SQL severity reconciliation failed")
+
         # ── VirusTotal hash lookup ────────────────────────────────────────────
         vt_started = time.perf_counter()
         log.info(f"[{scan_id}] stage=virustotal start")
@@ -582,12 +601,12 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         log.info(f"[{scan_id}] stage=strings_parallel start")
         with ThreadPoolExecutor(max_workers=5) as pool:
             futures = {
-                "string_analysis": pool.submit(_timed_value, "string_analysis", analyze_strings, tmpdir, "android"),
-                "emails": pool.submit(_timed_value, "email_detection", extract_emails_from_app, tmpdir, apk_path),
-                "apkid": pool.submit(_timed_value, "apkid_detection", detect_apkid_features, tmpdir),
-                "ips": pool.submit(_timed_value, "ip_detection", network_intel.extract_ips, tmpdir, extra_dirs),
-                "_cloud_config_hits": pool.submit(_timed_value, "cloud_config_scan", cloud_config.scan, tmpdir, extra_dirs),
-                "jwts": pool.submit(_timed_value, "jwt_detection", scan_directory_for_jwts, tmpdir, extra_dirs),
+                "string_analysis": pool.submit(_timed_value, "string_analysis", analyze_strings, tmpdir, "android", corpus=corpus),
+                "emails": pool.submit(_timed_value, "email_detection", extract_emails_from_app, tmpdir, apk_path, corpus=corpus),
+                "apkid": pool.submit(_timed_value, "apkid_detection", detect_apkid_features, tmpdir, corpus=corpus),
+                "ips": pool.submit(_timed_value, "ip_detection", network_intel.extract_ips, tmpdir, extra_dirs, corpus=corpus),
+                "_cloud_config_hits": pool.submit(_timed_value, "cloud_config_scan", cloud_config.scan, tmpdir, extra_dirs, corpus=corpus),
+                "jwts": pool.submit(_timed_value, "jwt_detection", scan_directory_for_jwts, tmpdir, extra_dirs, corpus=corpus),
             }
             for key, future in futures.items():
                 # Guarded: one noisy analyzer (e.g. IP scan on a pathological
@@ -704,7 +723,7 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
 
         # ── NEW: Android API Analysis ─────────────────────────────────────────
         api_started = time.perf_counter()
-        analyze_android_apis(tmpdir, results, source_dirs=preferred_source_dirs)
+        analyze_android_apis(tmpdir, results, source_dirs=preferred_source_dirs, corpus=corpus)
         _build_behavior_findings(results)
         _record_module_metric(results, "api_behavior_analysis", api_started, categories=len(results.get("android_api", {})))
 
@@ -723,6 +742,7 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
                 if ip.get("file_path")
             ]
             results["findings"].append({
+                "rule_id":           "hardcoded_public_ips",
                 "title":             f"Hardcoded Public IP Addresses ({len(public_ips)} found)",
                 "severity":          "low",
                 "category":          "Configuration",
@@ -746,6 +766,7 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         # ── Evidence: JWT Detection ───────────────────────────────────────────
         for jwt in results["jwts"]:
             results["findings"].append({
+                "rule_id":           "hardcoded_jwt_token",
                 "title":             "Hardcoded JWT Token",
                 "severity":          "high",
                 "category":          "Auth Token",
@@ -910,13 +931,14 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     results["findings"], results["manifest_evidence_stats"] = finding_model.enforce_manifest_evidence(
         results["findings"], scan_id, results.get("manifest_xml", ""),
     )
-    # ── Phase 6 Task 2: attack-chain correlation — mark members + first-class findings ──
-    _chain_data = correlate_attack_chains(results)
-    results["_chain_data"] = _chain_data
-    _chain_findings = _chain_data.get("attack_chain_findings", [])
-    if _chain_findings:
-        finding_model.canonicalize_findings(_chain_findings, _app_pkg)
-        results["findings"] = _chain_findings + results["findings"]
+    # ── Attack-chain correlation HINTS only ──────────────────────────────────
+    # The legacy synthesizer is demoted to a correlation-hint feeder: it produces
+    # results["_chain_data"] (still consumed by posture exploitability, the attack
+    # graph and pentest hints) but NO LONGER injects first-class chain findings and
+    # NO LONGER sets quick_summary.attack_chain. The displayed chains — findings
+    # list, PDF section, dashboard, AI context — all come from the v2 engine below,
+    # via attack_chains.annotate_findings, so one engine drives every surface.
+    results["_chain_data"] = synthesize_attack_chains(results)
     results["ownership_metrics"] = finding_model.emit_diagnostics(
         results["findings"], platform="android", app_package=_app_pkg,
     )
@@ -1022,6 +1044,17 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         evidence_selection.annotate(results, platform="android")
     except Exception:
         log.exception("[evidence_selection] failed; findings left without proof selection")
+    # ── Security Control Resolution — decide ONCE, from positive evidence, whether
+    # each defensive control (pinning, cleartext, root/frida/attestation detection,
+    # obfuscation, FLAG_SECURE) is present. Attack chains, MASVS coverage and the
+    # security score all read this instead of substring-matching finding text, so a
+    # "No Certificate Pinning" finding can never mark pinning present. Runs after all
+    # findings exist and before the first consumer. Additive: results['security_controls'].
+    try:
+        from . import security_controls
+        results["security_controls"] = security_controls.resolve(results)
+    except Exception:
+        log.exception("[security_controls] failed; consumers will resolve on demand")
     # ── Phase 1.7: Attack Chain Engine v2 — build realistic, evidence-backed,
     # explainable attacker journeys from the triaged findings + attack surface
     # (SAFE CHAINING: framework noise / suppressed / FP secrets / generated code
@@ -1030,6 +1063,14 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     try:
         from . import attack_chains
         attack_chains.annotate(results)
+        # Project v2 chains onto the findings list: mark participating findings
+        # (in_attack_chain) and prepend one first-class finding per chain, carrying
+        # v2's COMPUTED confidence. This is what makes the findings list and the PDF
+        # chain section reference the same (v2) chains instead of the legacy engine.
+        _n_chain_findings = attack_chains.annotate_findings(results)
+        if _n_chain_findings:
+            finding_model.canonicalize_findings(
+                [f for f in results["findings"] if f.get("is_attack_chain")], _app_pkg)
     except Exception:
         log.exception("[attack_chains_v2] failed; no v2 chains emitted")
     # ── Phase 1.8: Bug Bounty Intelligence — reportability guidance for every
@@ -1175,6 +1216,7 @@ def _parse_manifest(apk, results):
         min_sdk = int(apk.get_min_sdk_version() or 0)
         if 0 < min_sdk < 21:
             results["findings"].append({
+                "rule_id":        "manifest_low_min_sdk",
                 "title":          "Low Minimum SDK Version",
                 "severity":       "medium",
                 "category":       "Configuration",
@@ -1186,6 +1228,7 @@ def _parse_manifest(apk, results):
             })
         elif 0 < min_sdk < 24:
             results["findings"].append({
+                "rule_id":        "manifest_below_recommended_min_sdk",
                 "title":          "Below-Recommended Minimum SDK",
                 "severity":       "low",
                 "category":       "Configuration",
@@ -1211,6 +1254,7 @@ def _check_app_flags(app_elem, results):
             "reason": "android:debuggable is explicitly enabled and exposes the process to ADB debugging.",
         }
         results["findings"].append({
+            "rule_id":        "manifest_debuggable",
             "title":          "Application is Debuggable",
             "severity":       "high",
             "category":       "Binary Hardening",
@@ -1240,6 +1284,7 @@ def _check_app_flags(app_elem, results):
             "reason": "The manifest does not explicitly set android:debuggable. Build-time configuration should be verified.",
         }
         results["findings"].append({
+            "rule_id":        "manifest_debuggable_flag_missing",
             "title":          "Potentially Debuggable (Flag Missing)",
             "severity":       "low",
             "category":       "Binary Hardening",
@@ -1261,6 +1306,7 @@ def _check_app_flags(app_elem, results):
         _backup_spec = ({"attr": "allowBackup", "value": "true", "anchor": "application"}
                         if allow_backup is not None else {"anchor": "application"})
         results["findings"].append({
+            "rule_id":        "manifest_allow_backup",
             "title":          "Backup Enabled — Data Extraction Risk",
             "severity":       "medium",
             "category":       "Data Storage",
@@ -1274,6 +1320,7 @@ def _check_app_flags(app_elem, results):
     cleartext = attr("usesCleartextTraffic")
     if cleartext and cleartext.lower() in ("true", "1"):
         results["findings"].append({
+            "rule_id":        "manifest_cleartext_traffic",
             "title":          "Cleartext HTTP Traffic Permitted",
             "severity":       "high",
             "category":       "Network Security",
@@ -1287,6 +1334,7 @@ def _check_app_flags(app_elem, results):
     test_only = attr("testOnly")
     if test_only and test_only.lower() in ("true", "1"):
         results["findings"].append({
+            "rule_id":        "manifest_test_only",
             "title":          "Test-Only Build in Production",
             "severity":       "high",
             "category":       "Binary Hardening",
@@ -1341,6 +1389,7 @@ def _analyze_permissions(apk, results):
 
     if len(dangerous) >= 8:
         results["findings"].append({
+            "rule_id":        "permissions_excessive_dangerous",
             "title":          "Excessive Dangerous Permissions",
             "severity":       "medium",
             "category":       "Permissions",
@@ -1353,6 +1402,7 @@ def _analyze_permissions(apk, results):
     has_call = "android.permission.READ_CALL_LOG" in perms or "android.permission.PROCESS_OUTGOING_CALLS" in perms
     if has_sms and has_call:
         results["findings"].append({
+            "rule_id":        "permissions_sms_calllog_combo",
             "title":          "SMS + Call Log Access — Spyware-Like Permission Combo",
             "severity":       "high",
             "category":       "Permissions",
@@ -1520,6 +1570,7 @@ def _process_component(elem, comp_type, pkg, results):
 
     if permission and permission_level in {"normal", "dangerous", "unknown"}:
         results["findings"].append({
+            "rule_id":        "manifest_weak_exported_permission",
             "title":          f"Weak Exported Component Permission Protection — {short_name}",
             "severity":       "medium",
             "category":       "Attack Surface",
@@ -1543,6 +1594,7 @@ def _process_component(elem, comp_type, pkg, results):
             # Custom scheme deeplink
             for dl in deeplinks:
                 results["findings"].append({
+                    "rule_id":        "manifest_custom_scheme_deeplink",
                     "title":          f"Custom Scheme Deeplink Hijacking Surface — {short_name}",
                     "severity":       "high",
                     "category":       "Deeplinks",
@@ -1555,6 +1607,7 @@ def _process_component(elem, comp_type, pkg, results):
         elif browsable or schemes or deeplinks:
             # Exported activity that accepts URLs/data — high reachable impact.
             results["findings"].append({
+                "rule_id":        "manifest_exported_url_activity",
                 "title":          f"Exported URL-Handling Activity — {short_name}",
                 "severity":       exp_sev,
                 "category":       "Attack Surface",
@@ -1565,6 +1618,7 @@ def _process_component(elem, comp_type, pkg, results):
             })
         elif not actions:
             results["findings"].append({
+                "rule_id":        "manifest_exported_activity",
                 "title":          f"Exported Activity Without Protection — {short_name}",
                 "severity":       exp_sev,
                 "category":       "Attack Surface",
@@ -1576,6 +1630,7 @@ def _process_component(elem, comp_type, pkg, results):
 
     elif comp_type == "service" and not permission:
         results["findings"].append({
+            "rule_id":        "manifest_exported_service",
             "title":          f"Exported Service Without Permission — {short_name}",
             "severity":       exp_sev,
             "category":       "Attack Surface",
@@ -1587,6 +1642,7 @@ def _process_component(elem, comp_type, pkg, results):
 
     elif comp_type == "receiver" and not permission:
         results["findings"].append({
+            "rule_id":        "manifest_exported_receiver",
             "title":          f"Exported Broadcast Receiver Without Permission — {short_name}",
             "severity":       exp_sev,
             "category":       "Attack Surface",
@@ -1600,6 +1656,7 @@ def _process_component(elem, comp_type, pkg, results):
     elif comp_type == "provider":
         if not (permission or read_perm or write_perm):
             results["findings"].append({
+                "rule_id":        "manifest_exported_provider",
                 "title":          f"Exported Content Provider Without Permission — {short_name}",
                 "severity":       "high",
                 "category":       "Attack Surface",
@@ -1646,6 +1703,7 @@ def _detect_sdks(apk, tmpdir, results):
                     })
                     if sev in ("high", "medium"):
                         results["findings"].append({
+                            "rule_id":        "sdk_debug_sensitive_detected",
                             "title":          f"Debug/Sensitive SDK Detected — {sdk_name}",
                             "severity":       sev,
                             "category":       "Third-Party SDKs",
@@ -1789,6 +1847,7 @@ def _detect_session_recording_sdk_issues(tmpdir: str, all_packages: set[str], tr
         if relevant_hits:
             description += " A hardcoded identifier or configuration value was also detected."
         results["findings"].append({
+            "rule_id": "sdk_session_recording_present",
             "title": f"Session Recording SDK Present — {name}",
             "severity": "high",
             "category": "Third-Party SDKs",
@@ -1856,6 +1915,8 @@ def _build_behavior_findings(results: dict):
             continue
         primary = evidence[0]
         results["findings"].append({
+            # Stable id per behaviour CATEGORY (the rule key), not its title.
+            "rule_id": rule_slug("behavior", category),
             "title": rule["title"],
             "severity": rule["severity"],
             "category": "Behavior Analysis",
@@ -1886,6 +1947,7 @@ def _add_malware_permission_findings(results: dict):
         return
     severity = "high" if malware_count >= 12 else "medium" if malware_count >= 6 or common_count >= 10 else "low"
     results["findings"].append({
+        "rule_id": "permissions_malware_overlap",
         "title": "Malware Permission Overlap Elevated",
         "severity": severity,
         "category": "Permissions",
@@ -1904,6 +1966,7 @@ def _add_domain_intel_summary(results: dict):
     if not risky:
         return
     results["findings"].append({
+        "rule_id": "domain_intel_review_required",
         "title": "Domain Intelligence Review Required",
         "severity": "low" if len(risky) < 3 else "medium",
         "category": "Network Intelligence",
@@ -1942,6 +2005,7 @@ def _add_exported_webview_attack_chain(results: dict):
 
     actions = ", ".join(candidate.get("actions", [])[:3]) or "intent launch"
     results["findings"].append({
+        "rule_id": "chain_exported_intent_webview",
         "title": title,
         "severity": "high",
         "category": "Attack Surface",
@@ -2001,6 +2065,7 @@ def _detect_framework(tmpdir, results):
         framework_type = "react_native"
         details.append("React Native detected via JS bundle / libreactnativejni.so")
         results["findings"].append({
+            "rule_id":        "framework_react_native_detected",
             "title":          "React Native Framework Detected",
             "severity":       "info",
             "category":       "Framework",
@@ -2014,6 +2079,7 @@ def _detect_framework(tmpdir, results):
         framework_type = "flutter"
         details.append("Flutter detected via libflutter.so / libapp.so")
         results["findings"].append({
+            "rule_id":        "framework_flutter_detected",
             "title":          "Flutter Framework Detected",
             "severity":       "info",
             "category":       "Framework",
@@ -2028,6 +2094,7 @@ def _detect_framework(tmpdir, results):
         framework_type = "xamarin"
         details.append("Xamarin detected via .NET assemblies")
         results["findings"].append({
+            "rule_id":        "framework_xamarin_detected",
             "title":          "Xamarin/.NET Framework Detected",
             "severity":       "info",
             "category":       "Framework",
@@ -2041,6 +2108,7 @@ def _detect_framework(tmpdir, results):
         framework_type = "cordova"
         details.append("Cordova/Ionic detected via assets/www/")
         results["findings"].append({
+            "rule_id":        "framework_cordova_detected",
             "title":          "Cordova/Ionic Hybrid Framework Detected",
             "severity":       "medium",
             "category":       "Framework",
@@ -2185,6 +2253,7 @@ def _analyze_network_security_config(tmpdir, results):
     # 1. Global cleartext
     if cleartext_global:
         results["findings"].append({
+            "rule_id":        "nsc_global_cleartext",
             "title":          "Network Security Config — Global Cleartext HTTP Permitted",
             "severity":       "high",
             "category":       "Network Security",
@@ -2200,6 +2269,7 @@ def _analyze_network_security_config(tmpdir, results):
     for dc in cleartext_domains:
         domains_str = ", ".join(dc["domains"][:3])
         results["findings"].append({
+            "rule_id":        "nsc_domain_cleartext",
             "title":          f"Cleartext HTTP Permitted for Domain(s): {domains_str}",
             "severity":       "medium",
             "category":       "Network Security",
@@ -2212,6 +2282,7 @@ def _analyze_network_security_config(tmpdir, results):
     # 3. User CA trust
     if user_ca_trusted:
         results["findings"].append({
+            "rule_id":        "nsc_user_ca_trusted",
             "title":          "User-Installed CA Certificates Trusted",
             "severity":       "high",
             "category":       "Network Security",
@@ -2226,6 +2297,7 @@ def _analyze_network_security_config(tmpdir, results):
     # 4. Pin override in debug config (leak risk)
     if pin_override:
         results["findings"].append({
+            "rule_id":        "nsc_pin_override_debug",
             "title":          "Certificate Pinning Override in Debug Config",
             "severity":       "medium",
             "category":       "Network Security",
@@ -2238,6 +2310,7 @@ def _analyze_network_security_config(tmpdir, results):
     # 5. No pinning configured at all
     if not has_pinning:
         results["findings"].append({
+            "rule_id":        "nsc_no_pinning",
             "title":          "No Certificate Pinning Configured",
             "severity":       "medium",
             "category":       "Network Security",
@@ -2262,6 +2335,7 @@ def _analyze_network_security_config(tmpdir, results):
                     exp_date = _dt.strptime(exp, "%Y-%m-%d")
                     if exp_date < _dt.utcnow():
                         results["findings"].append({
+                            "rule_id":        "nsc_expired_pin",
                             "title":          f"Expired Certificate Pin — {domains_str}",
                             "severity":       "high",
                             "category":       "Network Security",
@@ -2276,6 +2350,7 @@ def _analyze_network_security_config(tmpdir, results):
             # Backup pin check (< 2 pins = no backup)
             if len(pin_set.get("pins", [])) < 2:
                 results["findings"].append({
+                    "rule_id":        "nsc_no_backup_pin",
                     "title":          f"Certificate Pinning — No Backup Pin for {domains_str}",
                     "severity":       "low",
                     "category":       "Network Security",
@@ -2287,6 +2362,7 @@ def _analyze_network_security_config(tmpdir, results):
             else:
                 # Positive finding — pinning is properly configured
                 results["findings"].append({
+                    "rule_id":        "nsc_pinning_configured",
                     "title":          f"Certificate Pinning Configured — {domains_str}",
                     "severity":       "info",
                     "category":       "Network Security",
@@ -2315,7 +2391,7 @@ def _scan_dex_strings(tmpdir, results):
             with open(dex_path, "rb") as f:
                 raw = f.read()
             # Extract printable strings
-            text = "".join(chr(b) if 32 <= b < 127 else " " for b in raw)
+            text = printable_text(raw)
             for s in scan_text_for_secrets(text, relativize_path(dex_path, tmpdir)):
                 key = f"{s['name']}:{s['value']}"
                 if key not in seen:
@@ -2326,12 +2402,12 @@ def _scan_dex_strings(tmpdir, results):
 
 
 # ─── Endpoint extraction ──────────────────────────────────────────────────────
-def _extract_endpoints(tmpdir, results, extra_dirs=None):
+def _extract_endpoints(tmpdir, results, extra_dirs=None, *, corpus: SourceCorpus = None):
     # Phase 2.5.6: broad, multi-source extraction (Java/Kotlin/Smali/Dart/TS/HTML/
     # config + ws/wss/ftp + custom-scheme deep links), shared with iOS via
     # endpoint_intel. Replaces the previous narrow http(s)-only resource scan.
     from . import endpoint_intel
-    results["endpoints"] = endpoint_intel.extract_endpoints(tmpdir, extra_dirs)
+    results["endpoints"] = endpoint_intel.extract_endpoints(tmpdir, extra_dirs, corpus=corpus or SourceCorpus())
 
 
 # ─── APK Protection Checks ────────────────────────────────────────────────────
@@ -2352,6 +2428,7 @@ def _check_apk_protections(tmpdir, results):
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 def _meta_finding(msg: str) -> dict:
     return {
+        "rule_id":     "analysis_note",
         "title":       "Analysis Note",
         "severity":    "info",
         "category":    "Meta",
@@ -2492,7 +2569,7 @@ def _reshape_native_secrets(hits: list) -> list:
     return findings
 
 
-def _scan_precise_source_secrets(results: dict, source_dirs: list[str]) -> None:
+def _scan_precise_source_secrets(results: dict, source_dirs: list[str], *, corpus: SourceCorpus = None) -> None:
     """Single combined walk (Beetle Native + APKLeaks) over JADX/apktool dirs.
 
     Phase 1.9: ONE filesystem traversal applies the unified catalog
@@ -2505,7 +2582,14 @@ def _scan_precise_source_secrets(results: dict, source_dirs: list[str]) -> None:
     from . import secret_catalog
     from .detection_sources import routing, fusion
 
-    hits = ev_secrets("", source_dirs, patterns=secret_catalog.combined())
+    # Collect the resource-ID constant classes skipped during the secret walk so
+    # evidence selection / chains can exclude them as proof locations too.
+    res_id_sink: set = set()
+    hits = ev_secrets("", source_dirs, patterns=secret_catalog.combined(),
+                      corpus=corpus or SourceCorpus(), resource_id_sink=res_id_sink)
+    if res_id_sink:
+        existing = set(results.get("resource_id_classes") or [])
+        results["resource_id_classes"] = sorted(existing | res_id_sink)
     native_hits, apk = routing.extract_apkleaks(hits)
     results["secrets"] = _reshape_native_secrets(native_hits)
     fusion.merge_secret_streams(results, apk.secrets)

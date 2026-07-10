@@ -133,13 +133,21 @@ def refine_snippet(context: str, fallback: str, tokens: set[str]) -> str:
     Prefers the line that contains the flagged value/API, then an API call, then a
     method signature, then any real code line — never an import/comment/brace line.
     Returns the chosen line (trimmed) or, when nothing better is found, the original
-    ``fallback`` unchanged (so we never blank out a snippet)."""
-    lines = (context or "").splitlines()
-    best, best_q = "", 0
-    for ln in lines:
+    ``fallback`` unchanged (so we never blank out a snippet).
+
+    The ``fallback`` is the finding's own authoritative single-line snippet (the exact
+    line the detector matched). It seeds the comparison as the incumbent, so a
+    neighbour line drawn from the wider ``context`` window only replaces it when it is
+    STRICTLY better proof. Without this, a multi-line context (e.g. a block of
+    ``<string>`` resource entries) whose lines all tie at the same quality would
+    silently swap the correct matched line for an earlier, unrelated neighbour — the
+    "Firebase URL evidence points at an unrelated strings.xml entry" class of bug."""
+    fb = (fallback or "").strip()
+    best, best_q = fb, _line_quality(fb, tokens)
+    for ln in (context or "").splitlines():
         q = _line_quality(ln, tokens)
         if q > best_q:
             best_q, best = q, ln.strip()
     if best_q >= 1:
         return best[:240]
-    return (fallback or "").strip()[:240]
+    return fb[:240]

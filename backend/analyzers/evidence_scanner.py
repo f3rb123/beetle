@@ -9,6 +9,9 @@ import ipaddress
 from functools import lru_cache
 from pathlib import Path
 from .path_utils import relativize_path
+from .common import rule_slug
+from .source_corpus import SourceCorpus
+from . import regex_prefilter
 
 
 # ─── Performance bounds ───────────────────────────────────────────────────────
@@ -164,17 +167,24 @@ def scan_file_for_patterns(
                    confidence, exploitability, check_entropy?, max_len?}
     Returns list of evidence findings.
     """
-    lines   = content.splitlines()
+    lines   = None  # split lazily — most files match nothing
     results = []
     seen    = set()
+    folded  = regex_prefilter.fold(content)
 
     for pat in patterns:
+        # Necessary-literal prefilter: skip the regex when the file provably
+        # cannot contain a match (see regex_prefilter — identical detections).
+        if not regex_prefilter.may_match(pat["pattern"], folded):
+            continue
         try:
             compiled = _compile_pattern(pat["pattern"])
         except re.error:
             continue
 
         for match in compiled.finditer(content):
+            if lines is None:
+                lines = content.splitlines()
             value = match.group(0)
             if isinstance(match.groups(), tuple) and match.groups():
                 value = match.group(1) if match.group(1) else value
@@ -219,6 +229,9 @@ def scan_file_for_patterns(
                 code_ctx = ""
 
             results.append(make_finding(
+                # Stable per-PATTERN id (never derived from the matched value).
+                rule_id           = rule_slug("secret", pat["name"]),
+                evidence_type     = "regex_match",
                 title             = pat["name"],
                 severity          = pat["severity"],
                 category          = pat["category"],
@@ -252,6 +265,9 @@ def scan_directory_for_secrets(
     extra_dirs: list = None,
     extensions: list = None,
     patterns: list = None,
+    *,
+    corpus: SourceCorpus = None,
+    resource_id_sink: set = None,
 ) -> list:
     """
     Walk base_dir (and extra_dirs) scanning text files for secrets.
@@ -261,7 +277,14 @@ def scan_directory_for_secrets(
     is unchanged). Callers may pass a combined catalog (native + APKLeaks via
     ``secret_catalog.combined()``) to scan ALL sources in this SINGLE walk; each
     returned finding then carries ``provenance`` / ``kind`` for the routing layer.
+
+    Decompiled resource-ID constant classes (R.java, incl. obfuscated ``a.java``)
+    are skipped: their 0x7f resource-ID integers are never secrets. When
+    ``resource_id_sink`` is provided, each skipped class's relative path is added to
+    it so later stages (evidence selection, chains) can exclude it too.
     """
+    from .code_analyzer import is_resource_id_class
+    corpus = corpus or SourceCorpus()
     if patterns is None:
         patterns = SECRET_PATTERNS_EVIDENCE
     if extensions is None:
@@ -296,7 +319,7 @@ def scan_directory_for_secrets(
     for scan_dir in dirs:
         if files_scanned >= _EV_MAX_FILES:
             break
-        for root, subdirs, files in os.walk(scan_dir):
+        for root, subdirs, files in corpus.walk(scan_dir):
             rel_root = os.path.relpath(root, scan_dir)
             if rel_root != "." and _ev_should_skip_dir(rel_root):
                 subdirs[:] = []
@@ -308,12 +331,18 @@ def scan_directory_for_secrets(
                     continue
                 fpath = os.path.join(root, fname)
                 try:
-                    if os.path.getsize(fpath) > _EV_MAX_FILE_BYTES:
+                    content = corpus.read_text(fpath, max_bytes=_EV_MAX_FILE_BYTES)
+                    if content is None:
                         continue
-                    with open(fpath, "r", errors="replace") as f:
-                        content = f.read()
                     files_scanned += 1
                     rel_path = relativize_path(fpath, scan_dir)
+                    # A resource-ID constant class (R.java / obfuscated) holds only
+                    # 0x7f resource IDs — never secrets. Skip it, and record it so
+                    # evidence selection / chains never point at it either.
+                    if is_resource_id_class(content):
+                        if resource_id_sink is not None:
+                            resource_id_sink.add(rel_path.replace("\\", "/"))
+                        continue
                     file_findings = scan_file_for_patterns(rel_path, content, patterns)
                     for finding in file_findings:
                         key = f"{finding.get('provenance','')}:{finding['name']}:{finding.get('value','')[:30]}"
@@ -329,8 +358,11 @@ def scan_directory_for_secrets(
 def scan_directory_for_ips(
     base_dir: str,
     extra_dirs: list = None,
+    *,
+    corpus: SourceCorpus = None,
 ) -> list:
     """Extract and classify IP addresses from source files."""
+    corpus = corpus or SourceCorpus()
     dirs = []
     if extra_dirs:
         dirs.extend(d for d in extra_dirs if d and os.path.exists(d))
@@ -360,7 +392,7 @@ def scan_directory_for_ips(
     for scan_dir in dirs:
         if files_scanned >= _EV_MAX_FILES:
             break
-        for root, subdirs, files in os.walk(scan_dir):
+        for root, subdirs, files in corpus.walk(scan_dir):
             rel_root = os.path.relpath(root, scan_dir)
             if rel_root != "." and _ev_should_skip_dir(rel_root):
                 subdirs[:] = []
@@ -377,10 +409,9 @@ def scan_directory_for_ips(
                     continue
                 fpath = os.path.join(root, fname)
                 try:
-                    if os.path.getsize(fpath) > _EV_MAX_FILE_BYTES:
+                    content = corpus.read_text(fpath, max_bytes=_EV_MAX_FILE_BYTES)
+                    if content is None:
                         continue
-                    with open(fpath, "r", errors="replace") as f:
-                        content = f.read()
                     files_scanned += 1
                     lines = content.splitlines()
                     for match in IP_PATTERN.finditer(content):
@@ -430,8 +461,9 @@ def scan_directory_for_ips(
     return sorted(results, key=lambda x: (0 if x["type"] == "public" else 1, x["ip"]))
 
 
-def scan_directory_for_jwts(base_dir: str, extra_dirs: list = None) -> list:
+def scan_directory_for_jwts(base_dir: str, extra_dirs: list = None, *, corpus: SourceCorpus = None) -> list:
     """Find hardcoded JWT tokens with file+line evidence."""
+    corpus = corpus or SourceCorpus()
     dirs = []
     if extra_dirs:
         dirs.extend(d for d in extra_dirs if d and os.path.exists(d))
@@ -460,7 +492,7 @@ def scan_directory_for_jwts(base_dir: str, extra_dirs: list = None) -> list:
     for scan_dir in dirs:
         if files_scanned >= _EV_MAX_FILES:
             break
-        for root, subdirs, files in os.walk(scan_dir):
+        for root, subdirs, files in corpus.walk(scan_dir):
             rel_root = os.path.relpath(root, scan_dir)
             if rel_root != "." and _ev_should_skip_dir(rel_root):
                 subdirs[:] = []
@@ -472,10 +504,9 @@ def scan_directory_for_jwts(base_dir: str, extra_dirs: list = None) -> list:
                     continue
                 fpath = os.path.join(root, fname)
                 try:
-                    if os.path.getsize(fpath) > _EV_MAX_FILE_BYTES:
+                    content = corpus.read_text(fpath, max_bytes=_EV_MAX_FILE_BYTES)
+                    if content is None:
                         continue
-                    with open(fpath, "r", errors="replace") as f:
-                        content = f.read()
                     files_scanned += 1
                     lines = content.splitlines()
                     for match in JWT_PATTERN.finditer(content):

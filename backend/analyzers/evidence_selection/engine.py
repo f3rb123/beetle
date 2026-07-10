@@ -80,16 +80,34 @@ def _manifest_filename(platform: str) -> str:
     return "Info.plist" if (platform or "").lower() == "ios" else "AndroidManifest.xml"
 
 
-def _candidates_from_finding(f: dict, platform: str = "android") -> list[Candidate]:
+def _path_excluded(path: str, exclude_paths: set) -> bool:
+    """A candidate path matches an excluded (resource-ID class) path when they are
+    equal or one is a path-suffix of the other — robust to differing scan roots."""
+    if not exclude_paths:
+        return False
+    p = (path or "").replace("\\", "/").lower()
+    for ex in exclude_paths:
+        if p == ex or p.endswith("/" + ex) or ex.endswith("/" + p):
+            return True
+    return False
+
+
+def _candidates_from_finding(f: dict, platform: str = "android",
+                             exclude_paths: set | None = None) -> list[Candidate]:
     """De-duped candidate proof locations for a finding (file_path + file_evidence
     + fusion merged_locations + a synthesized manifest candidate for declaration-
-    driven findings)."""
+    driven findings).
+
+    ``exclude_paths`` (resource-ID constant classes) are dropped: an R.java / obfuscated
+    R class is never a real proof location for a secret or a chain."""
     out: list[Candidate] = []
     seen: set = set()
 
     def add(path, line, snippet, source):
         path = (path or "").strip()
         if not path:
+            return
+        if source != "manifest" and _path_excluded(path, exclude_paths):
             return
         line = _int(line)
         key = (path.replace("\\", "/").lower(), line)
@@ -165,15 +183,17 @@ def _entry(c: Candidate) -> dict:
 
 
 def select(f: dict, ctx: OwnershipContext | None = None, *,
-           bug_bounty: bool = False, already_selected: set | None = None) -> dict:
+           bug_bounty: bool = False, already_selected: set | None = None,
+           exclude_paths: set | None = None) -> dict:
     """Score a finding's candidate proofs and choose primary/supporting/rejected.
 
     Returns the ``evidence_selection`` block. Pure w.r.t. the finding except that it
     adds ``(file,line)`` of the chosen primary to ``already_selected`` (cross-finding
-    de-noise) when that set is supplied.
+    de-noise) when that set is supplied. ``exclude_paths`` drops resource-ID constant
+    classes from the candidate set.
     """
     platform = (ctx.platform if ctx and ctx.platform else "android")
-    candidates = _candidates_from_finding(f, platform)
+    candidates = _candidates_from_finding(f, platform, exclude_paths)
     if not candidates:
         return {"version": C.SELECTION_VERSION, "primary": {}, "supporting": [],
                 "rejected": [], "candidate_count": 0,
@@ -320,6 +340,10 @@ def annotate(results: dict, *, platform: str | None = None) -> dict:
                                app_name=ctx.app_name)
     bb = bug_bounty_enabled(results)
     already: set = set()
+    # Resource-ID constant classes (recorded during the secret walk) are never a
+    # valid proof location — exclude them so no secret/chain evidence points at an
+    # R-constant class.
+    exclude_paths = {p.replace("\\", "/").lower() for p in (results.get("resource_id_classes") or [])}
 
     # Skip bridged secret→finding mirrors: they are removed at reconcile and must
     # not claim a shared proof file in the cross-finding de-noise pass.
@@ -329,7 +353,7 @@ def annotate(results: dict, *, platform: str | None = None) -> dict:
                        -_int(f.get("overall_confidence"))))
     annotated = multi = corrected = 0
     for f in ordered:
-        sel = select(f, ctx, bug_bounty=bb, already_selected=already)
+        sel = select(f, ctx, bug_bounty=bb, already_selected=already, exclude_paths=exclude_paths)
         f["evidence_selection"] = sel
         if sel.get("primary"):
             f["primary_evidence"] = sel["primary"]

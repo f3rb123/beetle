@@ -259,23 +259,58 @@ def _score_from_factors(factors: list[str]) -> int:
     return min(sum(_FACTOR_WEIGHTS.get(x, 0) for x in set(factors)), 100)
 
 
-def _reason_from_factors(factors: list[str], context: str = "") -> str:
+# Rating + its qualitative label are a PURE function of the score bucket, so the
+# number, the one-word rating and the sentence lead can never disagree.
+_RATING_BUCKETS = (
+    (80, "critical", "Critical exploitability"),
+    (60, "high",     "High exploitability"),
+    (35, "medium",   "Moderate exploitability"),
+    (0,  "low",      "Limited exploitability"),
+)
+
+
+def _rating_for(score: int) -> tuple[str, str]:
+    for threshold, rating, label in _RATING_BUCKETS:
+        if score >= threshold:
+            return rating, label
+    return "low", "Limited exploitability"
+
+
+def _reason_from_factors(score: int, factors: list[str], context: str = "") -> str:
+    """A sentence whose qualitative claim is fixed by the SCORE bucket and whose
+    body enumerates the SAME factors that produced that score. Because both the
+    lead and the score come from one factor set, the prose cannot contradict the
+    number."""
+    _, label = _rating_for(score)
     uniq = [x for x in _FACTOR_WEIGHTS if x in set(factors)]  # weight order
     if not uniq:
-        return "Limited exploitability — no externally reachable attacker path identified."
+        # A named path with a real score (a v2 chain) but no recognized token factors
+        # is still a path — attribute it rather than claiming none exists.
+        return f"{label} — attacker path via {context}." if context \
+            else f"{label} — no externally reachable attacker path identified."
     phrases = [_FACTOR_PHRASE[x] for x in uniq[:5]]
     lead = (context + ": ") if context else ""
     if len(phrases) == 1:
         body = phrases[0]
     else:
         body = ", ".join(phrases[:-1]) + " and " + phrases[-1]
-    return f"{lead}Attack path combines {body}."
+    return f"{label} — {lead}attack path combines {body}."
+
+
+def _v2_chain_factors(chain: dict) -> list[str]:
+    """Attacker-path factors for a v2 chain, from its entry point + step titles —
+    the same signals the reason sentence enumerates."""
+    entry = chain.get("entry_point") or {}
+    parts = [str(entry.get("label") or ""), str(entry.get("component") or "")]
+    for s in chain.get("steps") or []:
+        if isinstance(s, dict):
+            parts.append(str(s.get("title") or ""))
+            parts.append(str(s.get("description") or ""))
+    return _finding_factors({"title": " ".join(parts)})
 
 
 def compute_exploitability(results: dict) -> None:
     findings = results.get("findings", [])
-    chain_data = results.get("_chain_data") or {}
-    chains = chain_data.get("attack_chains", [])
 
     # Per-finding exploitability for reachable categories (additive field).
     reachable_cats = {"Attack Surface", "Deeplinks", "Network", "WebView",
@@ -289,42 +324,53 @@ def compute_exploitability(results: dict) -> None:
                 f.setdefault("exploitability", _score_from_factors(factors))
                 f.setdefault("exploitability_factors", sorted(set(factors)))
 
-    # Overall = the strongest attacker path: best chain, else best component /
-    # critical finding. Reason is generated from the dominant contributor.
-    candidates: list[tuple[int, str]] = []
-    for c in chains:
-        candidates.append((
-            int(c.get("exploitability", 0) or 0),
-            _reason_from_factors(
-                # derive factors from the chain's step titles
-                [x for step in c.get("steps", []) for x in _finding_factors(step)],
-                context=c.get("title", "Attack chain"),
-            ),
-        ))
+    # Overall = the strongest attacker path. Each candidate is (score, factors,
+    # context). The rating and the reason's qualitative lead are a pure function of
+    # `score`, and the factors enumerate what produced it, so the number and the
+    # sentence can never contradict.
+    #
+    # The dominant CHAIN is the v2 engine's #1 (attack_chains_v2[0]) — the SAME chain
+    # the CISO summary and the chain list display as #1 — carrying the v2 engine's
+    # own overall_exploitability. Sourcing exploitability and the chain ranking from
+    # ONE engine keeps the exploitability sentence and the displayed #1 chain in sync
+    # (they previously disagreed: exploitability read the legacy hint feeder).
+    candidates: list[tuple[int, list[str], str]] = []
+    v2_chains = results.get("attack_chains_v2") or []
+    if v2_chains:
+        top = v2_chains[0]
+        candidates.append((int(top.get("overall_exploitability") or 0),
+                           _v2_chain_factors(top),
+                           top.get("name") or top.get("title") or "Attack chain"))
     for hr in results.get("high_risk_components", []):
         factors = ["exported"]
         if hr.get("browsable") or hr.get("deeplinks"):
             factors.append("user_controlled")
         if hr.get("type") == "provider":
             factors.append("storage_access")
-        candidates.append((
-            _score_from_factors(factors),
-            _reason_from_factors(factors, context=f"Exported {hr.get('type','component')} {hr.get('short_name','')}"),
-        ))
+        ctx = f"Exported {hr.get('type','component')} {hr.get('short_name','')}".strip()
+        candidates.append((_score_from_factors(factors), factors, ctx))
     for f in findings:
-        if isinstance(f, dict) and f.get("severity") == "critical" and f.get("exploitability"):
-            candidates.append((int(f["exploitability"]),
-                               _reason_from_factors(_finding_factors(f), context=f.get("title", "Critical finding"))))
+        if isinstance(f, dict) and not f.get("is_attack_chain") and f.get("severity") == "critical":
+            factors = _finding_factors(f)
+            if factors:
+                candidates.append((_score_from_factors(factors), factors,
+                                   f.get("title", "Critical finding")))
 
-    if candidates:
-        score, reason = max(candidates, key=lambda t: t[0])
+    # Keep candidates with a real score. A v2 chain keeps the engine's number even if
+    # its step titles yield no token factors; component/finding scores come from their
+    # factors, so a positive score there already implies factors.
+    scored = [t for t in candidates if t[0] > 0]
+
+    if scored:
+        score, factors, context = max(scored, key=lambda t: t[0])
+        reason = _reason_from_factors(score, factors, context)
     else:
-        score, reason = 0, "No exploitable attacker path identified."
+        score, reason = 0, _reason_from_factors(0, [], "")
 
+    rating, _ = _rating_for(score)
     results["exploitability_score"] = {
         "score": int(score),
-        "rating": ("critical" if score >= 80 else "high" if score >= 60
-                   else "medium" if score >= 35 else "low"),
+        "rating": rating,
         "reason": reason,
     }
 

@@ -36,6 +36,7 @@ def check_firebase_db(results: dict):
 
                 if status == 200 and body != "null":
                     results["findings"].append({
+                        "rule_id":        "firebase_db_public_read",
                         "title":          "Firebase Database — Unauthenticated Read Access CONFIRMED",
                         "severity":       "critical",
                         "category":       "Cloud Configuration",
@@ -48,6 +49,7 @@ def check_firebase_db(results: dict):
                     })
                 elif status == 200:
                     results["findings"].append({
+                        "rule_id":        "firebase_db_empty_response",
                         "title":          "Firebase Database — Accessible (Empty Response)",
                         "severity":       "medium",
                         "category":       "Cloud Configuration",
@@ -59,6 +61,7 @@ def check_firebase_db(results: dict):
                     })
                 else:
                     results["findings"].append({
+                        "rule_id":        "firebase_db_access_restricted",
                         "title":          "Firebase Database — Access Restricted",
                         "severity":       "info",
                         "category":       "Cloud Configuration",
@@ -67,6 +70,7 @@ def check_firebase_db(results: dict):
         except urllib.error.HTTPError as e:
             if e.code == 401:
                 results["findings"].append({
+                    "rule_id":     "firebase_db_auth_required",
                     "title":       "Firebase Database — Authentication Required",
                     "severity":    "info",
                     "category":    "Cloud Configuration",
@@ -112,6 +116,7 @@ def check_assetlinks(results: dict):
 
                 if pkg_found:
                     results["findings"].append({
+                        "rule_id":     "assetlinks_valid",
                         "title":       f"assetlinks.json Valid — {host}",
                         "severity":    "info",
                         "category":    "Deeplinks",
@@ -119,6 +124,7 @@ def check_assetlinks(results: dict):
                     })
                 else:
                     results["findings"].append({
+                        "rule_id":        "assetlinks_missing_package",
                         "title":          f"assetlinks.json Missing App Package — {host}",
                         "severity":       "medium",
                         "category":       "Deeplinks",
@@ -132,6 +138,7 @@ def check_assetlinks(results: dict):
 
         except urllib.error.HTTPError:
             results["findings"].append({
+                "rule_id":        "assetlinks_not_found",
                 "title":          f"assetlinks.json Not Found — {host}",
                 "severity":       "high",
                 "category":       "Deeplinks",
@@ -203,6 +210,7 @@ def analyze_file_inventory(apk_path: str, results: dict):
 
     for item in suspicious:
         results["findings"].append({
+            "rule_id":        "apk_suspicious_file",
             "title":          f"Suspicious File in APK — {Path(item['file']).name}",
             "severity":       item["severity"],
             "category":       "File Analysis",
@@ -233,6 +241,7 @@ def detect_obfuscation(tmpdir: str, results: dict):
         ratio = short_classes / total_classes
         if ratio > 0.4:
             results["findings"].append({
+                "rule_id":     "obfuscation_detected",
                 "title":       "Code Obfuscation Detected (ProGuard/R8)",
                 "severity":    "info",
                 "category":    "Resilience",
@@ -243,6 +252,7 @@ def detect_obfuscation(tmpdir: str, results: dict):
             })
         elif ratio < 0.05 and total_classes > 100:
             results["findings"].append({
+                "rule_id":     "obfuscation_not_detected",
                 "title":       "Code Obfuscation Not Detected",
                 "severity":    "low",
                 "category":    "Resilience",
@@ -306,6 +316,7 @@ def check_s3_buckets(results: dict, max_buckets: int = 5):
         except urllib.error.HTTPError as e:
             if e.code in (403,):
                 results["findings"].append({
+                    "rule_id":     "cloud_s3_listing_denied",
                     "title":       f"S3 Bucket Exists, Listing Denied — {bucket}",
                     "severity":    "info",
                     "category":    "Cloud Configuration",

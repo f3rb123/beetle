@@ -353,6 +353,10 @@ CODE_RULES = [
     {
         "id":          "android_sqlite_raw_query",
         "title":       "Raw SQL Query — SQL Injection Risk",
+        # Fires on every raw-SQL sink; severity is reconciled downstream by
+        # code_analyzer.resolve_sql_raw_query_severity — HIGH only when a taint flow
+        # reaches the sink or the SQL argument is string-built (concatenation /
+        # String.format / Kotlin interpolation); parameterized queries downgrade to INFO.
         "pattern":     r"rawQuery\(|execSQL\(|compileStatement\(",
         "severity":    "high",
         "category":    "Data Storage",
@@ -569,27 +573,27 @@ CODE_RULES = [
     # ── Resilience / Anti-Tamper ───────────────────────────────────────────────
     {
         "id":          "android_no_root_detection",
-        "title":       "No Root Detection Implemented",
+        "title":       "Root Detection Present",
         "pattern":     r"su\b|RootBeer|SafetyNet|isRooted|isDeviceRooted|checkRootMethod",
         "severity":    "info",
         "category":    "Resilience",
         "cwe":         "CWE-693",
         "masvs":       "MASVS-RESILIENCE-1",
         "owasp":       "M8",
-        "description": "Root detection APIs detected in app. Rooted devices allow bypassing many Android security controls.",
-        "recommendation": "Implement multi-layered root detection (RootBeer + SafetyNet/Play Integrity API). Consider blocking functionality on rooted devices for sensitive apps.",
+        "description": "Root detection APIs were detected in the app (su-binary checks, RootBeer, SafetyNet/Play Integrity, or isRooted/isDeviceRooted). This is a defensive anti-tampering control, not a vulnerability — on rooted devices many Android security controls can be bypassed, so the app probes for them.",
+        "recommendation": "Keep the check. For higher assurance, layer on-device root detection (file/mount/native syscall checks) with server-side Play Integrity / SafetyNet attestation, and never treat on-device root detection as a hard security boundary — it is bypassable on a determined attacker's device.",
     },
     {
         "id":          "android_no_screenshot_prevention",
-        "title":       "Screenshot Prevention Not Detected",
+        "title":       "Screenshot Protection Present (FLAG_SECURE)",
         "pattern":     r"FLAG_SECURE|WindowManager\.LayoutParams\.FLAG_SECURE",
         "severity":    "info",
         "category":    "Resilience",
         "cwe":         "CWE-200",
         "masvs":       "MASVS-STORAGE-1",
         "owasp":       "M9",
-        "description": "FLAG_SECURE may not be set. Without it, sensitive screens can be captured in screenshots and app switcher thumbnails.",
-        "recommendation": "Set WindowManager.LayoutParams.FLAG_SECURE on activities displaying sensitive data.",
+        "description": "The app uses WindowManager FLAG_SECURE, which prevents sensitive screens from being captured in screenshots and app-switcher thumbnails. This is a defensive control, not a vulnerability.",
+        "recommendation": "Confirm FLAG_SECURE is applied to every activity that displays sensitive data (not just one screen); it must be set before the window is shown to be effective.",
     },
     {
         "id":          "android_frida_detection",

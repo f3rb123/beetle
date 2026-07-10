@@ -39,6 +39,7 @@ from .evidence_scanner import (
     is_binary_dump_path, _ev_should_skip_dir, _EV_MAX_FILES, _EV_MAX_FILE_BYTES,
 )
 from .path_utils import relativize_path
+from .source_corpus import SourceCorpus
 
 log = logging.getLogger("cortex.cloud_config")
 
@@ -97,9 +98,10 @@ def _project_id(stype: str, raw: str) -> str:
     return ""
 
 
-def scan(base_dir: str, extra_dirs: list | None = None) -> list[dict]:
+def scan(base_dir: str, extra_dirs: list | None = None, *, corpus: SourceCorpus | None = None) -> list[dict]:
     """Raw cloud-config extraction over the decompiled tree. Returns one hit per
     (canonical value, file, line). No classification/ownership yet."""
+    corpus = corpus or SourceCorpus()
     dirs: list[str] = []
     if extra_dirs:
         dirs.extend(d for d in extra_dirs if d and os.path.exists(d))
@@ -112,7 +114,7 @@ def scan(base_dir: str, extra_dirs: list | None = None) -> list[dict]:
     for scan_dir in dirs:
         if files_scanned >= _EV_MAX_FILES:
             break
-        for root, subdirs, files in os.walk(scan_dir):
+        for root, subdirs, files in corpus.walk(scan_dir):
             rel_root = os.path.relpath(root, scan_dir)
             if rel_root != "." and _ev_should_skip_dir(rel_root):
                 subdirs[:] = []
@@ -123,12 +125,8 @@ def scan(base_dir: str, extra_dirs: list | None = None) -> list[dict]:
                 if not fname.lower().endswith(_CC_EXTENSIONS) or is_binary_dump_path(fname):
                     continue
                 fpath = os.path.join(root, fname)
-                try:
-                    if os.path.getsize(fpath) > _EV_MAX_FILE_BYTES:
-                        continue
-                    with open(fpath, "r", errors="replace") as f:
-                        content = f.read()
-                except OSError:
+                content = corpus.read_text(fpath, max_bytes=_EV_MAX_FILE_BYTES)
+                if content is None:
                     continue
                 files_scanned += 1
                 if "appspot.com" not in content.lower() and "gs://" not in content.lower() \
@@ -165,6 +163,7 @@ def _finding(entry: dict) -> dict:
     value = entry["value"]
     proj = f" (project `{entry['project_id']}`)" if entry.get("project_id") else ""
     return {
+        "rule_id": f"cloud_{entry['type'].lower()}",
         "title": f"{label} Reference — {value}",
         "severity": entry["severity"],
         "category": "Cloud Configuration",

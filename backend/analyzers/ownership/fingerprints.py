@@ -108,6 +108,10 @@ ANDROIDX = [
     fp("AndroidX Biometric", _F.THIRD_PARTY_SDK, package_prefixes=["androidx.biometric"]),
     fp("AndroidX Security", _F.THIRD_PARTY_SDK, package_prefixes=["androidx.security"]),
     fp("AndroidX Hilt", _F.THIRD_PARTY_SDK, package_prefixes=["androidx.hilt"]),
+    # The WebView support library (the Chromium WebKit boundary interfaces live under
+    # org.chromium.support_lib_boundary; androidx.webkit is its public surface). Library
+    # code — never app code, so it can never anchor an attack chain as an entry.
+    fp("AndroidX WebKit", _F.THIRD_PARTY_SDK, package_prefixes=["androidx.webkit"]),
     # Generic catch-all (lowest specificity → only fires when no module above matched).
     fp("AndroidX (Jetpack)", _F.THIRD_PARTY_SDK, confidence=Confidence.FRAMEWORK,
        package_prefixes=["androidx."], reason="Matched AndroidX/Jetpack package"),
@@ -198,6 +202,11 @@ OPEN_SOURCE = [
     fp("ZXing", _F.OPEN_SOURCE_LIBRARY, package_prefixes=["com.google.zxing", "com.journeyapps.barcodescanner"]),
     fp("ExoPlayer / Media3", _F.OPEN_SOURCE_LIBRARY,
        package_prefixes=["com.google.android.exoplayer2", "androidx.media3"]),
+    # Chromium — the open-source engine behind Android System WebView and its support
+    # library (org.chromium.support_lib_boundary.*). Bundled library code, not the app;
+    # covers org.chromium.support_lib_boundary via the org.chromium. prefix.
+    fp("Chromium / Android WebView", _F.OPEN_SOURCE_LIBRARY,
+       package_prefixes=["org.chromium."]),
 ]
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -306,6 +315,24 @@ VENDOR = [
     fp("Twilio", _F.VENDOR_SDK, platform="both", package_prefixes=["com.twilio"], class_prefixes=["TWS", "TVO"]),
     fp("Zendesk", _F.VENDOR_SDK, platform="both", package_prefixes=["com.zendesk", "zendesk."]),
     fp("Intercom", _F.VENDOR_SDK, platform="both", package_prefixes=["io.intercom"], class_prefixes=["ICM"]),
+    fp("Amazon Publisher Services (APS/TAM)", _F.VENDOR_SDK, platform="android",
+       package_prefixes=["com.amazon.aps", "com.amazon.device.ads"],
+       reason="Matched Amazon Publisher Services / Mobile Ads SDK"),
+    fp("Amazon In-App Purchasing", _F.VENDOR_SDK, platform="android",
+       package_prefixes=["com.amazon.device.iap"],
+       reason="Matched Amazon In-App Purchasing SDK"),
+    fp("Login with Amazon", _F.VENDOR_SDK, platform="android",
+       package_prefixes=["com.amazon.identity"],
+       reason="Matched Login with Amazon / Amazon Identity SDK"),
+    fp("OneTrust CMP", _F.VENDOR_SDK, platform="both",
+       package_prefixes=["com.onetrust"], path_tokens=["onetrust"],
+       reason="Matched OneTrust consent-management SDK"),
+    fp("Radaee PDF", _F.VENDOR_SDK, platform="android",
+       package_prefixes=["com.radaee"], path_tokens=["librdpdf"],
+       reason="Matched Radaee PDF SDK"),
+    fp("IAB Open Measurement SDK", _F.VENDOR_SDK, platform="both",
+       package_prefixes=["com.iab.omid"], path_tokens=["omsdk"],
+       reason="Matched IAB Open Measurement SDK"),
 ]
 
 # ════════════════════════════════════════════════════════════════════════════

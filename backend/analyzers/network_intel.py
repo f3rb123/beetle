@@ -39,6 +39,7 @@ from .evidence_scanner import (
     _ev_should_skip_dir, _EV_MAX_FILES, _EV_MAX_FILE_BYTES,
 )
 from .path_utils import relativize_path
+from .source_corpus import SourceCorpus
 
 log = logging.getLogger("cortex.network_intel")
 
@@ -183,10 +184,11 @@ def _dir_priority(p: str) -> int:
     return 3
 
 
-def extract_ips(base_dir: str, extra_dirs: list | None = None) -> list:
+def extract_ips(base_dir: str, extra_dirs: list | None = None, *, corpus: SourceCorpus | None = None) -> list:
     """Raw IPv4 + IPv6 extraction over the decompiled tree. One hit per (ip, file,
     line); no classification/ownership yet (that is :func:`annotate`'s job). Reuses
     the evidence scanner's file caps, dir-skip, version and binary-dump filters."""
+    corpus = corpus or SourceCorpus()
     dirs: list[str] = []
     if extra_dirs:
         dirs.extend(d for d in extra_dirs if d and os.path.exists(d))
@@ -200,7 +202,7 @@ def extract_ips(base_dir: str, extra_dirs: list | None = None) -> list:
     for scan_dir in dirs:
         if files_scanned >= _EV_MAX_FILES:
             break
-        for root, subdirs, files in os.walk(scan_dir):
+        for root, subdirs, files in corpus.walk(scan_dir):
             rel_root = os.path.relpath(root, scan_dir)
             if rel_root != "." and _ev_should_skip_dir(rel_root):
                 subdirs[:] = []
@@ -211,12 +213,8 @@ def extract_ips(base_dir: str, extra_dirs: list | None = None) -> list:
                 if not fname.lower().endswith(_IP_EXTENSIONS) or is_binary_dump_path(fname):
                     continue
                 fpath = os.path.join(root, fname)
-                try:
-                    if os.path.getsize(fpath) > _EV_MAX_FILE_BYTES:
-                        continue
-                    with open(fpath, "r", errors="replace") as f:
-                        content = f.read()
-                except OSError:
+                content = corpus.read_text(fpath, max_bytes=_EV_MAX_FILE_BYTES)
+                if content is None:
                     continue
                 files_scanned += 1
                 lines = content.splitlines()
