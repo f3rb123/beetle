@@ -517,6 +517,12 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         ownership.annotate(results)
     except Exception:
         log.exception("[ownership] failed; findings left without ownership metadata")
+    # Fix 2: demote library/framework-owned generic code-pattern findings to INFO
+    # library-noise (unless app-owned reachability). APPLICATION/UNKNOWN untouched.
+    try:
+        finding_model.demote_library_code_findings(results)
+    except Exception:
+        log.exception("[library_noise] demotion failed")
     # ── Phase 1.3: Confidence Engine — explainable per-finding confidence
     # (detection/ownership/evidence/context/exploitability/overall). Additive
     # only; reads owner_* from the Ownership Engine above. Never changes severity,

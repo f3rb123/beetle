@@ -1,6 +1,6 @@
 // Shared atoms + data helpers for the Phase 13 workspace. Presentation only.
 import { useEffect } from 'react'
-import { chainEvidenceTargets } from './evidence-model.js'
+import { chainEvidenceTargets, humanizeOwnership } from './evidence-model.js'
 
 export const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info']
 export const SEV_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
@@ -55,8 +55,7 @@ export function severityCounts(findings = []) {
 }
 
 export function ownershipLabel(f) {
-  const l = f.ownership_label || f.ownership || ''
-  return l ? l.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, m => m.toUpperCase()) : ''
+  return humanizeOwnership((f && (f.ownership_label || f.ownership)) || '')
 }
 
 export function confidenceLabel(f) {

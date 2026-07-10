@@ -217,9 +217,40 @@ def clear_file_index(root: str = None):
         _FILE_INDEX_CACHE.pop(os.path.abspath(root), None)
 
 
+def _norm_identifier(s: str) -> str:
+    """Lowercase, strip all non-alphanumerics — so BRIEFLY_SHOW_PASSWORD and
+    brieflyShowPassword normalize to the same token for name-vs-value comparison."""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _value_is_its_own_field_name(value: str, context: str) -> bool:
+    """True when the value is a bare identifier that equals the assignment's constant
+    NAME (case-insensitive, ignoring separators) — a preference/resource KEY string,
+    not a credential: e.g. `String BRIEFLY_SHOW_PASSWORD = "brieflyShowPassword";`.
+
+    Requires the value to be a pure identifier (letters/underscores, no digits, no
+    special chars, no spaces) so a value with real entropy is never mistaken for a
+    key name."""
+    if not value or not re.fullmatch(r"[A-Za-z][A-Za-z_]*", value):
+        return False
+    val_norm = _norm_identifier(value)
+    if not val_norm:
+        return False
+    # Constant/field names that are assigned a string literal in the surrounding code.
+    for name in re.findall(r"([A-Za-z_][A-Za-z0-9_]{2,})\s*=\s*['\"]", context or ""):
+        if _norm_identifier(name) == val_norm:
+            return True
+    return False
+
+
 def _looks_like_ui_password_false_positive(value: str, context: str) -> bool:
     value_lower = (value or "").lower()
     context_lower = (context or "").lower()
+
+    # A value that is just its own constant/field name is a preference-key string,
+    # not a password (brieflyShowPassword == BRIEFLY_SHOW_PASSWORD).
+    if _value_is_its_own_field_name(value, context):
+        return True
 
     # Known UI/label words that are never real passwords
     _UI_VALUES = {

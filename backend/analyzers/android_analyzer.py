@@ -1004,6 +1004,14 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         ownership.annotate(results)
     except Exception:
         log.exception("[ownership] failed; findings left without ownership metadata")
+    # Fix 2: now that ownership is attached, demote library/framework-owned generic
+    # code-pattern findings (e.g. addJavascriptInterface inside io.flutter.plugins) to
+    # INFO library-noise unless they carry app-owned reachability. Only library owners
+    # are affected; APPLICATION / UNKNOWN keep their severity.
+    try:
+        finding_model.demote_library_code_findings(results)
+    except Exception:
+        log.exception("[library_noise] demotion failed")
     # ── Phase 1.3: Confidence Engine — explainable per-finding confidence
     # (detection/ownership/evidence/context/exploitability/overall). Additive
     # only; reads owner_* from the Ownership Engine above. Never changes severity,

@@ -16,9 +16,35 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 from . import config as C
 from . import patterns as P
+
+# A bare-identifier value that equals its own constant/field NAME is a preference/
+# resource KEY string, not a credential (e.g. BRIEFLY_SHOW_PASSWORD="brieflyShowPassword").
+_FIELD_ASSIGN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]{2,})\s*=\s*['\"]")
+
+
+def _norm_ident(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _is_preference_key_value(value: str, ctx: dict) -> bool:
+    """True when the value is a pure identifier (letters/underscores, no digits, no
+    special chars → no entropy) that equals its own assignment's constant name — a
+    preference/resource key, not a real credential."""
+    if not value or not re.fullmatch(r"[A-Za-z][A-Za-z_]*", value):
+        return False
+    vn = _norm_ident(value)
+    if not vn:
+        return False
+    # The captured variable/constant name equals the value.
+    if _norm_ident(ctx.get("name") or "") == vn:
+        return True
+    # …or an assignment in the surrounding snippet does.
+    blob = "\n".join(str(ctx.get(k) or "") for k in ("snippet", "code_context", "title"))
+    return any(_norm_ident(nm) == vn for nm in _FIELD_ASSIGN_RE.findall(blob))
 
 log = logging.getLogger("cortex.secret_intel_engine")
 
@@ -323,6 +349,8 @@ class SecretIntelligenceEngine:
             return C.Status.GENERATED_CONSTANT, "crypto test vector / library constant"
         if fp_kind == "unreferenced_generic":
             return C.Status.FALSE_POSITIVE, "long random value with no credential context"
+        if fp_kind == "preference_key":
+            return C.Status.FALSE_POSITIVE, "bare identifier equal to its field/preference key name"
         if fp_kind in ("placeholder", "garbage"):
             return C.Status.FALSE_POSITIVE, "placeholder or low-entropy non-secret"
         if owner_type == "GeneratedCode" and kind not in (P.KIND_PROVIDER, P.KIND_STRUCTURED):
@@ -362,7 +390,14 @@ class SecretIntelligenceEngine:
         # Heroku API key, which is just a bare UUID): those are indistinguishable
         # from any request/correlation id, so they also require credential context.
         is_generic = self._needs_context(rec)
-        if (not is_fp and not validated and is_generic and context_score is not None
+        # Fix 4: a password/secret-named GENERIC value that is just its own field/
+        # constant name (a bare identifier, no entropy) is a preference/resource KEY,
+        # not a credential — score it as an unreferenced constant, never HIGH.
+        if not is_fp and not validated and is_generic and _is_preference_key_value(value, ctx):
+            is_fp, fp_kind = True, "preference_key"
+            fp_reason = ("value is a bare identifier equal to its own field/constant name "
+                         "— a preference/resource key, not a credential")
+        elif (not is_fp and not validated and is_generic and context_score is not None
                 and context_score <= C.CONTEXT_GENERIC_FP_MAX):
             is_fp, fp_kind = True, "unreferenced_generic"
             fp_reason = ("high-entropy value with no credential variable name or "

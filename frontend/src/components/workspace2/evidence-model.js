@@ -207,6 +207,73 @@ export function chainViewerTarget(finding) {
   return targets.find(t => t.line > 0) || targets[0] || null
 }
 
+// A drawer/primary-evidence VIEW for a chain finding, built from its normalized
+// chain targets (evidence_references[] / steps[].evidence) — so the primary "View
+// Code" lands on the same file:line the PDF uses, never evidence[0] from the stale
+// generic path (which could be an excluded R-constant class). Returns null when the
+// chain has no proof location at all (caller falls back to the generic view).
+export function chainEvidenceView(finding) {
+  const f = finding || {}
+  const primary = chainViewerTarget(f)
+  if (!primary || !primary.file) return null
+  const proof = (t) => ({
+    file: t.file, line: num(t.line), snippet: t.snippet || '',
+    owner_type: f.owner_type || '', owner_name: f.owner_name || '',
+    source: t.source || 'chain evidence', language: languageOf(t.file), reasons: [],
+    artifact: false,
+  })
+  const supporting = chainEvidenceTargets(f).filter(
+    t => !(t.file === primary.file && num(t.line) === num(primary.line)))
+  return {
+    primary: proof(primary),
+    supporting: supporting.map(proof),
+    additional: [],
+    hidden: { count: 0, owners: [], items: [] },
+    evidenceScore: 0,
+    reason: '',
+    ownership: f.owner_type || f.ownership_label || '',
+    source: 'chain evidence',
+    detectionSources: detectionSources(f),
+    reachability: f.reachability || '',
+    inAttackChain: true,
+    frameworkOnly: false,
+    artifact: false,
+    fallback: false,
+  }
+}
+
+// ── ownership label humanization ──────────────────────────────────────────────
+// Ownership arrives as either the Ownership Engine enum (ThirdPartySDK) or the
+// finding_model label (THIRD_PARTY_SDK). Both must render as a short, human string
+// that fits its stat tile/badge — never the raw CamelCase enum ("Thirdpartysdk").
+const OWNERSHIP_DISPLAY = {
+  APPLICATION: 'Application',
+  THIRDPARTYSDK: 'Third-Party SDK',
+  THIRDPARTYLIBRARY: 'Third-Party Lib',
+  OPENSOURCELIBRARY: 'Open-Source Lib',
+  ANDROIDFRAMEWORK: 'Android Framework',
+  APPLEFRAMEWORK: 'Apple Framework',
+  GOOGLESDK: 'Google SDK',
+  VENDORSDK: 'Vendor SDK',
+  GENERATEDCODE: 'Generated',
+  FIREBASE: 'Firebase',
+  JETPACK: 'Jetpack',
+  UNKNOWN: 'Unknown',
+}
+
+export function humanizeOwnership(raw) {
+  if (!raw) return ''
+  const key = String(raw).replace(/[^a-z0-9]/gi, '').toUpperCase()
+  if (OWNERSHIP_DISPLAY[key]) return OWNERSHIP_DISPLAY[key]
+  // Unknown label: split CamelCase / snake_case and title-case, so a future enum
+  // reads "Some New Owner" rather than a jammed "Somenewowner".
+  return String(raw)
+    .replace(/_/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .replace(/\b\w/g, m => m.toUpperCase())
+}
+
 // ── trust score (display-only roll-up) ────────────────────────────────────────
 // A single 0-100 "how much should I trust this finding" number from the signals
 // the backend already computed: overall confidence (dominant), fusion corroboration

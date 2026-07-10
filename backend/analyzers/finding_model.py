@@ -870,6 +870,68 @@ def _looks_like_root_detection(finding: dict, text: str) -> bool:
     return False
 
 
+# Library/framework/generated owners (both the Ownership Engine's owner_type and
+# finding_model's own ownership_label vocabulary) — findings owned by these are not
+# the application's vulnerabilities.
+_LIB_OWNER_TYPES = frozenset((
+    "ThirdPartySDK", "AndroidFramework", "GoogleSDK", "AppleFramework",
+    "VendorSDK", "OpenSourceLibrary", "GeneratedCode",
+))
+_LIB_OWNER_LABELS = frozenset((
+    THIRD_PARTY_LIBRARY, ANDROID_FRAMEWORK, GOOGLE_SDK, FIREBASE, JETPACK,
+    "THIRD_PARTY_SDK", "APPLE_FRAMEWORK", "VENDOR_SDK", "OPEN_SOURCE_LIBRARY", "GENERATED_CODE",
+))
+
+
+def _finding_library_owned(f: dict) -> bool:
+    """True when a finding's RESOLVED ownership is library/framework/generated.
+    APPLICATION and UNKNOWN return False (kept as-is)."""
+    if str(f.get("owner_type") or "") in _LIB_OWNER_TYPES:
+        return True
+    return str(f.get("ownership_label") or "").upper() in _LIB_OWNER_LABELS
+
+
+def demote_library_code_findings(results: dict) -> dict:
+    """Fix 2 — make severity/eligibility consume ownership.
+
+    A library/framework/generated-owned finding that is a generic code-pattern hit
+    (a SAST/code-rule match, e.g. addJavascriptInterface inside io.flutter.plugins)
+    is library NOISE, not a HIGH application finding. Demote it to INFO unless it
+    carries app-owned reachability evidence (a taint flow / call chain proving
+    attacker-controlled data reaches it in application code).
+
+    Only library/framework/generated owners are touched; APPLICATION and UNKNOWN are
+    never demoted (guard: do not suppress genuinely app-owned findings). Additive:
+    preserves severity_original and marks the finding library_noise. Deterministic.
+    """
+    stats = {"demoted": 0}
+    for f in results.get("findings") or []:
+        if not isinstance(f, dict) or f.get("is_attack_chain"):
+            continue
+        if str(f.get("severity") or "").lower() == "info":
+            continue
+        if not _finding_library_owned(f):
+            continue
+        # Generic code-pattern hit: a SAST / code-rule match (not a manifest-derived
+        # finding, a validated secret, or a first-class data-flow finding).
+        rid = str(f.get("rule_id") or f.get("id") or "")
+        is_code_pattern = (str(f.get("source") or "").upper() == "SAST"
+                           or rid.startswith(("android_", "ios_")))
+        if not is_code_pattern:
+            continue
+        # App-owned reachability evidence keeps it (a real, reachable weakness).
+        if f.get("taint_flow") or f.get("call_chain"):
+            continue
+        f["severity_original"] = f.get("severity_original") or f.get("severity")
+        f["severity"] = "info"
+        f["library_noise"] = True
+        f["library_noise_reason"] = ("library/framework-owned generic code pattern with no "
+                                     "app-owned reachability evidence")
+        stats["demoted"] += 1
+    results["library_noise_stats"] = stats
+    return stats
+
+
 def _reclassify_root_detection(finding: dict, text: str) -> bool:
     """Downgrade a root-detection check from a vuln to an INFO security control.
 

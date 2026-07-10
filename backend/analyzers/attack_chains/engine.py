@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 
 from .. import security_controls
 from ..ownership import OwnerType, context_from_results, get_engine as _get_ownership_engine
@@ -212,8 +213,57 @@ def tag_capabilities(f: dict, results: dict | None = None) -> set:
     return caps
 
 
+# Legacy finding_model ownership labels (uppercase) that mean library/framework code —
+# the counterpart to the OwnerType constants in _NON_APP_OWNERS.
+_NON_APP_LABELS = frozenset((
+    "THIRD_PARTY_LIBRARY", "THIRD_PARTY_SDK", "ANDROID_FRAMEWORK", "GOOGLE_SDK",
+    "APPLE_FRAMEWORK", "VENDOR_SDK", "OPEN_SOURCE_LIBRARY", "GENERATED_CODE",
+    "FIREBASE", "JETPACK",
+))
+
+
+def _finding_is_library_owned(f: dict) -> bool:
+    """Whether a finding's RESOLVED ownership is a library/framework/generated owner.
+
+    Reads the ownership the pipeline already attached (owner_type from the Ownership
+    Engine, ownership_label from finding_model) — never recomputes it."""
+    ot = str(f.get("owner_type") or "")
+    if ot in _NON_APP_OWNERS:
+        return True
+    return str(f.get("ownership_label") or "").upper() in _NON_APP_LABELS
+
+
+# Defensive controls that are IN USE — never a step in a weakness chain. A finding
+# marked security_control, or asserting one of these controls without a weakness
+# qualifier, is positive evidence, not an attack step.
+_POSITIVE_CONTROL_TOKENS = (
+    "encryptedsharedpreferences", "encrypted shared preferences", "encrypted storage",
+    "flutter secure storage", "flutter_secure_storage", "androidx.security.crypto",
+    "androidx.security", "masterkey", "sqlcipher", "keystore-backed", "keychain",
+    "secure storage", "secure enclave",
+)
+_CONTROL_WEAKNESS_TOKENS = (
+    "no ", "not ", "missing", "without", "insecure", "weak", "plaintext",
+    "unencrypted", "world readable", "world writable", "cleartext", "disabled",
+)
+
+
+def _is_positive_control(f: dict) -> bool:
+    """A defensive control that is PRESENT/in use — must never be listed as a step in
+    a weakness chain (e.g. Flutter Secure Storage / EncryptedSharedPreferences in an
+    Insecure-Storage or Weak-Crypto chain)."""
+    if f.get("security_control"):
+        return True
+    blob = _blob(f)
+    if not any(tok in blob for tok in _POSITIVE_CONTROL_TOKENS):
+        return False
+    # A control token present WITHOUT a weakness qualifier → the control is in use.
+    return not any(neg in blob for neg in _CONTROL_WEAKNESS_TOKENS)
+
+
 def chain_role(f: dict) -> str:
-    """required | supporting | excluded — SAFE CHAINING from Triage + Secret status."""
+    """required | supporting | excluded — SAFE CHAINING from Triage + Secret status +
+    resolved ownership."""
     if _secret_status(f) in C.REJECT_SECRET_STATUSES:
         return "excluded"
     tri = f.get("triage") or {}
@@ -225,6 +275,11 @@ def chain_role(f: dict) -> str:
         return "supporting" if (tag_capabilities(f) & _STRUCTURAL_CAPS) else "excluded"
     if decision in C.SUPPORTING_ONLY_DECISIONS:
         return "supporting"
+    # Ownership enforcement (Fix 2): a library/framework/generated-owned finding is
+    # NOT the application's vulnerability. It can never be a REQUIRED link — at most
+    # supporting context when it carries a structural cap (e.g. a framework WebView).
+    if _finding_is_library_owned(f):
+        return "supporting" if (tag_capabilities(f) & _STRUCTURAL_CAPS) else "excluded"
     vis = tri.get("visibility", "")
     if vis == "HiddenByDefault":
         return "supporting" if (tag_capabilities(f) & _STRUCTURAL_CAPS) else "excluded"
@@ -402,12 +457,42 @@ class ChainContext:
         return None
 
     def supporting(self, caps: frozenset, used: set) -> list[dict]:
-        out = []
+        """Distinct, deterministically-ranked, capped supporting findings for a chain.
+
+        Excludes positive controls (a defensive control is never an attack step),
+        deduplicates by (title, file:line) and (rule_id, file, line) so one library
+        string can't render ~40 times, then keeps the strongest MAX_SUPPORTING by
+        severity, then evidence quality, then id."""
+        cand = []
         for t in self.tagged:
             if t["id"] in used:
                 continue
-            if t["caps"] & caps:
-                out.append(t)
+            if not (t["caps"] & caps):
+                continue
+            if _is_positive_control(t["f"]):
+                continue
+            cand.append(t)
+
+        # Deterministic strongest-first ordering before dedup, so the row kept for a
+        # duplicate location is the highest-severity / best-evidenced one.
+        cand.sort(key=lambda t: (C.sev_rank(t["f"].get("severity", "info")),
+                                 C.EVIDENCE_RANK.get(_equality(t["f"]), 4), t["id"]))
+
+        out, seen = [], set()
+        for t in cand:
+            f = t["f"]
+            fp, line = _finding_location(f)
+            loc = f"{fp}:{line}" if fp else ""
+            title = str(f.get("title") or "").strip().lower()
+            rid = str(f.get("rule_id") or f.get("id") or "")
+            keys = ((title, loc), (rid, fp, line))
+            if any(k in seen for k in keys):
+                continue
+            for k in keys:
+                seen.add(k)
+            out.append(t)
+            if len(out) >= C.MAX_SUPPORTING:
+                break
         return out
 
 
@@ -532,8 +617,21 @@ def _selection_primary(f: dict):
     return "", 0, ""
 
 
+def _finding_location(f: dict) -> tuple[str, int]:
+    """(file, line) for a finding — the corrected Evidence Selection primary when
+    present, else the evidence-bundle primary / legacy fields."""
+    sel_file, sel_line, _ = _selection_primary(f)
+    if sel_file:
+        return sel_file, int(sel_line or 0)
+    prim = (f.get("evidence_bundle") or {}).get("primary") or {}
+    fp = prim.get("relative_path") or prim.get("file_path") or f.get("file_path") or ""
+    line = prim.get("line") or f.get("line") or f.get("line_number") or 0
+    return fp, int(line or 0)
+
+
 def _aggregate_evidence(findings: list[dict]):
     files, classes, methods, refs = [], [], [], []
+    ref_seen: set = set()
     for f in findings:
         eb = f.get("evidence_bundle") or {}
         prim = eb.get("primary") or {}
@@ -561,9 +659,12 @@ def _aggregate_evidence(findings: list[dict]):
         # carry None so the frontend omits the jump gracefully rather than opening
         # at the top with no indication.
         if fp:
-            refs.append({"finding": _finding_id(f),
-                         "evidence_id": eb.get("evidence_id") or f"EV-{_finding_id(f)}",
-                         "file": fp, "line": (line or None)})
+            ref_key = (fp, line or None)
+            if ref_key not in ref_seen:
+                ref_seen.add(ref_key)
+                refs.append({"finding": _finding_id(f),
+                             "evidence_id": eb.get("evidence_id") or f"EV-{_finding_id(f)}",
+                             "file": fp, "line": (line or None)})
     return files, classes, methods, refs
 
 
@@ -630,13 +731,45 @@ def _build_narrative(template, entry: dict, required: list[dict], goal_label: st
     return steps
 
 
+_ALLOW_BACKUP_TRUE_RE = re.compile(r'allowbackup\s*=\s*"(?:true|1)"')
+
+
+def _allow_backup_true(results: dict) -> bool:
+    """Whether android:allowBackup is actually true (manifest / manifest_security, or a
+    genuine allowBackup finding derived from the manifest). The BACKUP chain's premise
+    is this flag; without it there is no backup path — and a debuggable finding, which
+    never asserts allowBackup, can never stand in for it."""
+    mx = str(results.get("manifest_xml") or "").lower()
+    if _ALLOW_BACKUP_TRUE_RE.search(mx):
+        return True
+    ms = results.get("manifest_security") or {}
+    ab = ms.get("allow_backup", ms.get("allowBackup"))
+    if isinstance(ab, dict):
+        ab = ab.get("state", ab.get("value"))
+    if str(ab).strip().lower() in ("true", "1", "enabled"):
+        return True
+    # A finding that genuinely asserts allowBackup is enabled (manifest-derived).
+    for f in results.get("findings") or []:
+        if not isinstance(f, dict):
+            continue
+        blob = " ".join(str(f.get(k) or "") for k in ("title", "description", "rule_id")).lower()
+        if "allowbackup" in blob.replace(" ", "") and not any(
+                neg in blob for neg in ("false", "disabled", "not ", "= \"false\"")):
+            return True
+    return False
+
+
 def _template_suppressed_by_controls(tmpl, results: dict) -> bool:
-    """Authoritative-state veto: a template must never be emitted when the security
-    control it depends on contradicts it. The CLEARTEXT-MITM-TOKEN chain cannot exist
-    when cleartext is resolved to ``blocked`` (usesCleartextTraffic="false" / NSC
-    cleartextTrafficPermitted="false"). Belt-and-suspenders to the CLEARTEXT cap gate."""
+    """Authoritative-state veto: a template must never be emitted when the state it
+    depends on contradicts it.
+
+    * CLEARTEXT-MITM-TOKEN cannot exist when cleartext is resolved to ``blocked``.
+    * BACKUP-DATA-EXTRACTION requires android:allowBackup="true"; without it there is
+      no backup path (and a debuggable finding must never stand in as its entry)."""
     if tmpl.id == "CLEARTEXT-MITM-TOKEN":
         return security_controls.state_of(results, "cleartext") == "blocked"
+    if tmpl.id == "BACKUP-DATA-EXTRACTION":
+        return not _allow_backup_true(results)
     return False
 
 

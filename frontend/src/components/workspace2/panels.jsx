@@ -21,7 +21,7 @@ import {
 import {
   getEvidenceView, detectionSources, trustScore, trustBand, confidenceContributions,
   reachabilityLabel, matchesFilters, findingDetectionSourceSet, findingFrameworkSet,
-  OWNERSHIP_OPTIONS, parseStepEvidence,
+  OWNERSHIP_OPTIONS, parseStepEvidence, chainEvidenceView,
 } from './evidence-model.js'
 import { useWorkspaceNav } from './workspace-context.jsx'
 
@@ -497,7 +497,7 @@ function IntelStrip({ finding }) {
       {cells.map((c, i) => (
         <div key={i} className={`ws-intel__cell${c.band ? ` ws-intel__cell--${c.band}` : ''}`}>
           <div className="ws-intel__label">{c.label}</div>
-          <div className="ws-intel__value">{c.value}</div>
+          <div className="ws-intel__value" title={String(c.value)}>{c.value}</div>
         </div>
       ))}
     </div>
@@ -540,7 +540,7 @@ function PrimaryEvidenceCard({ view, finding, onOpenCode }) {
           <FileCode2 size={16} />
           <span className="ws-primary__file ws-mono" title={p.file}>{fileName}{p.line ? `:${p.line}` : ''}</span>
           {p.language ? <span className="ws-badge">{p.language}</span> : null}
-          {p.owner_type ? <span className="ws-badge ws-badge--own">{ownershipLabel({ ownership: p.owner_type }) || p.owner_type}</span> : null}
+          {p.owner_type ? <span className="ws-badge ws-badge--own" title={ownershipLabel({ ownership: p.owner_type }) || p.owner_type}>{ownershipLabel({ ownership: p.owner_type }) || p.owner_type}</span> : null}
           {p.source ? <span className="ws-badge ws-badge--engine">{p.source}</span> : null}
         </div>
         {p.snippet ? <pre className="ws-code">{p.snippet}</pre> : null}
@@ -663,7 +663,12 @@ export function FindingDrawer({ finding, onClose, onOpenCode, collab }) {
   const ex = f.analyst_explanation || {}
   const snippet = f.snippet || f.code_context || (f.file_evidence?.[0]?.snippet) || ''
   const rem = ex.remediation || {}
-  const view = getEvidenceView(f)
+  // Chain findings carry evidence as evidence_references[] / steps[].evidence — build
+  // the primary from chainViewerTarget so "View Code" lands on the real file:line the
+  // PDF uses, not evidence[0] from the stale generic path (a possible R-constant class).
+  // Falls back to the generic view only when the chain has no proof location at all.
+  const isChain = !!(f.is_attack_chain || f.in_attack_chain)
+  const view = (isChain && chainEvidenceView(f)) || getEvidenceView(f)
 
   const runAi = async action => {
     setBusy(action)
