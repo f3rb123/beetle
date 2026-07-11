@@ -105,10 +105,13 @@ def test_location_without_permission_info():
 # ── Non-gated category is unaffected ─────────────────────────────────────────
 
 def test_ungated_category_keeps_severity():
-    # "Execute OS Command" has no permission prerequisite — must keep its severity.
-    r = _results("Execute OS Command")
+    # A category with no permission prerequisite AND app-owned files keeps its
+    # severity. (NB: "Execute OS Command" is additionally taint-gated now — see
+    # test_behavior_ownership_downgrade — so we use dynamic code loading here, which
+    # is only ownership-gated and stays HIGH when sourced from app-owned code.)
+    r = _results("Dynamic Class and Dexloading")  # _results uses an app-owned Cap.java
     aa._build_behavior_findings(r)
-    f = _finding(r, "OS Command Execution Primitive Detected")
+    f = _finding(r, "Dynamic Code Loading Detected")
     assert f["severity"] == "high"
     assert f["prerequisite_met"] is True
 

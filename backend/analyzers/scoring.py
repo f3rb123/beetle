@@ -54,16 +54,25 @@ def calculate_score(results: dict) -> dict:
     for sev, weight in SEVERITY_WEIGHTS.items():
         count = ss.get(sev, 0)
         if count and weight > 0:
-            # Diminishing returns for many findings of same severity
-            deducted = min(weight * count, weight * 3)  # cap at 3x weight per severity
-            deductions[sev] = {"count": count, "per_item": weight, "total": deducted}
+            # Diminishing returns for many findings of same severity: the per-severity
+            # deduction is capped at 3x the weight. Record whether the cap bit and the
+            # uncapped raw total so the renderer can label it ("capped at 3x") and the
+            # shown count x per_item never invites wrong arithmetic.
+            raw = weight * count
+            deducted = min(raw, weight * 3)  # cap at 3x weight per severity
+            deductions[sev] = {
+                "count": count, "per_item": weight, "total": deducted,
+                "raw_total": raw, "capped": deducted < raw, "cap": weight * 3,
+            }
             total_deducted += deducted
 
-    # Secrets deductions
+    # Secrets deductions — use the mapped DISPLAY severity (status-derived) so a
+    # client/public key or a hidden FP contributes 0 (INFO, weight 0) and only real
+    # confidential secrets move the score.
     secret_deductions = 0
     secret_sev_counts = {}
     for s in secrets:
-        sev = s.get("severity", "medium")
+        sev = s.get("display_severity") or s.get("severity") or "medium"
         secret_sev_counts[sev] = secret_sev_counts.get(sev, 0) + 1
 
     for sev, count in secret_sev_counts.items():

@@ -130,6 +130,70 @@ def _singular(key: str) -> str:
             "receivers": "receiver", "providers": "provider"}.get(key, key)
 
 
+# Taint sink categories a deep-link value must NEVER reach unvalidated, → a reader note.
+_DEEP_LINK_CONSUMER_SINKS = {
+    "WebView":    "a WebView load (script/URL injection)",
+    "FileSystem": "a file path (path traversal / arbitrary write)",
+    "SQLite":     "a SQL query (SQL injection)",
+    "Execution":  "an OS command (command injection)",
+    "Crypto":     "a crypto call (key/IV misuse)",
+    "Network":    "a network request (SSRF / exfiltration)",
+}
+
+
+def _deep_link_consumer(results: dict, activity_fqn: str, short_name: str) -> dict | None:
+    """Best-effort: REUSE the taint result (never re-scan) to note whether a value
+    entering this activity (deep-link data via getIntent().getData()/getQueryParameter)
+    reaches a high-value sink unvalidated. Matches taint flows whose source class is
+    this activity."""
+    if not activity_fqn and not short_name:
+        return None
+    for tf in results.get("taint_flows") or []:
+        if not isinstance(tf, dict):
+            continue
+        cls = str(tf.get("class_name") or "")
+        if not cls:
+            continue
+        same = (cls == activity_fqn
+                or (activity_fqn and (cls.endswith(activity_fqn) or activity_fqn.endswith(cls)))
+                or (short_name and cls.rsplit(".", 1)[-1] == short_name))
+        sink_cat = str(tf.get("sink_cat") or "")
+        if same and sink_cat in _DEEP_LINK_CONSUMER_SINKS:
+            return {
+                "sink_cat": sink_cat, "sink": tf.get("sink"),
+                "source_cat": tf.get("source_cat"),
+                "note": (f"deep-link input may reach {_DEEP_LINK_CONSUMER_SINKS[sink_cat]} "
+                         f"via {tf.get('sink')} — validate the URI/query before use"),
+            }
+    return None
+
+
+def _build_deep_link_map(results: dict, surface: dict) -> list[dict]:
+    """Per exported activity: its structured deep-link entries (scheme→host→path with
+    BROWSABLE/autoVerify badges, App Link vs custom-scheme) + a best-effort taint
+    consumer note. Sorted custom-scheme (higher attack surface) first."""
+    out: list[dict] = []
+    for c in (surface.get("activities") or []):
+        entries = c.get("deep_links") or []
+        if not entries:
+            continue
+        fqn = c.get("name") or ""
+        short = c.get("short_name") or (fqn.rsplit(".", 1)[-1] if fqn else "")
+        has_custom = any(e.get("custom_scheme") for e in entries)
+        out.append({
+            "activity": fqn,
+            "short_name": short,
+            "exported": bool(c.get("exported")),
+            "entries": entries,
+            "has_custom_scheme": has_custom,
+            "verified_app_link": any(e.get("verified") for e in entries),
+            "consumer": _deep_link_consumer(results, fqn, short),
+        })
+    # Custom-scheme (unverified, hijackable) first — the higher attack surface.
+    out.sort(key=lambda a: (0 if a["has_custom_scheme"] else 1, a["short_name"]))
+    return out
+
+
 def build_attack_surface_inventory(results: dict) -> None:
     surface = results.get("attack_surface") or {}
 
@@ -211,6 +275,9 @@ def build_attack_surface_inventory(results: dict) -> None:
         "hijackable_count": len(custom),
         "entries": dl_entries,
     }
+
+    # ── Structured deep-link map (scheme→host→path + badges + taint consumer) ──
+    results["deep_link_map"] = _build_deep_link_map(results, surface)
 
     # ── Attack Surface Score (0-100; higher = larger / riskier surface) ──────
     factors: list[str] = []

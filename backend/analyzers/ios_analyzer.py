@@ -341,6 +341,12 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                 except Exception:
                     pass
 
+        # ── iOS shallow taint (Phase 1 parity) — same-file source→sink pass ──
+        try:
+            _ios_shallow_taint(tmpdir, results)
+        except Exception:
+            log.exception("[ios_taint] shallow source->sink pass failed")
+
         # ── Mach-O deep binary protection check ──────────────────────────────
         if app_bundle:
             binary_name = results["app_info"].get("bundle_executable")
@@ -879,7 +885,8 @@ def _extract_endpoints(tmpdir: str, results: dict, *, corpus: SourceCorpus = Non
     # Phase 2.5.6: broad, multi-source extraction shared with Android via
     # endpoint_intel (Swift/ObjC/plist/json/js + ws/wss + custom-scheme deep links).
     from . import endpoint_intel
-    results["endpoints"] = endpoint_intel.extract_endpoints(tmpdir, corpus=corpus or SourceCorpus())
+    results["endpoints"] = endpoint_intel.extract_endpoints(
+        tmpdir, corpus=corpus or SourceCorpus(), results=results)
 
 
 # ─── Framework detection ──────────────────────────────────────────────────────
@@ -1695,6 +1702,122 @@ def _get_compiled_ios_rules():
                 continue
         _COMPILED_SWIFT_OBJC_RULES = compiled
     return _COMPILED_SWIFT_OBJC_RULES
+
+
+# ── iOS shallow taint (Phase 1) ───────────────────────────────────────────────
+# A minimal, SAME-FILE source→sink co-occurrence pass — NOT inter-procedural (that is
+# the Phase 2 engine). Sources are untrusted-input entry points; sinks are dangerous
+# consumers. When a source and a sink appear within a proximity window in one file,
+# emit a heuristic flow so iOS reaches parity with Android's Data Flow surface.
+_IOS_TAINT_SOURCES = (
+    (re.compile(r'\bopen\s+url\b|openURL|application\([^)]*open\b|url\.host|url\.query|'
+                r'queryItems|URLComponents|\.absoluteString', re.I),
+     "URL Scheme", "URL-scheme / deep-link handler input"),
+    (re.compile(r'UIPasteboard\.general\.(?:string|url|image|items)|\.pasteboard\b', re.I),
+     "Clipboard", "pasteboard read"),
+    (re.compile(r'SecItemCopyMatching|kSecClass\b', re.I),
+     "Keychain", "keychain read"),
+)
+_IOS_TAINT_SINKS = (
+    (re.compile(r'\bloadRequest\b|\bevaluateJavaScript\b|\bloadHTMLString\b|\bloadFileURL\b|'
+                r'\bwebView\b[^\n]*\.load\s*\(', re.I),
+     "WebView", "WebView load / JS eval"),
+    (re.compile(r'\bFileManager\b|\.write\s*\(\s*to|contentsOfFile|Data\s*\(\s*contentsOf|'
+                r'\bcreateFile\b', re.I),
+     "FileSystem", "file read/write"),
+    (re.compile(r'\bURLSession\b|\.dataTask\b|\.uploadTask\b|URLRequest\s*\(', re.I),
+     "Network", "network request"),
+)
+_IOS_TAINT_WINDOW = 40   # lines: source and sink must be within this to be a flow
+_IOS_SENSITIVE_SOURCES = frozenset(("Clipboard", "Keychain"))
+
+
+def _ios_shallow_taint(tmpdir: str, results: dict) -> None:
+    """Emit heuristic source→sink flows (same-file, proximity-based) into
+    results["findings"] and results["taint_flows"] (Android-compatible shape)."""
+    flows = results.setdefault("taint_flows", [])
+    seen: set = set()
+    extensions = (".swift", ".m", ".mm", ".h")
+    for root, _dirs, files in os.walk(tmpdir):
+        for fname in files:
+            if not fname.endswith(extensions):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                content = Path(fpath).read_text(errors="replace")
+            except Exception:
+                continue
+            low = content.lower()
+            if "://" not in content and not any(
+                    k in low for k in ("openurl", "open url", "uipasteboard", "secitem",
+                                       "webview", "urlsession", "filemanager", "url.host",
+                                       "url.query", "absolutestring", "loadrequest",
+                                       "evaluatejavascript")):
+                continue
+            rel = os.path.relpath(fpath, tmpdir)
+            lines = content.splitlines()
+
+            def _hits(table):
+                out = []
+                for rx, cat, label in table:
+                    for m in rx.finditer(content):
+                        out.append((content[:m.start()].count("\n") + 1, cat, label))
+                return out
+
+            src_hits = _hits(_IOS_TAINT_SOURCES)
+            sink_hits = _hits(_IOS_TAINT_SINKS)
+            if not (src_hits and sink_hits):
+                continue
+            for s_line, s_cat, s_label in src_hits:
+                for k_line, k_cat, k_label in sink_hits:
+                    # Forward flow only: the sink must be at/after the source (small
+                    # tolerance) and within the proximity window — reduces spurious
+                    # backward cross-products in this same-file heuristic.
+                    if k_line < s_line - 2 or k_line - s_line > _IOS_TAINT_WINDOW:
+                        continue
+                    key = (rel, s_cat, k_cat)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    # Injection/exfil sinks are the concern regardless of source; a
+                    # sensitive source (keychain/clipboard) reaching any sink is worse.
+                    risk = "high" if (k_cat in ("WebView", "Network")
+                                      or s_cat in _IOS_SENSITIVE_SOURCES) else "medium"
+                    line_no = min(s_line, k_line)
+                    snippet = "\n".join(lines[max(0, line_no - 1):line_no + 2]).strip()[:300]
+                    results["findings"].append({
+                        "rule_id":        rule_slug("ios_taint", f"{s_cat}->{k_cat}"),
+                        "title":          f"iOS Data Flow: {s_cat} → {k_cat}",
+                        "severity":       risk,
+                        "category":       "Taint Analysis",
+                        "description":    (f"Untrusted input from **{s_label}** ({s_cat}) may reach "
+                                           f"**{k_label}** ({k_cat}) in `{rel}` without visible validation. "
+                                           "Heuristic same-file flow — confirm the value is sanitized before "
+                                           "it reaches the sink."),
+                        "recommendation": (f"Validate/encode all {s_cat} input before it reaches {k_cat} "
+                                           "APIs (allow-list URLs, parameterize, avoid loading untrusted "
+                                           "content into WebViews)."),
+                        "file_path":      rel,
+                        "line":           line_no,
+                        "snippet":        snippet,
+                        "cwe":            "CWE-20",
+                        "masvs":          "MASVS-CODE-4",
+                        "owasp":          "M7",
+                        "source":         "iOS_TAINT",
+                        "confidence":     55,   # heuristic (same-file proximity, not inter-procedural)
+                        # Shallow first pass: produces some false pairs — keep it out of
+                        # the default high-signal view; retained in the full export until
+                        # the Phase 2 inter-procedural engine lands.
+                        "verbose_only":   True,
+                        "taint_flow":     {"source": s_label, "source_cat": s_cat,
+                                           "sink": k_label, "sink_cat": k_cat, "chain": []},
+                    })
+                    flows.append({
+                        "source": s_label, "source_cat": s_cat, "sink": k_label, "sink_cat": k_cat,
+                        "risk": risk, "call_chain": [f"{rel}:{s_line}", f"{rel}:{k_line}"],
+                        "class_name": rel, "file": rel, "line": line_no,
+                        "method_name": "", "owner_type": "Application",
+                    })
 
 
 def _analyze_swift_objc_sources(tmpdir: str, results: dict):

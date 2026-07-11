@@ -150,6 +150,8 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
     binary_results = _collapse_by_library(binary_results)
     results["binaries"] = binary_results
 
+    _emit_jni_surface(binary_results, results)
+
     # ── Generate aggregate findings ───────────────────────────────────────────
     # Flutter's Dart AOT snapshot (libapp.so) inherently lacks stack canary / Full
     # RELRO / FORTIFY — it is Dart-compiled, not built by a C toolchain, so those
@@ -318,6 +320,116 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
         })
 
 
+# ── JNI symbol-level attribution (Phase 1) ───────────────────────────────────
+# Statically-registered native methods use the JNIEXPORT name `Java_<pkg>_<Class>_<m>`
+# and live in .dynsym (they must be exported), so they survive stripping and are
+# recoverable by scanning the symbol string table bytes — no disassembler needed.
+# Dynamically-registered methods (RegisterNatives in JNI_OnLoad) map a Java name to a
+# raw function pointer at runtime; recovering that mapping needs disassembly/xref
+# (radare2/LIEF pointer walking) and is deferred to Phase 2.
+_JNI_SYM_RE = re.compile(rb"Java_[A-Za-z0-9_]{3,200}")
+_MAX_JNI_METHODS = 200
+
+
+def _demangle_jni(sym: str) -> str:
+    """`Java_com_app_Foo_nativeDecrypt` → `com.app.Foo.nativeDecrypt`.
+
+    Handles the common JNI escapes (_1 = literal underscore) and drops the overload
+    signature suffix (after `__`). Best-effort — a reviewer-readable Java FQN."""
+    s = sym[len("Java_"):].split("__", 1)[0]           # drop overload signature
+    s = s.replace("_1", "\x00").replace("_2", ";").replace("_3", "[")
+    parts = [p.replace("\x00", "_") for p in s.split("_")]
+    return ".".join(parts) if len(parts) >= 2 else parts[0]
+
+
+def _extract_jni_surface(data: bytes) -> dict:
+    """The .so's JNI surface: statically-registered native methods (demangled),
+    plus whether it uses JNI_OnLoad / RegisterNatives (dynamic registration).
+
+    Symbol extraction reads the .dynsym string table directly from the bytes, so it
+    works even on a stripped library. Returns {} when there is no JNI surface."""
+    static_methods = sorted({
+        _demangle_jni(m.group(0).decode("ascii", "ignore"))
+        for m in _JNI_SYM_RE.finditer(data)
+    })[:_MAX_JNI_METHODS]
+    has_onload = b"JNI_OnLoad" in data
+    uses_register = b"RegisterNatives" in data
+    if not (static_methods or has_onload or uses_register):
+        return {}
+    return {
+        "static_methods": static_methods,
+        "static_method_count": len(static_methods),
+        "has_jni_onload": has_onload,
+        # Dynamic registration hides method↔function mapping from the symbol table —
+        # precise per-method attribution needs Phase 2 (disassembly of JNI_OnLoad).
+        "uses_register_natives": uses_register,
+        "dynamic_registration": uses_register and not static_methods,
+    }
+
+
+def _emit_jni_surface(binary_results: list, results: dict) -> None:
+    """Publish results["jni_surface"], attribute native-extracted secrets to the .so's
+    JNI method surface (coarse — to the library's method SET; exact per-method needs
+    Phase 2), and emit one INFO finding per library that exposes a JNI surface."""
+    surface = []
+    for b in binary_results:
+        jni = b.get("jni")
+        if not jni:
+            continue
+        surface.append({
+            "library": _lib_name(b), "path": b.get("path", ""),
+            "static_methods": jni.get("static_methods", []),
+            "static_method_count": jni.get("static_method_count", 0),
+            "has_jni_onload": jni.get("has_jni_onload", False),
+            "uses_register_natives": jni.get("uses_register_natives", False),
+            "dynamic_registration": jni.get("dynamic_registration", False),
+        })
+    if not surface:
+        return
+    results["jni_surface"] = surface
+
+    # Coarse attribution: tag a native-extracted secret whose evidence file IS this
+    # .so with the library's exported native methods, so a reviewer can pivot from a
+    # native string to the Java↔native methods that library exposes.
+    lib_by_name = {e["library"]: e for e in surface}
+    for sec in (results.get("secrets") or []):
+        if not isinstance(sec, dict):
+            continue
+        base = os.path.basename(str(sec.get("file_path") or "").replace("\\", "/"))
+        e = lib_by_name.get(base)
+        if e and base.endswith(".so"):
+            sec.setdefault("jni_library", e["library"])
+            sec.setdefault("jni_native_methods", e["static_methods"][:20])
+
+    for e in surface:
+        methods = ", ".join(e["static_methods"][:8]) or "(none exported by name)"
+        more = f" (+{e['static_method_count'] - 8} more)" if e["static_method_count"] > 8 else ""
+        dyn = (" It also calls RegisterNatives in JNI_OnLoad, so some native methods are "
+               "registered dynamically and are NOT visible in the symbol table — precise "
+               "method↔function mapping requires deeper (disassembly) analysis."
+               if e["uses_register_natives"] else "")
+        results["findings"].append({
+            "rule_id":     "native_jni_surface",
+            "title":       f"Native JNI Surface — {e['library']}",
+            "severity":    "info",
+            "category":    "Binary Hardening",
+            "description": (f"`{e['library']}` exposes a JNI native surface. Statically-registered "
+                            f"native methods: {methods}{more}.{dyn}"),
+            "impact":      ("Native methods are the app's Java↔native boundary; a secret or endpoint "
+                            "embedded in this library is reachable through these methods."),
+            "recommendation": ("Audit native methods that handle secrets/credentials; prefer server-side "
+                               "secrets and review any RegisterNatives-registered methods."),
+            "file_path":   e["path"],
+            "masvs":       "MASVS-CODE-4",
+            "owasp":       "M7",
+            "jni_static_methods": e["static_methods"][:50],
+            "jni_uses_register_natives": e["uses_register_natives"],
+            # Phase 1 is an informational inventory (no per-method attribution yet) —
+            # keep it out of the default high-signal view; retained in the full export.
+            "verbose_only": True,
+        })
+
+
 def _analyze_elf(fpath: str, rel_path: str) -> dict | None:
     """Parse ELF binary and return protection status dict."""
     try:
@@ -441,6 +553,11 @@ def _analyze_elf(fpath: str, rel_path: str) -> dict | None:
         # ── Check if stripped (presence of symbol table) ───────────────────────
         # .symtab section present = not stripped
         result["stripped"] = b".symtab" not in data
+
+        # ── JNI surface (Phase 1: symbol-table attribution) ────────────────────
+        jni = _extract_jni_surface(data)
+        if jni:
+            result["jni"] = jni
 
         # ── Dangerous imported symbols (memory-unsafe libc calls) ──────────────
         dangerous = (b"strcpy", b"strcat", b"sprintf", b"gets", b"scanf",

@@ -247,16 +247,23 @@ APKLEAKS_PATTERNS: list[dict] = [
     # APKLeaks upstream ships these two and Beetle's native catalog lacked them —
     # the HDFC benchmark gap. Both are JFrog Artifactory credential formats:
     # the API token is prefixed ``AKC``; the encrypted password is prefixed ``AP``
-    # followed by a single hex nibble. Anchored on the prefix + a length floor so a
-    # bare ``AP…`` word cannot match; the entropy gate trims any residual noise.
+    # followed by a single hex nibble. Anchored on an assignment/quote context + a
+    # length floor + the entropy gate. NB: patterns compile case-INSENSITIVE, so the
+    # ``AP`` password prefix + a hex nibble (``[0-9A-Fa-f]`` — includes vowels a/e/f)
+    # otherwise matches plain words like ``ApeAnotherValue``. A ``(?=[A-Za-z0-9]*[0-9])``
+    # lookahead requires a DIGIT in the credential body: a real encrypted password is
+    # digit-bearing, an English word is not. (``AKC`` is not an English-word prefix, so
+    # the token rule keeps its all-base62 coverage unchanged — see review note below.)
     _p("Artifactory API Token",
+       # Reviewed: 'AKC' is not a natural-word prefix; the context anchor + 10-char
+       # floor + entropy gate already exclude words, so coverage is left intact.
        r"(?:\s|=|:|\"|')AKC[a-zA-Z0-9]{10,}",
        "high", "API Token",
        "JFrog Artifactory API token detected. Grants access to the artifact registry.",
        "Revoke the token in Artifactory; use short-lived access tokens server-side.",
        confidence=80, exploitability=70, owasp="M1", check_entropy=True),
     _p("Artifactory Password",
-       r"(?:\s|=|:|\"|')AP[0-9ABCDEFabcdef][a-zA-Z0-9]{8,}",
+       r"(?:\s|=|:|\"|')AP(?=[A-Za-z0-9]*[0-9])[0-9ABCDEFabcdef][a-zA-Z0-9]{8,}",
        "high", "Credentials",
        "JFrog Artifactory encrypted password detected. Allows authenticated registry access.",
        "Rotate the Artifactory credential; never embed registry passwords in a client.",

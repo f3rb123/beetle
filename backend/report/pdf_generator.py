@@ -10,6 +10,7 @@ from reportlab.platypus import (
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 import os
+import unicodedata
 from datetime import datetime
 from html import escape
 
@@ -737,9 +738,10 @@ def _visible_findings(results):
     """Apply the Phase 3 default presentation filter for the report.
 
     Default ("application") shows only application-owned, high-confidence
-    (>=70) findings. "all" shows every kept finding. Findings predating Phase 3
-    (no ownership_label/confidence_score) are always shown so old scans don't
-    silently lose their report body.
+    (>=70) findings, using the Confidence Engine's overall_confidence (legacy
+    confidence_score as fallback). "all" shows every kept finding. Findings
+    predating Phase 3 (no ownership_label and no confidence) are always shown so
+    old scans don't silently lose their report body.
     """
     findings = results.get("findings", []) or []
     scope = results.get("_report_findings_scope", "application")
@@ -755,8 +757,17 @@ def _visible_findings(results):
         if f.get("is_attack_chain"):
             visible.append(f)
             continue
+        # verbose_only findings (JNI inventory, shallow iOS taint) are retained in the
+        # full export (scope == "all", handled above) but never shown in the default
+        # high-signal view.
+        if f.get("verbose_only"):
+            continue
         label = f.get("ownership_label")
-        conf = f.get("confidence_score")
+        # Prefer the Confidence Engine's computed overall_confidence; fall back to the
+        # legacy confidence_score for un-annotated/old scans. Same source as chains.
+        conf = f.get("overall_confidence")
+        if conf is None:
+            conf = f.get("confidence_score")
         if label is None and conf is None:
             visible.append(f)  # pre-Phase-3 finding; don't hide it
             continue
@@ -909,13 +920,57 @@ def _repair_mojibake(s: str) -> str:
     return s
 
 
+# Glyphs/symbols outside WinAnsi (the base-14 PDF fonts' coverage) that NFKD cannot
+# decompose — mapped to ASCII so they never render as a black box. Accented Latin that
+# WinAnsi covers (é, ü, ñ, —) is left alone; Latin-Extended (č, š, ž) is decomposed.
+_GLYPH_ASCII = {
+    "đ": "d", "Đ": "D", "ħ": "h", "Ħ": "H", "ł": "l", "Ł": "L", "ŧ": "t", "Ŧ": "T",
+    "ı": "i", "İ": "I", "ĸ": "k", "ŉ": "n", "ẞ": "SS",
+    "⚠": "(!)", "⚑": "(!)", "✓": "[ok]", "✔": "[ok]", "✗": "[x]", "✘": "[x]",
+    "•": "-", "→": "->", "←": "<-", "↑": "^", "↓": "v", "★": "*", "☆": "*", "●": "-",
+}
+
+
+def _cp1252_ok(ch: str) -> bool:
+    try:
+        ch.encode("cp1252")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _pdf_glyph_safe(s: str) -> str:
+    """Transliterate any character the base-14 PDF font can't render (outside WinAnsi/
+    cp1252) to ASCII, so non-Latin resource strings and symbols never show a black box.
+    WinAnsi-covered accents (é, ü, ñ, em-dash) are kept; Latin-Extended (č, š, ž, đ) is
+    transliterated; truly-unmappable glyphs (CJK/emoji) are dropped deliberately."""
+    if not s:
+        return s
+    try:
+        s.encode("cp1252")
+        return s  # fully renderable — fast path
+    except UnicodeEncodeError:
+        pass
+    out = []
+    for ch in s:
+        if _cp1252_ok(ch):
+            out.append(ch)
+        elif ch in _GLYPH_ASCII:
+            out.append(_GLYPH_ASCII[ch])
+        else:
+            dec = unicodedata.normalize("NFKD", ch)
+            out.append("".join(c for c in dec if not unicodedata.combining(c) and _cp1252_ok(c)))
+    return "".join(out)
+
+
 def _safe(text) -> str:
     """HTML-escape dynamic text for reportlab Paragraph, preserving newlines as
     <br/>. reportlab parses Paragraph content as XML, so any raw <, >, & in
     findings (code snippets, generics like List<String>, XML) would otherwise
-    raise and abort PDF generation. Also repairs mojibake so mis-decoded UTF-8
-    (domain risk flags, resource strings) renders correctly."""
-    return escape(_repair_mojibake(str(text))).replace("\n", "<br/>")
+    raise and abort PDF generation. Also repairs mojibake and transliterates glyphs
+    the PDF font can't render (Latin-Extended resource strings, ⚠) so nothing shows a
+    black box."""
+    return escape(_pdf_glyph_safe(_repair_mojibake(str(text)))).replace("\n", "<br/>")
 
 
 def _format_finding_evidence(finding: dict) -> str:
@@ -990,7 +1045,12 @@ _OWNERSHIP_BADGE_LABELS = {
 def _format_signal_quality(finding: dict) -> str:
     """Render the Phase 3 ownership / confidence / evidence line for a finding."""
     label = finding.get("ownership_label")
-    if label is None and finding.get("confidence_score") is None:
+    # Display the Confidence Engine's computed overall_confidence; fall back to the
+    # legacy confidence_score for un-annotated/old scans (same source as the chains).
+    conf = finding.get("overall_confidence")
+    if conf is None:
+        conf = finding.get("confidence_score")
+    if label is None and conf is None:
         return ""  # pre-Phase-3 finding
     parts = []
     own = _OWNERSHIP_BADGE_LABELS.get(label, label)
@@ -1003,7 +1063,6 @@ def _format_signal_quality(finding: dict) -> str:
     eq = finding.get("evidence_quality")
     if eq:
         parts.append(f"Evidence Quality: {eq}")
-    conf = finding.get("confidence_score")
     if conf is not None:
         parts.append(f"Confidence: {conf}% ({finding.get('confidence_band', '')})")
     sq = finding.get("signal_quality")
@@ -1034,12 +1093,17 @@ def _secrets_section(story, results, T, styles):
     story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
     story.append(Spacer(1, 4 * mm))
 
+    # Use the mapped DISPLAY severity (status-derived: client/public keys are INFO,
+    # Possible capped at MEDIUM) so the PDF agrees with the secret table and the score.
+    def _disp_sev(x):
+        return x.get("display_severity") or x.get("severity") or "info"
     rows = [["Secret Type", "Severity", "Value (masked)", "Source"]]
-    for s in sorted(secrets, key=lambda x: ["critical","high","medium","low","info"].index(x.get("severity","info")) if x.get("severity") in ["critical","high","medium","low","info"] else 5):
-        color = SEVERITY_COLORS.get(s.get("severity", "medium"), HexColor("#D97706"))
+    for s in sorted(secrets, key=lambda x: ["critical","high","medium","low","info"].index(_disp_sev(x)) if _disp_sev(x) in ["critical","high","medium","low","info"] else 5):
+        sev = _disp_sev(s)
+        color = SEVERITY_COLORS.get(sev, HexColor("#D97706"))
         rows.append([
             Paragraph(escape(str(s.get("name", ""))), styles["table_cell"]),
-            Paragraph(f'<font color="{color.hexval()}"><b>{s.get("severity","").upper()}</b></font>', styles["table_cell"]),
+            Paragraph(f'<font color="{color.hexval()}"><b>{sev.upper()}</b></font>', styles["table_cell"]),
             Paragraph(f'<font face="Courier">{escape(str(s.get("value", "")))}</font>', styles["table_cell"]),
             Paragraph(escape(str(s.get("source", ""))), styles["table_cell"]),
         ])
@@ -1081,18 +1145,29 @@ def _behavior_section(story, results, T, styles):
     story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
     story.append(Spacer(1, 4 * mm))
 
-    rows = [["Behavior", "Severity", "Files", "Standards"]]
+    rows = [["Behavior", "Severity", "App-owned files", "Standards"]]
     for item in behavior[:25]:
         color = SEVERITY_COLORS.get(item.get("severity", "info"), HexColor("#64748B"))
         standards = ", ".join(filter(None, [item.get("cwe"), item.get("owasp"), item.get("masvs")]))
+        # Show the actual app-owned files (not just a count) so a reader can see WHERE
+        # the behavior lives; a framework-only behavior says so explicitly.
+        app_files = item.get("app_owned_files") or []
+        if item.get("framework_owned"):
+            files_cell = f"<i>framework/library-owned ({item.get('file_count', 0)} files)</i>"
+        elif app_files:
+            shown = ", ".join(str(p).split("/")[-1] for p in app_files[:5])
+            extra = f" (+{len(app_files) - 5} more)" if len(app_files) > 5 else ""
+            files_cell = _safe(shown) + _safe(extra)
+        else:
+            files_cell = str(item.get("file_count", 0))
         rows.append([
             Paragraph(_safe(item.get("title", "")), styles["table_cell"]),
             Paragraph(f'<font color="{color.hexval()}"><b>{item.get("severity","").upper()}</b></font>', styles["table_cell"]),
-            Paragraph(str(item.get("file_count", 0)), styles["table_cell"]),
+            Paragraph(files_cell, styles["table_cell"]),
             Paragraph(_safe(standards), styles["table_cell"]),
         ])
 
-    t = Table(rows, colWidths=[70 * mm, 20 * mm, 15 * mm, 50 * mm])
+    t = Table(rows, colWidths=[62 * mm, 18 * mm, 40 * mm, 35 * mm])
     t.setStyle(_table_style(T))
     story.append(t)
     story.append(Spacer(1, 6 * mm))
@@ -1173,9 +1248,16 @@ def _attack_surface_section(story, results, T, styles):
                 continue
 
             story.append(Paragraph(comp_type.title(), styles["subsection_title"]))
-            rows = [["Component", "Permission", "Deeplinks / Actions"]]
+            rows = [["Component", "Permission", "Deep links / Actions"]]
             for comp in exported:
-                dls   = ", ".join(comp.get("deeplinks", []))[:60] or ", ".join(comp.get("actions", []))[:60] or "—"
+                # Prefer structured deep links; never dump raw action strings — the
+                # full scheme→host→path table lives in the Deep Links section below.
+                if comp.get("deeplinks"):
+                    dls = ", ".join(comp.get("deeplinks", []))[:60]
+                elif comp.get("actions"):
+                    dls = f"{len(comp.get('actions', []))} intent action(s)"
+                else:
+                    dls = "—"
                 perm  = comp.get("permission") or "None"
                 rows.append([
                     Paragraph(escape(str(comp.get("short_name", ""))), styles["table_cell_mono"]),
@@ -1529,11 +1611,16 @@ def _score_section(story, results, T, styles):
     rows = [["Item", "Findings", "Points/item", "Total"]]
     for sev, info in deductions.items():
         color = SEVERITY_COLORS.get(sev, HexColor("#64748B"))
+        # When the per-severity cap bit, count x per_item != total. Label the row
+        # explicitly ("capped at 3x") so a reader never computes the uncapped product.
+        total_cell = f'<b>-{info["total"]}</b>'
+        if info.get("capped"):
+            total_cell += f'<br/><font size="7" color="#64748B">capped at 3x (raw -{info.get("raw_total", "")})</font>'
         rows.append([
             Paragraph(f'<font color="{color.hexval()}"><b>{sev.upper()}</b></font>', styles["table_cell"]),
             Paragraph(str(info["count"]),      styles["table_cell"]),
             Paragraph(str(info["per_item"]),   styles["table_cell"]),
-            Paragraph(f'<b>-{info["total"]}</b>', styles["table_cell"]),
+            Paragraph(total_cell, styles["table_cell"]),
         ])
     if secret_ded:
         rows.append([
@@ -1606,6 +1693,9 @@ def _certificate_section(story, results, T, styles):
         ["Scheme",        ", ".join(cert.get("scheme", [])) or "v1"],
         ["SHA-256",       cert.get("sha256_fingerprint", "—")],
     ]
+    # These cells are plain strings drawn directly (not through _safe/Paragraph), so
+    # transliterate any non-WinAnsi glyph (⚠, localized org names) to avoid black boxes.
+    rows = [[label, _pdf_glyph_safe(str(val))] for label, val in rows]
 
     t = Table(rows, colWidths=[45*mm, 110*mm])
     t.setStyle(_kv_table_style(T))
@@ -1734,30 +1824,75 @@ def _permissions_section_pdf(story, results, T, styles):
 
 
 def _browsable_section_pdf(story, results, T, styles):
-    """PDF section for browsable activities."""
-    surface = results.get("attack_surface", {})
-    browsable = [c for c in surface.get("activities", []) if c.get("browsable") and c.get("deeplinks")]
-
-    if not browsable:
+    """Deep Links & App Links — a structured scheme→host→path table per exported
+    activity, with BROWSABLE / autoVerify badges, VERIFIED App Links separated from
+    UNVERIFIED custom-scheme links (the higher attack surface), and a best-effort
+    taint-consumer note. Replaces the raw scheme/deeplink dump."""
+    dl_map = results.get("deep_link_map")
+    if dl_map is None:
+        # Fallback for older scans without the structured map: derive from the surface.
+        surface = results.get("attack_surface", {})
+        dl_map = [{"short_name": c.get("short_name", ""), "entries": c.get("deep_links", []),
+                   "has_custom_scheme": any(e.get("custom_scheme") for e in c.get("deep_links", [])),
+                   "consumer": None}
+                  for c in surface.get("activities", []) if c.get("deep_links")]
+    if not dl_map:
         return
 
-    story.append(Paragraph(f"Browsable Activities ({len(browsable)})", styles["section_title"]))
+    n_custom = sum(1 for a in dl_map if a.get("has_custom_scheme"))
+    n_verified = sum(1 for a in dl_map if a.get("verified_app_link"))
+    story.append(Paragraph("Deep Links & App Links", styles["section_title"]))
     story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
-    story.append(Spacer(1, 4*mm))
+    story.append(Spacer(1, 2*mm))
+    story.append(Paragraph(
+        f"{len(dl_map)} activity(ies) with deep links — <b>{n_custom} custom-scheme "
+        f"(UNVERIFIED, attacker-reachable)</b>, {n_verified} verified App Link(s). "
+        "Custom-scheme links can be registered by any installed app; https App Links with "
+        "android:autoVerify + a host are bound by assetlinks.json.",
+        styles["caption"]))
+    story.append(Spacer(1, 3*mm))
 
-    rows = [["Activity", "Scheme/Deeplink", "Risk"]]
-    for comp in browsable:
-        has_custom = any(s not in ("http", "https") for s in comp.get("schemes", []))
-        risk = "HIGH — Custom scheme hijackable" if has_custom else "LOW"
-        risk_color = SEVERITY_COLORS["high"] if has_custom else SEVERITY_COLORS["low"]
-        deeplinks = ", ".join(comp.get("deeplinks", []))[:60]
-        rows.append([
-            Paragraph(_safe(comp.get("short_name", "")), styles["table_cell_mono"]),
-            Paragraph(_safe(deeplinks), styles["table_cell_mono"]),
-            Paragraph(f'<font color="{risk_color.hexval()}">{risk}</font>', styles["table_cell"]),
-        ])
+    def _badges(e):
+        b = []
+        if e.get("browsable"):
+            b.append('<font color="#2563eb">BROWSABLE</font>')
+        if e.get("verified"):
+            b.append('<font color="#16a34a">autoVerify✓</font>')
+        elif e.get("auto_verify"):
+            b.append('<font color="#d97706">autoVerify(no host)</font>')
+        return " ".join(b) or "—"
 
-    t = Table(rows, colWidths=[50*mm, 65*mm, 40*mm])
+    rows = [["Activity", "Scheme", "Host", "Path", "Badges", "Type"]]
+    for a in dl_map:
+        first = True
+        for e in a.get("entries", []):
+            is_custom = e.get("custom_scheme")
+            if e.get("verified"):
+                typ, tcolor = "App Link (VERIFIED)", "#16a34a"
+            elif e.get("app_link"):
+                typ, tcolor = "App Link (unverified)", "#d97706"
+            else:
+                typ, tcolor = "Custom scheme (UNVERIFIED)", "#dc2626"
+            pk = f'{e.get("path_kind")}: ' if e.get("path_kind") else ""
+            rows.append([
+                Paragraph(_safe(a.get("short_name", "")) if first else "", styles["table_cell_mono"]),
+                Paragraph(_safe((e.get("scheme") or "—") + "://"), styles["table_cell_mono"]),
+                Paragraph(_safe(e.get("host") or "—"), styles["table_cell_mono"]),
+                Paragraph(_safe((pk + (e.get("path") or "")) or "—"), styles["table_cell_mono"]),
+                Paragraph(_badges(e), styles["table_cell"]),
+                Paragraph(f'<font color="{tcolor}">{typ}</font>', styles["table_cell"]),
+            ])
+            first = False
+        # Best-effort taint consumer note under the activity's rows.
+        consumer = a.get("consumer")
+        if consumer and consumer.get("note"):
+            rows.append([
+                Paragraph("", styles["table_cell"]),
+                Paragraph(f'<font size="7" color="#dc2626">(!) {_safe(consumer["note"])}</font>',
+                          styles["table_cell"]), "", "", "", "",
+            ])
+
+    t = Table(rows, colWidths=[30*mm, 18*mm, 30*mm, 30*mm, 24*mm, 23*mm])
     t.setStyle(_table_style(T))
     story.append(t)
     story.append(Spacer(1, 6*mm))

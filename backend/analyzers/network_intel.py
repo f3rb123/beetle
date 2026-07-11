@@ -88,6 +88,50 @@ _PLACEHOLDER_IPS = frozenset((
     "192.168.1.1", "192.168.0.1",
 ))
 
+# Placeholder / example / test HOST literals that are essentially never a real
+# embedded endpoint — mirrors _PLACEHOLDER_IPS for domains so they are never DNS
+# resolved or reported (e.g. `default.url`, example.com, your-api.com).
+_PLACEHOLDER_DOMAINS = frozenset((
+    "default.url", "example.com", "example.org", "example.net", "example.edu",
+    "your-api.com", "yourapi.com", "your-domain.com", "yourdomain.com",
+    "your-server.com", "api.example.com", "test.com", "test.test", "foo.com",
+    "foo.bar", "bar.com", "domain.com", "mydomain.com", "myapi.com",
+    "localhost", "localhost.localdomain", "changeme.com", "placeholder.com",
+))
+# Reserved / non-registrable TLDs (RFC 2606 / RFC 6761) — never resolvable.
+_PLACEHOLDER_TLDS = frozenset((
+    "invalid", "example", "test", "localhost", "local", "internal", "lan",
+    "home", "corp", "onion",
+))
+# A registrable-looking hostname: labels of allowed chars + a 2–24 alpha TLD.
+_REGISTRABLE_RE = re.compile(
+    r"^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$")
+
+
+def is_placeholder_domain(host: str) -> bool:
+    """True for a well-known placeholder/example/test/reserved host that must never
+    be DNS-resolved or reported. Mirrors the _PLACEHOLDER_IPS exact-string gate,
+    plus reserved-TLD and wildcard-example checks."""
+    h = (host or "").strip().lower().rstrip(".")
+    if not h or h in _PLACEHOLDER_DOMAINS:
+        return True
+    tld = h.rsplit(".", 1)[-1] if "." in h else h
+    if tld in _PLACEHOLDER_TLDS:
+        return True
+    # *.example / example.* style wildcards used in docs and templates.
+    labels = h.split(".")
+    return "example" in labels or "invalid" in labels
+
+
+def looks_like_registrable_domain(host: str) -> bool:
+    """True when a host is a plausible real, registrable domain (label + real TLD),
+    so a bare word / IP-shaped / malformed token is not resolved. Checked BEFORE
+    any DNS resolution, alongside :func:`is_placeholder_domain`."""
+    h = (host or "").strip().lower().rstrip(".")
+    if not h or is_placeholder_domain(h):
+        return False
+    return bool(_REGISTRABLE_RE.match(h))
+
 
 def _doc_or_shared(ip) -> bool:
     for net in _DOC_NETS:

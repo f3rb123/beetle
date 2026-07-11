@@ -151,6 +151,13 @@ FRAMEWORK_PATH_PREFIXES = (
 # framework file outranks an application/manifest proof, regardless of ownership.
 FRAMEWORK_PATH_PENALTY = -45
 
+# A LOCALIZED resource string (res/values-<locale>/strings.xml) is a UI translation,
+# never the app's detection logic. Penalized hard so a code site or the base resource
+# always outranks it as proof (e.g. a root-check finding anchors to the isRooted
+# source / su-path string, not a Serbian-Latin Play-Services UI label). Only affects
+# RANKING among candidates — never blanks the sole evidence a finding has.
+LOCALIZED_RESOURCE_PENALTY = -55
+
 # ── Attack-chain evidence policy (Phase 1.997) ────────────────────────────────
 # Chains pick evidence differently: Manifest → app business logic → configuration →
 # resources → supporting → framework. These file-scope bonuses (only applied in

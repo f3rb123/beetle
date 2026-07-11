@@ -63,7 +63,7 @@ def _run_all(dirs, corpus):
     jwts = evidence_scanner.scan_directory_for_jwts("", dirs, corpus=corpus)
     ni_ips = network_intel.extract_ips(dirs[0], dirs[1:], corpus=corpus)
     cc = cloud_config.scan(dirs[0], dirs[1:], corpus=corpus)
-    eps = endpoint_intel.extract_endpoints(dirs[0], dirs[1:], corpus=corpus)
+    eps = endpoint_intel.extract_endpoints(dirs[0], dirs[1:], corpus=corpus, verbose=True)
     strings = string_analyzer.analyze_strings(dirs[0], "android", corpus=corpus)
     sast_res = {"findings": []}
     code_analyzer.run_android_sast(dirs, sast_res, corpus=corpus)
@@ -117,7 +117,7 @@ def test_shared_corpus_concurrent_matches_serial(tmp_path):
         "jwts":    lambda: evidence_scanner.scan_directory_for_jwts("", dirs, corpus=shared),
         "ni_ips":  lambda: network_intel.extract_ips(dirs[0], dirs[1:], corpus=shared),
         "cc":      lambda: cloud_config.scan(dirs[0], dirs[1:], corpus=shared),
-        "eps":     lambda: endpoint_intel.extract_endpoints(dirs[0], dirs[1:], corpus=shared),
+        "eps":     lambda: endpoint_intel.extract_endpoints(dirs[0], dirs[1:], corpus=shared, verbose=True),
         "strings": lambda: string_analyzer.analyze_strings(dirs[0], "android", corpus=shared),
     }
     with ThreadPoolExecutor(max_workers=len(tasks)) as pool:

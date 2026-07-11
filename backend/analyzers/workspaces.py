@@ -579,6 +579,23 @@ def build_network_workspace(results: dict) -> None:
 
 
 # ═══════════════════════ Task 9 — taint graph (graph-ready) ═════════════════
+def _is_unresolvable_taint_source(file: str) -> bool:
+    """True when a taint flow's source class has NO verifiable decompiled source: an
+    empty file, or an R8/ProGuard-obfuscated class name (mostly 1–2-char segments,
+    e.g. ``Z.S.A0`` / ``M0.a.h0``). A real path or a clear dotted app class is
+    resolvable and returns False."""
+    f = (file or "").strip()
+    if not f:
+        return True
+    if "/" in f or "\\" in f or f.lower().endswith((".java", ".kt", ".smali", ".dart", ".dex")):
+        return False  # a real decompiled path — resolvable
+    segs = [s for s in re.split(r"[.$]", f) if s]
+    if not segs:
+        return True
+    short = sum(1 for s in segs if len(s) <= 2)
+    return short >= max(1, (len(segs) + 1) // 2)
+
+
 def build_taint_graph(results: dict) -> None:
     # ONE canonical, source→sink-deduped list drives the Data Flow panel, its metrics
     # AND the PDF taint table, so the counts can never contradict. Each entry carries
@@ -587,12 +604,53 @@ def build_taint_graph(results: dict) -> None:
     from .taint_analyzer import reconcile_taint_flows, explain_flow
     reconciled = reconcile_taint_flows(results)
     results["taint_flows_reconciled"] = reconciled
+
+    # Index the TAINT findings by (source, sink) so each flow can reuse the SAME
+    # resolved primary-evidence view (file:line + View-Code snippet) that the finding
+    # and chain surfaces render — via build_evidence_view, exactly like chain members.
+    _taint_by_pair: dict = {}
+    for f in results.get("findings") or []:
+        tfl = f.get("taint_flow")
+        if isinstance(tfl, dict) and tfl.get("source") and tfl.get("sink"):
+            _taint_by_pair.setdefault((tfl.get("source"), tfl.get("sink")), f)
+    try:
+        from .evidence_selection import build_evidence_view as _bev
+    except Exception:  # noqa: BLE001
+        _bev = None
+
     graph = []
     for e in reconciled:
         # Plain-English copy so a non-security reader understands WHAT happens, WHY it
         # matters, and what the source/sink actually ARE. Additive fields.
         human = explain_flow(e.get("source_cat") or "", e.get("sink_cat") or "",
                              e.get("source") or "", e.get("sink") or "")
+
+        file = e.get("file") or ""
+        line = e.get("line") or 0
+        snippet = ""
+        evidence_view = None
+        f = _taint_by_pair.get((e.get("source"), e.get("sink")))
+        if f is not None and _bev is not None:
+            try:
+                evidence_view = _bev(f)
+                prim = (evidence_view or {}).get("primary") or {}
+                snippet = prim.get("snippet") or f.get("snippet") or ""
+                file = file or prim.get("file") or f.get("file_path") or ""
+                line = line or prim.get("line") or f.get("line") or 0
+            except Exception:  # noqa: BLE001 — never let enrichment fail a scan
+                evidence_view = None
+        if not snippet:
+            snippet = (f or {}).get("snippet") or ""
+
+        # An obfuscated flow (empty file, or an R8/ProGuard class like Z.S.A0) has NO
+        # decompiled source — be honest with an explicit marker rather than a bare node.
+        obfuscation_note = ""
+        src_class = file or (e.get("call_sites") or [{}])[0].get("file") or e.get("source") or "?"
+        if _is_unresolvable_taint_source(file):
+            obfuscation_note = (
+                f"obfuscated: {src_class} → {e.get('sink') or '?'} — no decompiled source; "
+                "verify in jadx/smali or with the R8 mapping.txt")
+
         graph.append({
             "id": f"taint:{e.get('source')}->{e.get('sink')}",
             "source": e.get("source"),
@@ -600,12 +658,16 @@ def build_taint_graph(results: dict) -> None:
             "sink": e.get("sink"),
             "sink_cat": e.get("sink_cat"),
             "call_chain": e.get("call_chain") or [],
-            "file": e.get("file") or "",
-            "line": e.get("line") or 0,
+            "file": file,
+            "line": line,
             "method_name": e.get("method_name") or "",
             "risk": e.get("risk"),
             "call_site_count": e.get("call_site_count", 1),
             "call_sites": e.get("call_sites") or [],
+            "snippet": snippet,
+            "evidence_view": evidence_view,
+            "obfuscation_note": obfuscation_note,
+            "verifiable": not obfuscation_note,
             "plain_summary": human["plain_summary"],
             "why_it_matters": human["why_it_matters"],
             "source_explainer": human["source_explainer"],

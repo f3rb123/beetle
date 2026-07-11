@@ -125,6 +125,7 @@ try:
     _VALIDATED_STATUS = _si_config.Status.VALIDATED
     _POSSIBLE_STATUS = _si_config.Status.POSSIBLE
     _PUBLIC_STATUS = _si_config.Status.PUBLIC_VALUE
+    _CLIENT_KEY_STATUS = _si_config.Status.CLIENT_KEY
     _DOC_EXAMPLE_STATUS = _si_config.Status.DOC_EXAMPLE
     _FALSE_POSITIVE_STATUS = _si_config.Status.FALSE_POSITIVE
     _GENERATED_CONSTANT_STATUS = _si_config.Status.GENERATED_CONSTANT
@@ -134,6 +135,7 @@ except Exception:  # pragma: no cover — engine import must never break secret 
     _PROBABLE_STATUS, _VALIDATED_STATUS = "Probable Secret", "Validated Secret"
     _POSSIBLE_STATUS = "Possible Secret"
     _PUBLIC_STATUS, _DOC_EXAMPLE_STATUS = "Public Value", "Documentation Example"
+    _CLIENT_KEY_STATUS = "Client Key"
     _FALSE_POSITIVE_STATUS, _GENERATED_CONSTANT_STATUS = "False Positive", "Generated Constant"
 
 # Reject classes split by certainty:
@@ -202,6 +204,41 @@ def _intelligence_rejected(secret: dict) -> bool:
         return False  # Possible/Unknown with a recognized format — keep visible
     conf = secret.get("secret_overall_confidence")
     return isinstance(conf, (int, float)) and conf < _SUPPRESS_FLOOR
+
+
+# ─── Status → display severity (authoritative, evidence-derived policy) ───────
+_SEV_RANK_LOCAL = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+_SEV_BY_RANK_LOCAL = {0: "critical", 1: "high", 2: "medium", 3: "low", 4: "info"}
+# Statuses whose secrets are visible but NEVER confidential → INFO (a package/
+# referrer-restricted client key is not a leaked credential; a public value is public;
+# the definitive/heuristic FP classes contribute 0 even if one reaches a consumer).
+_STATUS_FORCE_INFO = frozenset((
+    _CLIENT_KEY_STATUS, _PUBLIC_STATUS,
+    _DOC_EXAMPLE_STATUS, _FALSE_POSITIVE_STATUS, _GENERATED_CONSTANT_STATUS,
+))
+
+
+def _display_severity(secret: dict) -> str:
+    """Display severity for a secret, DERIVED from its evidence-based status — not a
+    standalone constant. The Secret Intelligence status is itself computed from the
+    value's format/entropy/context, and this maps that verdict to what surfaces show:
+
+      VALIDATED / PROBABLE  → keep the evidence-computed severity (may be HIGH)
+      POSSIBLE              → cap at MEDIUM (plausible but weakly evidenced)
+      CLIENT_KEY / PUBLIC_VALUE / DOC_EXAMPLE / FALSE_POSITIVE / GENERATED_CONSTANT
+                            → INFO (visible if not hidden, but contributes 0 to score)
+      (no status / unknown) → computed severity unchanged (legacy behavior)
+    """
+    computed = secret.get("severity") or "info"
+    status = secret.get("secret_status")
+    if not status or status in (_VALIDATED_STATUS, _PROBABLE_STATUS):
+        return computed
+    if status in _STATUS_FORCE_INFO:
+        return "info"
+    if status == _POSSIBLE_STATUS:
+        # Cap at MEDIUM: never EXCEED medium, but keep an already-lower severity.
+        return _SEV_BY_RANK_LOCAL[max(_SEV_RANK_LOCAL.get(computed, 4), _SEV_RANK_LOCAL["medium"])]
+    return computed
 
 
 # ─── Provider / type tagging (Task 3) ────────────────────────────────────────
@@ -734,7 +771,12 @@ def _build_canonical(secret: dict, app_package: str, keep_raw: bool = False) -> 
         validation_result = "skipped"
 
     confidence = _confidence_label(secret, validated)
-    severity = secret.get("severity") or "info"
+    computed_severity = secret.get("severity") or "info"
+    # Display severity is derived from the evidence-based Secret Intelligence status:
+    # a CLIENT_KEY/PUBLIC value is INFO, a POSSIBLE is capped at MEDIUM, a VALIDATED/
+    # PROBABLE keeps its computed severity. This becomes the canonical `severity` so
+    # the secret table, the PDF, the score and the chain view all AGREE.
+    severity = _display_severity(secret)
     masked_snippet = _scrub_text(snippet, raw_value, masked)
     masked_context = _scrub_text(secret.get("code_context", ""), raw_value, masked)
 
@@ -764,6 +806,8 @@ def _build_canonical(secret: dict, app_package: str, keep_raw: bool = False) -> 
         "exposure_score":       exposure,
         "exploitability_score": exploit,
         "severity":             severity,
+        "display_severity":     severity,          # explicit alias for downstream readers
+        "severity_computed":    computed_severity,  # detector/evidence severity, pre-cap (audit)
         "paired_with":          secret.get("paired_with") or [],
         "is_pair":              False,
         "paired_into":          "",

@@ -60,7 +60,9 @@ export function ownershipLabel(f) {
 
 export function confidenceLabel(f) {
   if (f.evidence_quality) return f.evidence_quality
-  const n = Number(f.confidence_score ?? f.confidence)
+  // Prefer the Confidence Engine's computed overall_confidence; fall back to the
+  // legacy confidence_score/confidence for un-annotated scans (same source as chains).
+  const n = Number(f.overall_confidence ?? f.confidence_score ?? f.confidence)
   if (Number.isFinite(n)) return n >= 70 ? 'HIGH' : n >= 40 ? 'MEDIUM' : 'LOW'
   return ''
 }
