@@ -320,6 +320,12 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         # ── Entitlements ─────────────────────────────────────────────────────
         if app_bundle:
             _analyze_entitlements(app_bundle, results)
+        # ── Certificate summary — build results["certificate"] from the signing
+        # certs + provisioning fields _analyze_entitlements just parsed, so the
+        # report renders signing/provisioning details instead of "No certificate
+        # data". Additive; iOS-only (Android builds results["certificate"] in
+        # cert_analyzer). ──
+        _build_ios_certificate(results)
 
         # ── Embedded Frameworks ──────────────────────────────────────────────
         if app_bundle:
@@ -529,6 +535,18 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         finding_model.demote_library_code_findings(results)
     except Exception:
         log.exception("[library_noise] demotion failed")
+    # ── Phase 7.5: trust framework — evidence quality, resolution coverage scores
+    # and the overall trust score. Mirror of the Android placement
+    # (android_analyzer.py:984): runs AFTER findings, source-resolution stats and
+    # ownership have populated, and BEFORE the v2 attack chains — so the iOS report
+    # shows a real Trust Score instead of "-". Additive; annotate_trust reads only
+    # results["findings"] + per-finding fields (no manifest/Android-only input),
+    # so it needs no manifest_xml guard here. iOS-only call site; Android unchanged. ──
+    try:
+        from . import trust_engine
+        trust_engine.annotate_trust(results)
+    except Exception:
+        log.exception("[trust_engine] failed; report left without a trust score")
     # ── Phase 1.3: Confidence Engine — explainable per-finding confidence
     # (detection/ownership/evidence/context/exploitability/overall). Additive
     # only; reads owner_* from the Ownership Engine above. Never changes severity,
@@ -895,19 +913,47 @@ def _detect_framework(app_bundle: str, results: dict):
         return
 
     files = set()
-    for root, _, fnames in os.walk(app_bundle):
+    dirs_set = set()
+    for root, dnames, fnames in os.walk(app_bundle):
+        for d in dnames:
+            dirs_set.add(d.lower())
         for f in fnames:
             files.add(f.lower())
 
     fw_type  = "native"
     details  = []
 
-    # Flutter
-    if "flutter_assets" in os.listdir(app_bundle) if os.path.exists(app_bundle) else []:
+    # Flutter — RECURSIVE detection. `flutter_assets` is normally nested under
+    # Frameworks/App.framework/ (and plugins under Frameworks/*.framework/), so a
+    # top-level os.listdir misses it and the app is mislabeled "native".
+    _FLUTTER_DIRS  = {"flutter_assets", "app.framework", "flutter.framework"}
+    _FLUTTER_FILES = {"libapp.dylib", "libflutter.dylib"}
+    # Well-known Flutter plugin Pods (ship as *.framework in Frameworks/) — their
+    # presence is a strong Flutter signal even without the App/Flutter framework dirs.
+    _FLUTTER_PLUGIN_PODS = {
+        "webview_flutter_wkwebview", "flutter_secure_storage", "image_picker_ios",
+        "path_provider_foundation", "shared_preferences_foundation", "url_launcher_ios",
+        "sqflite", "sqflite_darwin", "connectivity_plus", "package_info_plus",
+        "geolocator_apple", "google_maps_flutter_ios", "device_info_plus",
+        "flutter_plugin_android_lifecycle", "google_sign_in_ios", "firebase_core",
+    }
+
+    def _pod_name(d):  # a *.framework dir's pod name
+        return d[:-len(".framework")] if d.endswith(".framework") else d
+
+    plugin_hit = next((_pod_name(d) for d in dirs_set if _pod_name(d) in _FLUTTER_PLUGIN_PODS), None)
+    _flutter_dir_hit = dirs_set & _FLUTTER_DIRS
+    _flutter_file_hit = files & _FLUTTER_FILES
+    if _flutter_dir_hit or _flutter_file_hit or plugin_hit:
         fw_type = "flutter"
-        details.append("Flutter detected via flutter_assets directory")
+        why = []
+        if "flutter_assets" in dirs_set: why.append("flutter_assets directory")
+        if "app.framework" in dirs_set: why.append("Frameworks/App.framework")
+        if "flutter.framework" in dirs_set: why.append("Frameworks/Flutter.framework")
+        if _flutter_file_hit: why.append(", ".join(sorted(_flutter_file_hit)))
+        if plugin_hit: why.append(f"Flutter plugin pod ({plugin_hit})")
+        details.append("Flutter detected via " + "; ".join(why))
         results["findings"].append({
-            "rule_id":        "framework_flutter_detected",
             "rule_id":        "framework_flutter_detected",
             "title":          "Flutter Framework Detected",
             "severity":       "info",
@@ -1126,6 +1172,108 @@ def _parse_mobileprovision_certs(raw: bytes) -> list[dict]:
             continue
         result.append(entry)
     return result
+
+
+def _rfc4514_attrs(dn: str) -> dict:
+    """Parse an RFC4514 distinguished-name string (as produced by
+    x509 .rfc4514_string()) into {CN, O, OU, C, ...}. First value per type wins.
+
+    Splits on unescaped commas only (rfc4514 escapes literal commas as '\\,').
+    """
+    attrs: dict[str, str] = {}
+    if not dn:
+        return attrs
+    parts, buf, esc = [], [], False
+    for ch in dn:
+        if esc:
+            buf.append(ch)
+            esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == ",":
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    parts.append("".join(buf))
+    for p in parts:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            k = k.strip().upper()
+            if k and k not in attrs:
+                attrs[k] = v.strip()
+    return attrs
+
+
+def _ios_cert_date(iso: str) -> str:
+    """Normalize an ISO cert timestamp (e.g. '2024-01-01T00:00:00Z') to YYYY-MM-DD."""
+    if not iso:
+        return ""
+    return str(iso).split("T", 1)[0]
+
+
+def _ios_cert_expired(not_after_iso: str) -> bool | None:
+    """True/False if the leaf cert not_after is in the past/future; None if unknown.
+
+    Derived from the parsed date (evidence), never assumed.
+    """
+    if not not_after_iso:
+        return None
+    from datetime import datetime, timezone
+    s = str(not_after_iso).rstrip("Z")
+    try:
+        dt = datetime.fromisoformat(s)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt < datetime.now(timezone.utc)
+
+
+def _build_ios_certificate(results: dict) -> None:
+    """Populate results["certificate"] for iOS from the already-parsed signing
+    certificates + provisioning fields in results["app_info"].
+
+    Leaves results["certificate"] unset when the IPA carries no signing/provisioning
+    data (unsigned / stripped) — the report then shows "No certificate data", the same
+    as before. Additive; never overwrites an existing certificate dict.
+    """
+    if results.get("certificate"):
+        return
+    ai = results.get("app_info", {}) or {}
+    certs = ai.get("signing_certificates") or []
+    team          = ai.get("provisioning_team", "")
+    prov_type     = ai.get("provisioning_type", "")
+    prov_profile  = ai.get("provisioning_profile", "")
+    prov_expiry   = ai.get("provisioning_expiry", "")
+    if not certs and not (team or prov_type or prov_profile):
+        return  # nothing was parsed → no certificate section
+
+    leaf = certs[0] if certs else {}
+    subject = _rfc4514_attrs(leaf.get("subject", ""))
+    issuer  = _rfc4514_attrs(leaf.get("issuer", ""))
+    not_after = leaf.get("not_after", "")
+
+    cert = {
+        "available": True,
+        "platform": "ios",
+        "subject": subject,
+        "issuer": issuer,
+        "signing_identity": subject.get("CN", ""),
+        "team": team,
+        "provisioning_type": prov_type,
+        "provisioning_profile": prov_profile,
+        "provisioning_expiry": prov_expiry,
+        "valid_from": _ios_cert_date(leaf.get("not_before", "")),
+        "valid_to": _ios_cert_date(not_after),
+        "serial": leaf.get("serial", ""),
+        "sha1_fingerprint": leaf.get("sha1", ""),
+        "sha256_fingerprint": leaf.get("sha256", ""),
+    }
+    expired = _ios_cert_expired(not_after)
+    if expired is not None:
+        cert["expired"] = expired
+    results["certificate"] = cert
 
 
 # ─── Entitlements ─────────────────────────────────────────────────────────────

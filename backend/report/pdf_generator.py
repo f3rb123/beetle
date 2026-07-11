@@ -1667,19 +1667,31 @@ def _score_section(story, results, T, styles):
 
 
 # ─── Certificate Section ──────────────────────────────────────────────────────
-def _certificate_section(story, results, T, styles):
-    cert = results.get("certificate", {})
-    if not cert or not cert.get("available"):
-        return
+def _certificate_rows(cert, platform):
+    """Build the [label, value] rows for the Certificate section.
 
-    story.append(Paragraph("Certificate Analysis", styles["section_title"]))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
-    story.append(Spacer(1, 4*mm))
-
-    subject = cert.get("subject", {})
-    issuer  = cert.get("issuer",  {})
-
-    rows = [
+    Platform-aware: iOS renders signing identity / Apple team / provisioning /
+    expiry (the Android-only APK Signature Scheme, self-signed and debug-cert rows
+    do not apply to Apple code signing and are omitted). Any non-iOS platform
+    returns the original Android rows unchanged (byte-identical).
+    """
+    subject = cert.get("subject", {}) or {}
+    issuer  = cert.get("issuer",  {}) or {}
+    if platform == "ios":
+        prov_type = cert.get("provisioning_type", "")
+        return [
+            ["Signing Identity", cert.get("signing_identity") or subject.get("CN", "—")],
+            ["Team",             cert.get("team", "—")],
+            ["Subject O",        subject.get("O",   "—")],
+            ["Issuer CN",        issuer.get("CN",   "—")],
+            ["Provisioning",     (prov_type.capitalize() if prov_type else "—")],
+            ["Profile",          cert.get("provisioning_profile", "—")],
+            ["Valid From",       cert.get("valid_from",  "—")],
+            ["Valid To",         (cert.get("valid_to", "—") or "—") + (" ⚠ EXPIRED" if cert.get("expired") else "")],
+            ["Profile Expiry",   cert.get("provisioning_expiry", "—")],
+            ["SHA-256",          cert.get("sha256_fingerprint", "—")],
+        ]
+    return [
         ["Subject CN",    subject.get("CN",  "—")],
         ["Subject O",     subject.get("O",   "—")],
         ["Issuer CN",     issuer.get("CN",   "—")],
@@ -1693,6 +1705,20 @@ def _certificate_section(story, results, T, styles):
         ["Scheme",        ", ".join(cert.get("scheme", [])) or "v1"],
         ["SHA-256",       cert.get("sha256_fingerprint", "—")],
     ]
+
+
+def _certificate_section(story, results, T, styles):
+    cert = results.get("certificate", {})
+    if not cert or not cert.get("available"):
+        return
+
+    story.append(Paragraph("Certificate Analysis", styles["section_title"]))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
+    story.append(Spacer(1, 4*mm))
+
+    issuer  = cert.get("issuer",  {})
+
+    rows = _certificate_rows(cert, results.get("platform"))
     # These cells are plain strings drawn directly (not through _safe/Paragraph), so
     # transliterate any non-WinAnsi glyph (⚠, localized org names) to avoid black boxes.
     rows = [[label, _pdf_glyph_safe(str(val))] for label, val in rows]

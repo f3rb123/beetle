@@ -103,6 +103,10 @@ _HTTP_CALL_MARKERS = (
     "stringrequest", "jsonobjectrequest", "jsonarrayrequest", "volley",  # Volley
     "dio(", "baseoptions", "uri.parse", "http.get", "http.post", "http.read",  # Dart / Flutter
     "httpurlconnection", "loadurl(", "retrofit", "webservice",
+    # iOS / Swift / ObjC HTTP clients (URLSession, Alamofire, NSURLConnection). ADDITIVE:
+    # Android source has none of this text, so it can only make MORE iOS URLs "called".
+    "urlsession", "datatask(", "urlrequest(", ".request(", "af.request", "alamofire",
+    "session.data", "nsurlconnection", "nsurlsession", "downloadtask(", "uploadtask(",
 )
 _CALL_WINDOW = 90  # chars of preceding context inspected for a client marker
 
