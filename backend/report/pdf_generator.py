@@ -757,6 +757,11 @@ def _visible_findings(results):
         if f.get("is_attack_chain"):
             visible.append(f)
             continue
+        # verbose_only findings (JNI inventory, shallow iOS taint) are retained in the
+        # full export (scope == "all", handled above) but never shown in the default
+        # high-signal view.
+        if f.get("verbose_only"):
+            continue
         label = f.get("ownership_label")
         # Prefer the Confidence Engine's computed overall_confidence; fall back to the
         # legacy confidence_score for un-annotated/old scans. Same source as chains.

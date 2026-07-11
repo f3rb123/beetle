@@ -317,6 +317,9 @@ export function FindingsPanel({ results, onOpenFinding, onOpenCode, collab, init
   const filtered = useMemo(() => {
     const ql = q.trim().toLowerCase()
     return all.filter(f => {
+      // verbose_only findings (JNI inventory, shallow iOS taint) are kept in the data
+      // (full export) but excluded from the default high-signal view.
+      if (!showSuppressed && f.verbose_only) return false
       if (sev !== 'all' && normSev(f.severity) !== sev) return false
       if (appOnly && (f.ownership_label || f.ownership) && (f.ownership_label || f.ownership) !== 'APPLICATION' && (f.ownership_label || f.ownership) !== 'APP') return false
       if (!showSuppressed && stateFilter !== 'all') {

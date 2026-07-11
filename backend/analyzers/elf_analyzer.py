@@ -424,6 +424,9 @@ def _emit_jni_surface(binary_results: list, results: dict) -> None:
             "owasp":       "M7",
             "jni_static_methods": e["static_methods"][:50],
             "jni_uses_register_natives": e["uses_register_natives"],
+            # Phase 1 is an informational inventory (no per-method attribution yet) —
+            # keep it out of the default high-signal view; retained in the full export.
+            "verbose_only": True,
         })
 
 

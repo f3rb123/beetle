@@ -141,6 +141,40 @@ def test_ios_flows_are_android_compatible_shape():
         assert k in t, f"missing {k} (Android taint-flow parity)"
 
 
+# ── display gating: verbose_only (Q3) ────────────────────────────────────────
+
+def test_jni_finding_is_verbose_only():
+    jni = elf._extract_jni_surface(b"Java_com_app_A_m\x00JNI_OnLoad")
+    results = {"findings": [], "secrets": []}
+    elf._emit_jni_surface([{"name": "libx.so", "path": "lib/libx.so", "jni": jni}], results)
+    f = next(f for f in results["findings"] if f["rule_id"] == "native_jni_surface")
+    assert f.get("verbose_only") is True
+
+
+def test_ios_taint_finding_is_verbose_only():
+    with tempfile.TemporaryDirectory() as root:
+        _write(root, "H.swift",
+               "func g(url: URL) {\n  let h = url.host\n"
+               "  URLSession.shared.dataTask(with: URLRequest(url: url))\n}\n")
+        results = {"findings": []}
+        ios._ios_shallow_taint(root, results)
+    assert results["findings"] and all(f.get("verbose_only") for f in results["findings"])
+
+
+def test_default_view_hides_verbose_only_full_export_keeps_it():
+    import pytest
+    pg = pytest.importorskip("report.pdf_generator")
+    findings = [
+        {"title": "real", "ownership_label": "APPLICATION", "is_app_code": True, "overall_confidence": 90},
+        {"title": "jni", "verbose_only": True, "severity": "info"},
+        {"title": "iostaint", "verbose_only": True, "overall_confidence": 55, "is_app_code": True},
+    ]
+    default = pg._visible_findings({"findings": findings, "_report_findings_scope": "application"})
+    assert [f["title"] for f in default] == ["real"], "verbose_only hidden in the default view"
+    full = pg._visible_findings({"findings": findings, "_report_findings_scope": "all"})
+    assert len(full) == 3, "full export retains verbose_only findings"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

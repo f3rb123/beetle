@@ -1805,6 +1805,10 @@ def _ios_shallow_taint(tmpdir: str, results: dict) -> None:
                         "owasp":          "M7",
                         "source":         "iOS_TAINT",
                         "confidence":     55,   # heuristic (same-file proximity, not inter-procedural)
+                        # Shallow first pass: produces some false pairs — keep it out of
+                        # the default high-signal view; retained in the full export until
+                        # the Phase 2 inter-procedural engine lands.
+                        "verbose_only":   True,
                         "taint_flow":     {"source": s_label, "source_cat": s_cat,
                                            "sink": k_label, "sink_cat": k_cat, "chain": []},
                     })
