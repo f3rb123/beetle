@@ -580,32 +580,37 @@ def build_network_workspace(results: dict) -> None:
 
 # ═══════════════════════ Task 9 — taint graph (graph-ready) ═════════════════
 def build_taint_graph(results: dict) -> None:
+    # ONE canonical, source→sink-deduped list drives the Data Flow panel, its metrics
+    # AND the PDF taint table, so the counts can never contradict. Each entry carries
+    # call_site_count (multiple call sites of the same pair collapse into one row).
+    # Calibrated severity is the single source of truth — never an "info" default.
+    from .taint_analyzer import reconcile_taint_flows, explain_flow
+    reconciled = reconcile_taint_flows(results)
+    results["taint_flows_reconciled"] = reconciled
     graph = []
-    for f in _findings(results):
-        tf = f.get("taint_flow")
-        if not isinstance(tf, dict):
-            continue
+    for e in reconciled:
+        # Plain-English copy so a non-security reader understands WHAT happens, WHY it
+        # matters, and what the source/sink actually ARE. Additive fields.
+        human = explain_flow(e.get("source_cat") or "", e.get("sink_cat") or "",
+                             e.get("source") or "", e.get("sink") or "")
         graph.append({
-            "id": f.get("canonical_id") or f.get("rule_id") or "",
-            "source": tf.get("source"),
-            "source_cat": tf.get("source_cat"),
-            "sink": tf.get("sink"),
-            "sink_cat": tf.get("sink_cat"),
-            "call_chain": tf.get("chain") or [],
-            "file": f.get("file_path") or "",
-            "line": f.get("line") or 0,
-            "risk": f.get("severity") or "info",
+            "id": f"taint:{e.get('source')}->{e.get('sink')}",
+            "source": e.get("source"),
+            "source_cat": e.get("source_cat"),
+            "sink": e.get("sink"),
+            "sink_cat": e.get("sink_cat"),
+            "call_chain": e.get("call_chain") or [],
+            "file": e.get("file") or "",
+            "line": e.get("line") or 0,
+            "method_name": e.get("method_name") or "",
+            "risk": e.get("risk"),
+            "call_site_count": e.get("call_site_count", 1),
+            "call_sites": e.get("call_sites") or [],
+            "plain_summary": human["plain_summary"],
+            "why_it_matters": human["why_it_matters"],
+            "source_explainer": human["source_explainer"],
+            "sink_explainer": human["sink_explainer"],
         })
-    # Also accept a pre-built taint_flows list if present.
-    for tf in results.get("taint_flows") or []:
-        if isinstance(tf, dict) and tf.get("source") and not any(g["source"] == tf.get("source") and g["sink"] == tf.get("sink") for g in graph):
-            graph.append({
-                "id": "", "source": tf.get("source"), "source_cat": tf.get("source_cat"),
-                "sink": tf.get("sink"), "sink_cat": tf.get("sink_cat"),
-                "call_chain": tf.get("chain") or tf.get("call_chain") or [],
-                "file": tf.get("file") or tf.get("class_name") or "", "line": tf.get("line") or 0,
-                "risk": tf.get("risk") or tf.get("severity") or "info",
-            })
     results["taint_graph"] = graph
 
 

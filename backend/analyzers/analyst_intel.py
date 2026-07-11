@@ -656,6 +656,31 @@ def build_v2_chain_explanation(chain: dict) -> dict:
 
 
 # ─── Executive analyst summary (Task 7) ──────────────────────────────────────
+_CONF_WORD_SCORE = {"critical": 90, "high": 85, "medium": 65, "low": 45, "info": 30}
+
+
+def _chain_exploit_score(c: dict) -> int:
+    """The chain's exploitability % — the same number shown on the chain (e.g. 48).
+    v2 chains carry ``exploitability``/``overall_exploitability``; cloud paths fall
+    back to ``risk_score``."""
+    for k in ("exploitability", "overall_exploitability", "risk_score"):
+        v = c.get(k)
+        if isinstance(v, (int, float)) and v:
+            return int(v)
+    return 0
+
+
+def _chain_conf_score(c: dict) -> int:
+    """Numeric confidence for tie-breaking — tolerant of numeric or word confidence."""
+    for k in ("overall_confidence", "confidence_score", "confidence", "chain_confidence"):
+        v = c.get(k)
+        if isinstance(v, (int, float)):
+            return int(v)
+        if isinstance(v, str) and v.strip():
+            return _CONF_WORD_SCORE.get(v.strip().lower(), 0)
+    return 0
+
+
 def _exploit_rank(f: dict) -> tuple:
     reach = 0 if str(f.get("reachability", "")).upper() == "YES" else 1
     return (_SEV_RANK.get(f.get("severity", "info"), 4), reach,
@@ -672,10 +697,23 @@ def build_summary(results: dict, findings: list[dict]) -> dict:
 
     chains = list(results.get("cloud_attack_paths") or [])
     chains += [f for f in findings if f.get("is_attack_chain")]
-    chains.sort(key=lambda c: -int(c.get("risk_score") or 0))
+    # "Most exploitable" must rank by EXPLOITABILITY (the % shown on the chain),
+    # tie-broken by confidence, then severity, then id — deterministic. Sorting by
+    # risk_score (which v2 chain findings don't carry) left the order effectively
+    # unsorted, so the widget showed whatever came first.
+    chains.sort(key=lambda c: (
+        -_chain_exploit_score(c),
+        -_chain_conf_score(c),
+        _SEV_RANK.get(str(c.get("severity") or "info").lower(), 4),
+        str(c.get("id") or c.get("canonical_id") or c.get("attack_chain_id") or c.get("title") or ""),
+    ))
     most_exploitable = [{
         "title": c.get("title"),
         "summary": c.get("summary") or (c.get("analyst_explanation") or {}).get("why_it_matters", "")[:160],
+        # Resolved severity + exploitability so the Overview badge matches every other
+        # surface (chain list / findings / PDF) instead of defaulting to HIGH.
+        "severity": c.get("severity"),
+        "exploitability": _chain_exploit_score(c),
         "confidence": c.get("confidence") or c.get("chain_confidence"),
         "risk_score": c.get("risk_score"),
     } for c in chains[:5]]

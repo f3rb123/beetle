@@ -22,6 +22,7 @@ import {
   getEvidenceView, detectionSources, trustScore, trustBand, confidenceContributions,
   reachabilityLabel, matchesFilters, findingDetectionSourceSet, findingFrameworkSet,
   OWNERSHIP_OPTIONS, parseStepEvidence, chainEvidenceView, isResourceConstantTarget,
+  pickMostExploitableChain, chainBadgeSeverity,
 } from './evidence-model.js'
 import { useWorkspaceNav } from './workspace-context.jsx'
 
@@ -57,7 +58,10 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCod
 
   const topRisks = analyst.top_risks || []
   const allChains = [...chains, ...findings.filter(f => f.is_attack_chain)]
-  const topChain = (analyst.most_exploitable_chains || [])[0] || allChains[0]
+  // "Most exploitable" = highest exploitability %, tie-broken by confidence. The
+  // backend already ranks analyst.most_exploitable_chains this way; when that payload
+  // is absent, pickMostExploitableChain ranks locally by the same key.
+  const topChain = pickMostExploitableChain(analyst.most_exploitable_chains, allChains)
 
   return (
     <div>
@@ -169,7 +173,9 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCod
             {topChain ? (
               <button type="button" onClick={() => onOpenSection('chains')} style={{ background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', width: '100%', padding: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <SeverityTag severity={topChain.severity || 'high'} compact />
+                  {/* Badge is the chain's RESOLVED severity (same as the chain list /
+                      findings / PDF) — never a fabricated 'high' default. */}
+                  <SeverityTag severity={chainBadgeSeverity(topChain)} compact />
                   <b style={{ fontSize: 14 }}>{topChain.title}</b>
                 </div>
                 <p style={{ marginTop: 8, fontSize: 13 }}>{topChain.summary}</p>

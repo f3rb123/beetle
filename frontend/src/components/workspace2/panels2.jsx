@@ -259,6 +259,9 @@ export function TaintFlowPanel({ results, onOpenCode }) {
   return (
     <div>
       <div className="ws-section__head"><h1>Data Flow Analysis</h1><span className="ws-muted">{flows.length} flow{flows.length !== 1 ? 's' : ''}</span></div>
+      <p className="ws-muted" style={{ marginTop: -4, marginBottom: 12, maxWidth: 760 }}>
+        How sensitive data moves through the app — from where it's read (the <b>source</b>) to where it ends up (the <b>sink</b>).
+      </p>
       <div className="ws-metrics ws-section">
         <Metric label="Total flows" value={flows.length} />
         <Metric label="High" value={(riskCounts.high || 0) + (riskCounts.critical || 0)} />
@@ -287,16 +290,25 @@ export function TaintFlowPanel({ results, onOpenCode }) {
                 <div className="ws-chain__head">
                   <SeverityTag severity={t.risk} />
                   <span className="ws-chain__title">{t.source_cat || 'Source'} → {t.sink_cat || 'Sink'}</span>
+                  {t.call_site_count > 1 ? <SoftTag title="Distinct call sites collapsed into this source→sink pair">{t.call_site_count} call sites</SoftTag> : null}
                   {t.confidence ? <SoftTag title="Confidence">{t.confidence}</SoftTag> : null}
                   {isPath ? <button type="button" className="ws-btn ws-btn--sm" style={{ marginLeft: 'auto' }} onClick={() => onOpenCode(t.file, t.line ? [t.line] : [], { source: 'taint sink', highlightLine: t.line, approximate: !t.line })}><FileCode2 size={13} /> {t.file.split('/').pop()}{t.line ? `:${t.line}` : ''}</button> : null}
                 </div>
+                {/* Plain-English summary — meaning before mechanism. */}
+                {t.plain_summary ? <div style={{ fontSize: 13.5, marginTop: 6, maxWidth: 720 }}>{t.plain_summary}</div> : null}
                 {classLabel ? <div className="ws-muted ws-mono" style={{ fontSize: 12, marginTop: 4 }}>{String(classLabel).replace(/;$/, '')}{t.method_name ? `.${t.method_name}` : ''}</div> : null}
                 <div className="ws-timeline" style={{ marginTop: 12 }}>
-                  <Step kind="Source" label={t.source} />
+                  <Step kind="Source" label={t.source} tip={t.source_explainer} />
                   {mids.length ? mids.map((c, j) => <Step key={j} kind="Transformation" label={c} />)
                     : <Step kind="Transformation" label="direct flow (no intermediate calls)" />}
-                  <Step kind="Sink" label={t.sink} last exposure />
+                  <Step kind="Sink" label={t.sink} tip={t.sink_explainer} last exposure />
                 </div>
+                {/* Why it matters — subtle, plain-English risk explanation. */}
+                {t.why_it_matters ? (
+                  <div className="ws-muted" style={{ fontSize: 12.5, marginTop: 10, lineHeight: 1.5 }}>
+                    <b>Why it matters:</b> {t.why_it_matters}
+                  </div>
+                ) : null}
                 {(t.call_chain || []).length ? (
                   <div style={{ marginTop: 10 }}>
                     <div className="ws-block__label">Call chain</div>
@@ -314,7 +326,7 @@ export function TaintFlowPanel({ results, onOpenCode }) {
     </div>
   )
 }
-function Step({ kind, label, last, exposure }) {
+function Step({ kind, label, last, exposure, tip }) {
   return (
     <div className="ws-step">
       <div className="ws-step__rail">
@@ -323,7 +335,18 @@ function Step({ kind, label, last, exposure }) {
       </div>
       <div className="ws-step__body">
         <div className="ws-step__kind">{kind}</div>
-        <div className="ws-step__label ws-mono">{label}</div>
+        <div className="ws-step__label ws-mono" title={tip || undefined}>
+          {label}
+          {tip ? (
+            <span
+              role="img"
+              aria-label={tip}
+              title={tip}
+              tabIndex={0}
+              style={{ marginLeft: 6, cursor: 'help', fontSize: 11, opacity: 0.6, borderBottom: '1px dotted currentColor' }}
+            >?</span>
+          ) : null}
+        </div>
       </div>
     </div>
   )

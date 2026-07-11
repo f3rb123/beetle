@@ -216,6 +216,33 @@ export function chainEvidenceTargets(finding) {
   return out
 }
 
+// ── "Most Exploitable Chain" widget selection + badge (Overview) ──────────────
+// Exploitability % of a chain (same number shown on the chain). v2 chains carry
+// exploitability/overall_exploitability; cloud paths fall back to risk_score.
+export function chainExploitScore(c) {
+  return Number(c?.exploitability ?? c?.overall_exploitability ?? c?.risk_score ?? 0) || 0
+}
+export function chainConfScore(c) {
+  return Number(c?.overall_confidence ?? c?.confidence_score ?? c?.confidence ?? 0) || 0
+}
+
+// Pick the most-exploitable chain: prefer the backend-ranked list (already sorted by
+// exploitability → confidence → severity), else rank locally by the SAME key. Returns
+// the chain object, or null. Never "just the first chain".
+export function pickMostExploitableChain(rankedChains, allChains) {
+  if (Array.isArray(rankedChains) && rankedChains.length) return rankedChains[0]
+  const list = Array.isArray(allChains) ? [...allChains] : []
+  list.sort((a, b) => chainExploitScore(b) - chainExploitScore(a) || chainConfScore(b) - chainConfScore(a))
+  return list[0] || null
+}
+
+// The severity badge for a chain-summary card = its RESOLVED severity (the same value
+// the chain list / findings / PDF show). NEVER a fabricated "high" default — a missing
+// value normalizes to "info" downstream, not "high".
+export function chainBadgeSeverity(chain) {
+  return (chain && chain.severity) || ''
+}
+
 // The single primary (file, line) target for a chain finding's "View Code":
 // the first reference that carries a real line, else the first target of any kind
 // (file-only → open without jumping), else null when the chain has no proof file.

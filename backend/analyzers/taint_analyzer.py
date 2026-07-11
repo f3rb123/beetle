@@ -270,16 +270,24 @@ def _analyze(apk_path: str, results: dict | None = None) -> list[dict]:
             # owner_type of the displayed source class (class_name below).
             source_owner = chain_owners[0] if chain_owners else "Unknown"
 
+            # Calibrate the DISPLAYED severity ONCE, at construction, so every
+            # surface (finding, Data Flow panel, PDF table) reads the same value.
+            # The raw sink severity is preserved separately but is never displayed.
+            raw_sink_sev = sink_entry["sink_sev"]
+            flow_risk = _calibrate_severity(sink_entry["sink_cat"], src_cat, raw_sink_sev)
+
             flows.append({
-                "source":      src_label,
-                "source_cat":  src_cat,
-                "sink":        sink_entry["sink_label"],
-                "sink_cat":    sink_entry["sink_cat"],
-                "sink_sev":    sink_entry["sink_sev"],
-                "call_chain":  _format_chain(caller_m, path),
-                "class_name":  caller_m.get_method().get_class_name().replace("/", ".").lstrip("L"),
-                "method_name": caller_m.get_method().get_name(),
-                "owner_type":  source_owner,
+                "source":       src_label,
+                "source_cat":   src_cat,
+                "sink":         sink_entry["sink_label"],
+                "sink_cat":     sink_entry["sink_cat"],
+                "sink_sev":     raw_sink_sev,
+                "raw_sink_sev": raw_sink_sev,
+                "risk":         flow_risk,
+                "call_chain":   _format_chain(caller_m, path),
+                "class_name":   caller_m.get_method().get_class_name().replace("/", ".").lstrip("L"),
+                "method_name":  caller_m.get_method().get_name(),
+                "owner_type":   source_owner,
             })
 
             if len(flows) >= MAX_PATHS:
@@ -572,10 +580,254 @@ def _calibrate_severity(sink_cat: str, source_cat: str, default_sev: str) -> str
     return default_sev
 
 
+def calibrate_flow_severity(flow: dict) -> str:
+    """Single source of truth for a taint flow's DISPLAYED severity.
+
+    Every consumer (the promoted finding, the Data Flow panel, the PDF taint table)
+    must read ``flow["risk"]`` — this recomputes it from the flow's own fields when a
+    flow (e.g. from an older scan) lacks it, so no surface ever falls back to the raw
+    sink severity or a hardcoded default.
+    """
+    return flow.get("risk") or _calibrate_severity(
+        flow.get("sink_cat", "Unknown"),
+        flow.get("source_cat", ""),
+        flow.get("sink_sev") or flow.get("raw_sink_sev") or "medium",
+    )
+
+
+_SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def reconcile_taint_flows(results: dict) -> list[dict]:
+    """Canonical taint-flow list, deduped by (source → sink), shared by EVERY surface.
+
+    Multiple call sites of the same source→sink pair collapse into ONE entry that
+    carries ``call_site_count`` and the individual ``call_sites`` — so the Data Flow
+    panel, its metrics and the PDF taint table always report the SAME number of
+    flows. Deterministic: first-occurrence order is preserved. Prefers the raw
+    per-call-site ``results['taint_flows']``; falls back to reconstructing sites from
+    TAINT findings for older scans that lack it.
+    """
+    raw = results.get("taint_flows")
+    if not raw:
+        raw = []
+        for f in results.get("findings") or []:
+            if f.get("source") == "TAINT" and isinstance(f.get("taint_flow"), dict):
+                tf = f["taint_flow"]
+                raw.append({
+                    "source": tf.get("source"), "source_cat": tf.get("source_cat"),
+                    "sink": tf.get("sink"), "sink_cat": tf.get("sink_cat"),
+                    "risk": f.get("severity") or tf.get("risk"),
+                    "call_chain": tf.get("chain") or [],
+                    "class_name": f.get("file_path") or "", "line": f.get("line") or 0,
+                    "owner_type": f.get("owner_type"),
+                })
+
+    pairs: dict = {}
+    order: list = []
+    for flow in raw or []:
+        if not isinstance(flow, dict) or not flow.get("source") or not flow.get("sink"):
+            continue
+        key = (flow.get("source"), flow.get("sink"))
+        site = {
+            "file": flow.get("file") or flow.get("class_name") or "",
+            "line": flow.get("line") or 0,
+            "call_chain": flow.get("call_chain") or flow.get("chain") or [],
+            "method_name": flow.get("method_name") or "",
+            "owner_type": flow.get("owner_type") or "",
+        }
+        risk = calibrate_flow_severity(flow)
+        if key not in pairs:
+            pairs[key] = {
+                "source": flow.get("source"), "source_cat": flow.get("source_cat"),
+                "sink": flow.get("sink"), "sink_cat": flow.get("sink_cat"),
+                "risk": risk, "call_sites": [site],
+            }
+            order.append(key)
+        else:
+            e = pairs[key]
+            e["call_sites"].append(site)
+            # Highest severity across the pair's sites wins (they share source/sink
+            # categories, so this is normally identical — defensive + deterministic).
+            if _SEV_RANK.get(risk, 4) < _SEV_RANK.get(e["risk"], 4):
+                e["risk"] = risk
+
+    out: list[dict] = []
+    for key in order:
+        e = pairs[key]
+        first = e["call_sites"][0]
+        e["call_site_count"] = len(e["call_sites"])
+        # Representative fields kept flat for existing readers (panel/graph).
+        e["call_chain"] = first["call_chain"]
+        e["file"] = first["file"]
+        e["line"] = first["line"]
+        e["method_name"] = first["method_name"]
+        e["owner_type"] = first["owner_type"]
+        out.append(e)
+    return out
+
+
+# ── Human copy (plain-English explainers for the Data Flow panel) ────────────
+# Keep every string ≤160 chars, natural and non-alarmist. Specific (source_cat,
+# sink_cat) pairs win; otherwise a generic per-sink-category fallback is used.
+_FLOW_EXPLAINERS: dict[tuple, dict] = {
+    ("Location", "Logging"): {
+        "plain_summary": "The app reads the device's GPS location and writes it to the Android system log (logcat).",
+        "why_it_matters": "Logs are readable by crash-reporting SDKs, bug-report captures, and — on Android 10 and older — other apps. Precise location in logs is a privacy leak.",
+    },
+    ("SharedPrefs", "Logging"): {
+        "plain_summary": "A value read from local preferences is written to the system log.",
+        "why_it_matters": "If that value is sensitive (a token, ID, or PII), it leaks to anything that can read logcat.",
+    },
+    ("User Input", "Logging"): {
+        "plain_summary": "A value the user typed (or that arrived from another app) is written to the system log.",
+        "why_it_matters": "If the input is sensitive it leaks to anything that can read logcat, and logged input can aid other attacks.",
+    },
+    ("Clipboard", "Logging"): {
+        "plain_summary": "Clipboard contents are written to the system log.",
+        "why_it_matters": "The clipboard can hold passwords or copied secrets; logging them exposes them to log readers.",
+    },
+    ("SharedPrefs", "Storage"): {
+        "plain_summary": "A value from local preferences is written back to on-device storage.",
+        "why_it_matters": "On-device storage isn't encrypted by default — sensitive values there are readable on a rooted or backed-up device.",
+    },
+    ("SharedPrefs", "Crypto"): {
+        "plain_summary": "A value from local preferences flows into a cryptographic call (hashing/encryption).",
+        "why_it_matters": "Only a concern if the algorithm is weak or a key/IV is misused — check the crypto findings.",
+    },
+}
+
+# Generic fallback keyed by SINK category (used when no specific pair matches).
+_SINK_CAT_EXPLAINERS: dict[str, dict] = {
+    "Logging": {
+        "plain_summary": "User-controlled data is written to the Android system log (logcat).",
+        "why_it_matters": "If the data is sensitive, logs are readable by crash SDKs, bug reports, and older Android versions.",
+    },
+    "Crypto": {
+        "plain_summary": "Data flows into a cryptographic call (hashing/encryption).",
+        "why_it_matters": "Only a concern if the algorithm is weak or a key/IV is misused — check the crypto findings.",
+    },
+    "Network": {
+        "plain_summary": "User-controlled data is sent over the network.",
+        "why_it_matters": "If it's sensitive or unvalidated, it can leak to third parties or enable request tampering.",
+    },
+    "SQLite": {
+        "plain_summary": "User-controlled data is used to build a database query.",
+        "why_it_matters": "Unsanitized input here can mean SQL injection — data theft or tampering.",
+    },
+    "FileSystem": {
+        "plain_summary": "User-controlled data is written to a file on the device.",
+        "why_it_matters": "Depending on the path and permissions, this can expose data or allow file tampering.",
+    },
+    "Execution": {
+        "plain_summary": "User-controlled data flows into an OS command execution.",
+        "why_it_matters": "Unsanitized input here can mean command injection — arbitrary code execution.",
+    },
+    "WebView": {
+        "plain_summary": "User-controlled data is loaded into a WebView.",
+        "why_it_matters": "Tainted input here can mean script injection (XSS) inside the app's web view.",
+    },
+    "Intent": {
+        "plain_summary": "User-controlled data flows into an Android component launch (intent).",
+        "why_it_matters": "Can redirect to unintended components or leak data to other apps.",
+    },
+    "Storage": {
+        "plain_summary": "User-controlled data is written to on-device storage.",
+        "why_it_matters": "On-device storage isn't encrypted by default — sensitive values are readable on a rooted or backed-up device.",
+    },
+}
+_FLOW_EXPLAINER_DEFAULT = {
+    "plain_summary": "User-controlled data flows into a sensitive operation without visible sanitization.",
+    "why_it_matters": "Review whether the data is sensitive and whether the sink can be abused.",
+}
+
+# One-line glossary for the SINK, keyed by label prefix then sink category.
+_SINK_GLOSSARY_BY_LABEL: tuple = (
+    ("Log.", "Android logcat — the device's local debug log. Writing sensitive data here exposes it to log readers."),
+    ("System.out", "Android logcat — the device's local debug log. Writing sensitive data here exposes it to log readers."),
+    ("SharedPrefs.put", "An unencrypted on-device preferences file (XML). Not safe for secrets."),
+    ("MessageDigest.", "A hashing call. Weak hashes (MD5/SHA-1) don't protect data."),
+    ("Cipher.", "A cryptographic call — weak algorithms or misused keys don't protect data."),
+    ("SecretKeySpec", "A cryptographic key is constructed here — weak or hardcoded keys don't protect data."),
+    ("IvParameterSpec", "A cryptographic IV is constructed here — a reused/predictable IV weakens encryption."),
+    ("WebView.loadUrl", "Loads content into a WebView — tainted input here can mean navigation to attacker content."),
+    ("WebView.evaluateJavascript", "Runs JavaScript in a WebView — tainted input here can mean script injection."),
+    ("WebView.loadData", "Loads content/HTML into a WebView — tainted input here can mean script injection."),
+    ("WebView.addJavascriptInterface", "Bridges native code to WebView JS — a tainted bridge is a remote-code-execution surface."),
+    ("Runtime.exec", "Runs an OS command — tainted input here can mean command injection."),
+    ("ProcessBuilder", "Runs an OS command — tainted input here can mean command injection."),
+    ("SQLiteDatabase.exec", "Executes a raw SQL statement — unsanitized input here can mean SQL injection."),
+    ("SQLiteDatabase.rawQuery", "Runs a raw SQL query — unsanitized input here can mean SQL injection."),
+    ("SQLiteDatabase.", "A database operation — unsanitized input here can mean SQL injection."),
+    ("FileOutputStream", "Writes bytes to a file on the device."),
+    ("FileWriter", "Writes text to a file on the device."),
+    ("Files.write", "Writes to a file on the device."),
+    ("Socket", "Opens a raw network connection — data sent here leaves the device."),
+    ("HttpURLConnection", "Sends data over an HTTP connection — data sent here leaves the device."),
+    ("OkHttp", "Sends data over the network via OkHttp."),
+    ("URL.openConnection", "Opens a network connection — data sent here leaves the device."),
+    ("PendingIntent", "Creates a deferred intent — a mutable/implicit one can be hijacked by another app."),
+    ("Context.startActivity", "Launches an Android component — tainted input can redirect to unintended screens."),
+    ("Context.sendBroadcast", "Broadcasts an intent — any app can receive it unless it's permission-protected."),
+)
+_SINK_GLOSSARY_BY_CAT: dict[str, str] = {
+    "Logging": "Android logcat — the device's local debug log. Sensitive data here is exposed to log readers.",
+    "Network": "A network destination — data sent here leaves the device.",
+    "SQLite": "A local database — unsanitized input can mean SQL injection.",
+    "FileSystem": "A file on the device.",
+    "Crypto": "A cryptographic call — weak algorithms or misused keys don't protect data.",
+    "Execution": "An OS command — tainted input can mean command injection.",
+    "WebView": "An in-app web view — tainted input can mean script injection.",
+    "Intent": "An Android component launch — can redirect or leak data to other apps.",
+    "Storage": "On-device storage — not encrypted by default; not safe for secrets.",
+}
+
+# One-line glossary for the SOURCE, keyed by source category.
+_SOURCE_GLOSSARY_BY_CAT: dict[str, str] = {
+    "Location": "The device's GPS / network location.",
+    "SharedPrefs": "A value read from the app's local preferences file.",
+    "User Input": "Data the user typed or that arrived from another app via an intent.",
+    "Clipboard": "The device clipboard — may contain copied passwords or secrets.",
+    "SMS": "The contents of an SMS message.",
+    "Accounts": "Account identifiers registered on the device.",
+    "Camera": "Data captured from the camera.",
+    "Microphone": "Audio captured from the microphone.",
+    "ContentProvider": "Data queried from a content provider (shared app data).",
+}
+
+
+def _sink_explainer(sink_label: str, sink_cat: str) -> str:
+    label = sink_label or ""
+    for prefix, text in _SINK_GLOSSARY_BY_LABEL:
+        if label.startswith(prefix):
+            return text
+    return _SINK_GLOSSARY_BY_CAT.get(sink_cat, "A sensitive operation the tainted data reaches.")
+
+
+def explain_flow(source_cat: str, sink_cat: str,
+                 source_label: str = "", sink_label: str = "") -> dict:
+    """Plain-English copy for one taint flow: what happens, why it matters, and what
+    the source and sink actually ARE — for a reader who doesn't know Android APIs.
+
+    Specific (source_cat, sink_cat) pairs win; otherwise a per-sink-category fallback.
+    All strings are short (≤160 chars). Deterministic, data-driven."""
+    pair = _FLOW_EXPLAINERS.get((source_cat, sink_cat))
+    base = pair or _SINK_CAT_EXPLAINERS.get(sink_cat) or _FLOW_EXPLAINER_DEFAULT
+    return {
+        "plain_summary": base["plain_summary"],
+        "why_it_matters": base["why_it_matters"],
+        "source_explainer": _SOURCE_GLOSSARY_BY_CAT.get(
+            source_cat, "A value read by the app."),
+        "sink_explainer": _sink_explainer(sink_label, sink_cat),
+    }
+
+
 def _flow_to_finding(flow: dict) -> dict:
     sink_cat = flow.get("sink_cat", "Unknown")
     meta     = _SINK_META.get(sink_cat, {"cwe": "CWE-200", "masvs": "MASVS-CODE-4", "owasp": "M2"})
-    sev      = _calibrate_severity(sink_cat, flow.get("source_cat", ""), flow.get("sink_sev", "medium"))
+    # Reuse the calibrated risk already on the flow so the finding severity is
+    # identical to what the panel and PDF show.
+    sev      = calibrate_flow_severity(flow)
     chain    = flow.get("call_chain", [])
     chain_str = " → ".join(chain) if chain else "N/A"
 
@@ -610,6 +862,9 @@ def _flow_to_finding(flow: dict) -> dict:
             "sink":       flow["sink"],
             "sink_cat":   sink_cat,
             "chain":      chain,
+            # Calibrated severity carried on the sub-dict too, so any consumer
+            # reading finding["taint_flow"] gets the same value as finding["severity"].
+            "risk":       sev,
         },
     }
 

@@ -1315,26 +1315,48 @@ def _components_section(story, results, T, styles):
 
 
 # ─── Taint Flows ─────────────────────────────────────────────────────────────
-def _taint_section(story, results, T, styles):
-    flows = results.get("taint_flows") or []
-    if not flows:
-        # Fall back to TAINT-source findings for older scans.
-        flows = [f for f in (results.get("findings") or []) if f.get("source") == "TAINT"]
-        if not flows:
-            return
+def _taint_flow_severity(flow: dict, tf: dict) -> str:
+    """The calibrated severity for a taint row — the SAME value the finding and the
+    Data Flow panel show. Prefers an already-calibrated field; only recomputes (via
+    the analyzer's single calibration function) when none is present. Never the raw
+    sink_sev."""
+    sev = flow.get("risk") or flow.get("severity") or (tf or {}).get("risk")
+    if sev:
+        return sev
+    try:
+        from analyzers.taint_analyzer import calibrate_flow_severity
+        return calibrate_flow_severity(tf or flow)
+    except Exception:
+        return "medium"
 
+
+def _taint_section(story, results, T, styles):
+    # Use the SAME canonical source→sink-deduped list the Data Flow panel uses, so the
+    # header count here always equals the panel's flow count. Each entry is one pair
+    # with a call_site_count; multiple call sites are annotated, not listed as rows.
+    flows = results.get("taint_flows_reconciled")
+    if flows is None:
+        try:
+            from analyzers.taint_analyzer import reconcile_taint_flows
+            flows = reconcile_taint_flows(results)
+        except Exception:
+            flows = []
+    if not flows:
+        return
+
+    total_sites = sum(int(f.get("call_site_count", 1) or 1) for f in flows)
+    site_note = f" · {total_sites} call sites" if total_sites != len(flows) else ""
     story.append(Paragraph(
-        f"Taint Flows ({len(flows)} source→sink path{'s' if len(flows) != 1 else ''})",
+        f"Taint Flows ({len(flows)} source→sink path{'s' if len(flows) != 1 else ''}{site_note})",
         styles["section_title"],
     ))
     story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
     story.append(Spacer(1, 4 * mm))
 
-    # Group by sink category
+    # Group by sink category (deduped pairs).
     by_cat = {}
     for flow in flows:
-        tf = flow.get("taint_flow") or {}
-        cat = tf.get("sink_cat") or flow.get("sink_cat") or flow.get("category") or "Unknown"
+        cat = flow.get("sink_cat") or "Unknown"
         by_cat.setdefault(cat, []).append(flow)
 
     summary_rows = [["Sink Category", "Paths"]]
@@ -1348,19 +1370,21 @@ def _taint_section(story, results, T, styles):
     story.append(st)
     story.append(Spacer(1, 4 * mm))
 
-    # Detail: show up to 30 individual flows
+    # Detail: up to 30 deduped source→sink paths, each annotated with its call-site count.
     MAX_FLOWS = 30
     detail_rows = [["Severity", "Source → Sink", "Call chain"]]
     for flow in flows[:MAX_FLOWS]:
-        tf = flow.get("taint_flow") or {}
-        src = tf.get("source") or flow.get("source") or "?"
-        snk = tf.get("sink") or flow.get("sink") or "?"
-        chain = tf.get("chain") or flow.get("call_chain") or []
+        src = flow.get("source") or "?"
+        snk = flow.get("sink") or "?"
+        chain = flow.get("call_chain") or []
         chain_str = " → ".join(chain) if chain else "N/A"
-        sev = flow.get("severity") or flow.get("sink_sev") or "medium"
+        # Calibrated severity — the single source of truth, never the raw sink_sev.
+        sev = _taint_flow_severity(flow, flow)
+        n_sites = int(flow.get("call_site_count", 1) or 1)
+        sink_label = f"{src} → {snk}" + (f" · {n_sites} call sites" if n_sites > 1 else "")
         detail_rows.append([
             Paragraph(sev.upper(), styles["table_cell"]),
-            Paragraph(f"{src} → {snk}", styles["table_cell_mono"]),
+            Paragraph(sink_label, styles["table_cell_mono"]),
             Paragraph(chain_str[:400], styles["table_cell_mono"]),
         ])
 
@@ -1371,7 +1395,7 @@ def _taint_section(story, results, T, styles):
     if len(flows) > MAX_FLOWS:
         story.append(Spacer(1, 2 * mm))
         story.append(Paragraph(
-            f"{len(flows) - MAX_FLOWS} additional flows omitted for brevity — see the web report.",
+            f"{len(flows) - MAX_FLOWS} additional source→sink paths omitted for brevity — see the web report.",
             styles["caption"],
         ))
     story.append(Spacer(1, 6 * mm))
