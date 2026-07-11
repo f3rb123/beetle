@@ -159,6 +159,21 @@ function legacyView(finding) {
 // chain shape into the same (file, line) targets the code viewer jumps to, so
 // view-code on a chain (and each of its steps) lands on the exact line.
 
+// An auto-generated resource-ID constants class (R.java / R$layout / R2, or an
+// obfuscated equivalent whose snippet is a 0x7f resource-ID assignment) is never a
+// valid code-viewer target — it holds resource ints, never a secret or call site.
+// The backend also refuses these (defence in depth); this guard catches any that
+// still reach the client via a raw file_path.
+const R_CLASS_PATH_RE = /(^|\/)R\d?(\$[A-Za-z0-9_]+)?\.(java|kt|smali)$/i
+const RES_ID_SNIPPET_RE = /0x7[fF][0-9a-fA-F]{6}\b/
+export function isResourceConstantTarget(file, snippet) {
+  const p = String(file || '').replace(/\\/g, '/').trim()
+  if (!p) return false
+  if (R_CLASS_PATH_RE.test(p)) return true
+  if (snippet && RES_ID_SNIPPET_RE.test(String(snippet))) return true
+  return false
+}
+
 // Parse a step's "path:line" (or bare "path") evidence string into {file, line}.
 export function parseStepEvidence(ev) {
   if (typeof ev !== 'string') return null
@@ -178,6 +193,8 @@ export function chainEvidenceTargets(finding) {
   const seen = new Set()
   const add = (file, line, snippet, source) => {
     if (!file) return
+    // Never resolve a chain viewer target to an R-constants class.
+    if (isResourceConstantTarget(file, snippet)) return
     const ln = num(line)
     const key = ln ? `${file}#${ln}` : `${file}#${source}`
     if (seen.has(key)) return

@@ -180,6 +180,38 @@ _BUILD_RULES = [
 
 _ALL_RULES = _CHANNEL_RULES + _STORAGE_RULES + _NETWORK_RULES + _BUILD_RULES
 
+# ── AOT capability signals ────────────────────────────────────────────────────
+# A code-pattern rule (call site + line) is meaningless against a COMPILED AOT
+# snapshot: a token like "SharedPreferences" in libapp.so's string table is just a
+# linked symbol, not a call site. Instead of emitting per-offset "findings" with a
+# fake libapp.so:NNNN line (a false attribution + duplicate explosion), we surface
+# ONE deduped, NON-CHAINABLE INFO capability note per capability. (capability_key,
+# regex, title, description, cwe, masvs).
+_AOT_CAPABILITY_SIGNALS = [
+    ("shared_preferences", _r(r'SharedPreferences|shared_preferences'),
+     "SharedPreferences dependency present (AOT symbol)",
+     "The AOT snapshot links against shared_preferences. This is a capability signal "
+     "from a compiled symbol — NOT evidence of a specific insecure call site (the "
+     "snapshot has no source location). Confirm in source whether sensitive values are "
+     "stored in SharedPreferences rather than flutter_secure_storage.",
+     "CWE-312", "MASVS-STORAGE-1"),
+    ("hive", _r(r'\bHive\b|hive_flutter'),
+     "Hive local-DB dependency present (AOT symbol)",
+     "The AOT snapshot links against Hive. Capability signal from a compiled symbol — "
+     "not a call site. Confirm whether boxes are opened with an encryptionCipher.",
+     "CWE-312", "MASVS-STORAGE-1"),
+    ("sqflite", _r(r'\bsqflite\b'),
+     "SQLite (sqflite) dependency present (AOT symbol)",
+     "The AOT snapshot links against sqflite. Capability signal from a compiled symbol "
+     "— not a call site. Confirm sensitive rows are not stored unencrypted.",
+     "CWE-312", "MASVS-STORAGE-1"),
+    ("secure_storage", _r(r'FlutterSecureStorage|flutter_secure_storage'),
+     "flutter_secure_storage present (AOT symbol)",
+     "The AOT snapshot links against flutter_secure_storage (Keychain/Keystore-backed) "
+     "— the recommended secure store. Capability signal from a compiled symbol.",
+     "CWE-312", "MASVS-STORAGE-1"),
+]
+
 # Known Flutter dependencies → a short capability label (for the metadata inventory).
 _KNOWN_DEPS = {
     "dio": "HTTP client", "http": "HTTP client", "chopper": "HTTP client",
@@ -213,6 +245,34 @@ def _finding(title, severity, category, desc, *, file_path="", line=0, snippet="
     }
 
 
+def _emit_aot_capability_notes(text: str, rel: str, findings: list, seen_cap: set) -> int:
+    """Emit ONE deduped, non-chainable INFO note per capability found in an AOT blob.
+
+    A capability is recorded at most once per scan (``seen_cap``), carries NO line
+    number (no bogus ``libapp.so:NNNN`` anchor) and is flagged ``do_not_chain`` so the
+    attack-chain engine never pulls an AOT symbol as a required/supporting step.
+    Returns the number of notes emitted."""
+    emitted = 0
+    for cap_key, rx, title, desc, cwe, masvs in _AOT_CAPABILITY_SIGNALS:
+        if cap_key in seen_cap:
+            continue
+        if not rx.search(text):
+            continue
+        seen_cap.add(cap_key)
+        f = _finding(title, "info", "Insecure Storage", desc,
+                     file_path=rel, line=0, snippet="", rec="", cwe=cwe, masvs=masvs)
+        # AOT symbol presence is a capability signal, not a call site: no evidence
+        # line, and explicitly ineligible as attack-chain evidence.
+        f["evidence_type"] = "aot_symbol"
+        f["do_not_chain"] = True
+        f["validation_status"] = "capability"
+        f["confidence"] = 40
+        f["file_evidence"] = []
+        findings.append(f)
+        emitted += 1
+    return emitted
+
+
 def _line_of(text: str, pos: int) -> tuple[int, str]:
     line_no = text.count("\n", 0, pos) + 1
     start = text.rfind("\n", 0, pos) + 1
@@ -234,10 +294,16 @@ def _printable(path: str) -> str:
         return ""
 
 
-def _harvest(roots: list[str]) -> tuple[list[tuple[str, str, bool]], dict]:
-    """Return (sources, artifacts). Each source = (rel_path, text, is_source_file).
+def _harvest(roots: list[str]) -> tuple[list[tuple[str, str, str]], dict]:
+    """Return (sources, artifacts). Each source = (rel_path, text, kind).
+
+    ``kind`` is ``"dart"`` (real Dart source), ``"asset"`` (human-readable asset
+    text) or ``"blob"`` (printable strings of a COMPILED AOT artifact — libapp.so /
+    kernel_blob / *.aotsnapshot). Only ``dart``/``asset`` are real source locations
+    where a code-pattern regex hit means a call site; a hit in a ``blob`` is just a
+    class-name symbol in the snapshot, not evidence of a call site.
     ``artifacts`` records what was found (for metadata + pubspec parsing)."""
-    sources: list[tuple[str, str, bool]] = []
+    sources: list[tuple[str, str, str]] = []
     artifacts = {"pubspec": "", "pubspec_lock": "", "has_libapp": False,
                  "has_flutter_assets": False, "dart_files": 0, "dirs_present": {}}
     seen_files: set = set()
@@ -260,7 +326,7 @@ def _harvest(roots: list[str]) -> tuple[list[tuple[str, str, bool]], dict]:
                 try:
                     if low.endswith(".dart") and dart_count < _MAX_DART_FILES:
                         with open(fpath, "r", errors="replace") as f:
-                            sources.append((rel, f.read(_MAX_TEXT_BYTES), True))
+                            sources.append((rel, f.read(_MAX_TEXT_BYTES), "dart"))
                         seen_files.add(rel); dart_count += 1
                     elif low == "pubspec.yaml":
                         with open(fpath, "r", errors="replace") as f:
@@ -272,17 +338,18 @@ def _harvest(roots: list[str]) -> tuple[list[tuple[str, str, bool]], dict]:
                         artifacts["has_libapp"] = True
                         txt = _printable(fpath)
                         if txt:
-                            sources.append((rel, txt, False))
+                            sources.append((rel, txt, "blob"))
                             seen_files.add(rel)
-                    elif low in ("kernel_blob.bin", "app.framework") or low.endswith(".aotsnapshot"):
+                    elif low in ("kernel_blob.bin", "app.framework", "isolate_snapshot_data") \
+                            or low.endswith(".aotsnapshot"):
                         txt = _printable(fpath)
                         if txt:
-                            sources.append((rel, txt, False))
+                            sources.append((rel, txt, "blob"))
                             seen_files.add(rel)
                     elif low == "assetmanifest.json":
                         artifacts["has_flutter_assets"] = True
                         with open(fpath, "r", errors="replace") as f:
-                            sources.append((rel, f.read(_MAX_TEXT_BYTES), False))
+                            sources.append((rel, f.read(_MAX_TEXT_BYTES), "asset"))
                         seen_files.add(rel)
                 except OSError:
                     continue
@@ -343,35 +410,42 @@ def analyze(roots, results: dict, *, platform: str = "android") -> dict:
     seen_find: set = set()
     seen_secret = {f"{s.get('name')}:{s.get('value')}" for s in secrets if isinstance(s, dict)}
     seen_url = set(endpoints)
+    seen_cap: set = set()
     channels: list[str] = []
     n_find = n_secret = n_url = 0
 
-    for rel, text, is_source in sources:
+    for rel, text, kind in sources:
         if not text:
             continue
-        # ── Pattern findings ──────────────────────────────────────────────────
-        for rule in _ALL_RULES:
-            rx, *meta = rule
-            # Channel rules carry an extra "kind" element first; normalize both shapes
-            # to (title, sev, cat, desc, rec, cwe, masvs).
-            if len(meta) == 8:   # channel rule: (kind, title, sev, cat, desc, rec, cwe, masvs)
-                _kind, title, sev, cat, desc, rec, cwe, masvs = meta
-            else:                # 7: (title, sev, cat, desc, rec, cwe, masvs)
-                title, sev, cat, desc, rec, cwe, masvs = meta
-            for m in rx.finditer(text):
-                line_no, snippet = _line_of(text, m.start())
-                cap = m.group(1) if m.groups() else ""
-                key = (title, rel, cap or line_no)
-                if key in seen_find:
-                    continue
-                seen_find.add(key)
-                if cap and "{m}" in desc:
-                    if cap not in channels:
-                        channels.append(cap)
-                findings.append(_finding(
-                    title, sev, cat, desc.format(m=cap) if "{m}" in desc else desc,
-                    file_path=rel, line=line_no, snippet=snippet, rec=rec, cwe=cwe, masvs=masvs))
-                n_find += 1
+        if kind == "blob":
+            # Compiled AOT snapshot — code-pattern/call-site rules are NOT valid here
+            # (a symbol string is not a call site). Emit deduped, non-chainable INFO
+            # capability notes instead; secrets/URLs below still run over the strings.
+            n_find += _emit_aot_capability_notes(text, rel, findings, seen_cap)
+        else:
+            # ── Pattern findings — real source (.dart) or asset text only ──────
+            for rule in _ALL_RULES:
+                rx, *meta = rule
+                # Channel rules carry an extra "kind" element first; normalize both
+                # shapes to (title, sev, cat, desc, rec, cwe, masvs).
+                if len(meta) == 8:   # channel rule: (kind, title, sev, cat, desc, rec, cwe, masvs)
+                    _kind, title, sev, cat, desc, rec, cwe, masvs = meta
+                else:                # 7: (title, sev, cat, desc, rec, cwe, masvs)
+                    title, sev, cat, desc, rec, cwe, masvs = meta
+                for m in rx.finditer(text):
+                    line_no, snippet = _line_of(text, m.start())
+                    cap = m.group(1) if m.groups() else ""
+                    key = (title, rel, cap or line_no)
+                    if key in seen_find:
+                        continue
+                    seen_find.add(key)
+                    if cap and "{m}" in desc:
+                        if cap not in channels:
+                            channels.append(cap)
+                    findings.append(_finding(
+                        title, sev, cat, desc.format(m=cap) if "{m}" in desc else desc,
+                        file_path=rel, line=line_no, snippet=snippet, rec=rec, cwe=cwe, masvs=masvs))
+                    n_find += 1
 
         # ── Secrets — REUSE the Secret Intelligence pipeline (no Flutter detector) ──
         for s in scan_text_for_secrets(text, rel):

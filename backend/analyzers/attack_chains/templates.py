@@ -147,7 +147,12 @@ TEMPLATES: list[ChainTemplate] = [
                 "downloads it, enabling backend/API abuse.",
         impact="Unauthorized use of backend APIs / cloud resources with the leaked credential.",
         entry_kind="distribution", entry_label="Attacker downloads the distributed app and extracts strings",
-        required=[{"SECRET"}], slot_labels=["A real secret is embedded in the application"],
+        # Forms on any real (non-client, non-FP) secret, but stays HIGH only when a
+        # member is a CONFIDENTIAL secret (high-confidence, recognized credential
+        # format, NOT a package-restricted client key). A client key is rejected as a
+        # secret entirely; a low-confidence keyword hit forms only a downgraded
+        # "unverified secret exposure" chain (severity gated in _assemble).
+        required=[{"SECRET"}], slot_labels=["A secret is embedded in the application"],
         supporting=("API_KEY", "TOKEN"),
         prerequisites=["The app is publicly distributable (store or sideload)"],
         mitigations=["Move secrets server-side", "Use short-lived, scoped tokens", "Rotate the exposed key"]),

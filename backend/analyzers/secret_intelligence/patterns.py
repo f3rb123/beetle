@@ -19,6 +19,8 @@ import zlib
 KIND_PROVIDER = "provider"      # specific provider prefix+format (AKIA…, ghp_…)
 KIND_STRUCTURED = "structured"  # JWT / PEM private key — structurally validated
 KIND_PUBLIC = "public"          # public key / certificate — not sensitive
+KIND_CLIENT = "client"          # package/referrer-restricted CLIENT key (Firebase/GCP
+                                # AIza…) — designed to ship in the app, NOT confidential
 KIND_GENERIC = "generic"        # high-entropy token, no provider
 KIND_WEAK = "weak"              # named "password"/"apikey" with low signal
 
@@ -64,7 +66,14 @@ SECRET_TYPES = [
     # ── Provider-prefixed API keys / tokens ─────────────────────────────────
     _t("AWS Access Key", "AWS",
        r"(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|A3T[A-Z0-9])[A-Z0-9]{16}"),
-    _t("Google API Key", "GOOGLE", r"AIza[0-9A-Za-z_\-]{35}"),
+    # An AIza… key is the Android/browser/iOS CLIENT key shape: it is DESIGNED to
+    # ship in the app and is restricted server-side by package name + signing SHA-1.
+    # Google's own guidance treats it as public → classified as a client key, never a
+    # confidential secret. Server-side Google credentials are DISTINCT shapes below
+    # (FCM server key, OAuth client secret, service-account private key) and stay HIGH.
+    _t("Google API Key", "GOOGLE", r"AIza[0-9A-Za-z_\-]{35}", kind=KIND_CLIENT,
+       note="Firebase/GCP client key — package-restricted (SHA-1 + package), not confidential"),
+    _t("Google OAuth Client Secret", "GOOGLE", r"GOCSPX-[0-9A-Za-z_\-]{28}"),
     _t("FCM Server Key", "FIREBASE", r"AAAA[A-Za-z0-9_\-]{7}:[A-Za-z0-9_\-]{140}"),
     _t("Firebase Database URL", "FIREBASE",
        r"https://[a-z0-9\-]+\.firebaseio\.com", match="search"),

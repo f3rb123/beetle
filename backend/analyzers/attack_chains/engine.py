@@ -101,6 +101,37 @@ def _secret_status(f: dict) -> str:
     return si.get("status") or f.get("secret_status") or ""
 
 
+# A HIGH "shipped exploitable secret" chain requires a secret that is high-confidence
+# by pattern, has a real credential format, and is NOT a known-public client key.
+_CONFIDENTIAL_SECRET_STATUSES = frozenset(("Validated Secret", "Probable Secret"))
+
+
+def _is_confidential_secret(f: dict) -> bool:
+    """Whether a secret finding is a genuine, abusable backend credential.
+
+    Requires (a) a high-confidence status (Validated/Probable — not a weakly
+    evidenced "Possible"), (b) a recognized credential FORMAT (a provider/structured
+    match, never a keyword/field-name hit), and (c) NOT a package-restricted client
+    key (Firebase/GCP AIza). Client keys and low-confidence keyword hits are excluded
+    so they can never be the sole basis of a HIGH API-key-abuse chain."""
+    si = f.get("secret_intelligence") or {}
+    if _secret_status(f) not in _CONFIDENTIAL_SECRET_STATUSES:
+        return False
+    if not si.get("recognized_format", False):
+        return False
+    stype = str(si.get("secret_type") or "").lower()
+    provider = str(si.get("provider") or "").lower()
+    kind = str(si.get("kind") or "").lower()
+    if kind == "client" or "client key" in stype or "client" in stype:
+        return False
+    # An AIza Google "API key" is the client shape even if mislabeled upstream.
+    if provider == "google" and stype == "google api key":
+        return False
+    conf = _coerce_int(si.get("overall_confidence"), 0) or _coerce_int(
+        f.get("secret_overall_confidence"), 0)
+    return conf >= 70
+
+
 _STRUCTURAL_CAPS = frozenset(("WEBVIEW", "WEBVIEW_JS", "JS_INTERFACE", "WEBVIEW_FILE",
                               "WEBVIEW_SSL", "EXPORTED", "DEEPLINK", "EXPORTED_PROVIDER",
                               "NATIVE", "NETWORK"))
@@ -179,6 +210,13 @@ def tag_capabilities(f: dict, results: dict | None = None) -> set:
             caps.add("API_KEY")
         if "token" in st or "jwt" in st or "bearer" in blob or "session" in blob:
             caps.add("TOKEN")
+        # A CONFIDENTIAL secret is one that can actually be abused as a backend
+        # credential — high-confidence status, a recognized credential FORMAT (not a
+        # keyword/field-name hit) and NOT a package-restricted client key. Only this
+        # may drive the HIGH "Hardcoded Secret / API Key Abuse" chain; a Firebase/GCP
+        # client key or a low-confidence keyword hit never does.
+        if _is_confidential_secret(f):
+            caps.add("CONFIDENTIAL_SECRET")
     # Network / crypto / cert
     # CLEARTEXT only when cleartext is ACTUALLY permitted: never when the
     # authoritative resolution says it's blocked, and only for a finding that
@@ -273,6 +311,10 @@ def _is_positive_control(f: dict) -> bool:
 def chain_role(f: dict) -> str:
     """required | supporting | excluded — SAFE CHAINING from Triage + Secret status +
     resolved ownership."""
+    # An explicitly non-chainable finding (e.g. an AOT-symbol capability note, a
+    # "not declared" breadcrumb) is never a required OR supporting chain step.
+    if f.get("do_not_chain"):
+        return "excluded"
     if _secret_status(f) in C.REJECT_SECRET_STATUSES:
         return "excluded"
     tri = f.get("triage") or {}
@@ -638,7 +680,25 @@ def _finding_location(f: dict) -> tuple[str, int]:
     return fp, int(line or 0)
 
 
-def _aggregate_evidence(findings: list[dict]):
+def _non_resource_location(f: dict, fp, line, snippet, r_classes):
+    """Ensure a chain member's proof location is NOT an auto-generated resource-ID
+    class (R.java / obfuscated R). If it is, substitute the finding's first non-R
+    evidence (file_evidence — e.g. res/values/strings.xml or the APKLeaks source).
+    Returns ("", None) when the member has no real, non-R location."""
+    from ..code_analyzer import is_resource_id_target
+    if fp and not is_resource_id_target(fp, snippet or "", r_classes):
+        return fp, line
+    for e in (f.get("file_evidence") or []):
+        if not isinstance(e, dict):
+            continue
+        ep = (e.get("path") or "").strip()
+        if ep and not is_resource_id_target(ep, e.get("snippet") or "", r_classes):
+            lines = e.get("lines") or []
+            return ep, (lines[0] if lines else None)
+    return "", None
+
+
+def _aggregate_evidence(findings: list[dict], r_classes=None):
     files, classes, methods, refs = [], [], [], []
     ref_seen: set = set()
     for f in findings:
@@ -647,15 +707,20 @@ def _aggregate_evidence(findings: list[dict]):
         # Phase 1.97: prefer the Evidence Selection primary (application-owned, not a
         # framework/library file) so chains never present a library-only node as
         # proof. Falls back to the evidence bundle / file_path when selection is absent.
-        sel_file, sel_line, _sel_snip = _selection_primary(f)
+        sel_file, sel_line, sel_snip = _selection_primary(f)
         # File AND line must come from the SAME source: when selection corrected the
         # file, its line must accompany it (the bundle line belongs to the old file).
         # This is what lets "view code" on a chain land on the exact evidence line.
         if sel_file:
-            fp, line = sel_file, sel_line
+            fp, line, snip = sel_file, sel_line, sel_snip
         else:
             fp = prim.get("relative_path") or prim.get("file_path") or f.get("file_path")
             line = prim.get("line") or f.get("line") or f.get("line_number")
+            snip = prim.get("snippet") or f.get("snippet") or f.get("code_context") or ""
+        # An R-constants class (0x7f resource IDs) is never a real proof location —
+        # refuse it and fall back to the member's real evidence file so "view code"
+        # never lands on N0/a.java resource constants.
+        fp, line = _non_resource_location(f, fp, line, snip, r_classes)
         if fp and fp not in files:
             files.append(fp)
         loc = prim.get("locator") or {}
@@ -856,6 +921,19 @@ class AttackChainEngine:
         evidence_q = _evidence_quality(required)
         severity = _chain_severity(tmpl.goal, exploitability, blocked)
 
+        # Secret-abuse gate: the "backend/API abuse" chain is HIGH only when a member
+        # is a CONFIDENTIAL secret (high-confidence, recognized credential format, not
+        # a package-restricted client key). With only low-confidence keyword hits it is
+        # an UNVERIFIED exposure — cap it at MEDIUM so a client key / weak hit never
+        # drives a HIGH "API Key Abuse" verdict.
+        secret_unverified = False
+        if tmpl.goal == "credential_abuse" and not blocked:
+            if not any("CONFIDENTIAL_SECRET" in tag_capabilities(f, ctx.results)
+                       for f in (required + supporting)):
+                secret_unverified = True
+                if C.sev_rank(severity) < C.sev_rank("medium"):
+                    severity = "medium"
+
         # Reachability gate (Flaw B): an injection/RCE chain with no taint flow from
         # external input to the matching sink is heuristic — it may exist, but it is
         # capped below CRITICAL and below 60 confidence so it can never present as a
@@ -868,14 +946,22 @@ class AttackChainEngine:
             conf_expl = {**conf_expl, "reachability_cap": C.HEURISTIC_CONFIDENCE_CAP,
                          "reachability_proof": proof}
 
-        files, classes, methods, refs = _aggregate_evidence(required + supporting)
+        files, classes, methods, refs = _aggregate_evidence(
+            required + supporting, (ctx.results or {}).get("resource_id_classes"))
         components = [entry["component"]] if entry.get("component") else []
 
         members = required + supporting
+        chain_name = tmpl.name
+        chain_summary = tmpl.summary
+        if secret_unverified:
+            chain_name = "Unverified Secret Exposure"
+            chain_summary = ("A string that pattern-matched a secret is embedded in the app, but it "
+                             "is not a confirmed confidential credential (no recognized credential "
+                             "format at high confidence). Verify whether it is a real, abusable secret.")
         chain = AttackChain(
             id=self._chain_id(tmpl, required),
-            name=tmpl.name, type=tmpl.type, goal=tmpl.summary,
-            summary=tmpl.summary,
+            name=chain_name, type=tmpl.type, goal=tmpl.summary,
+            summary=chain_summary,
             prerequisites=list(tmpl.prerequisites),
             entry_point=entry,
             steps=_build_narrative(tmpl, entry, required, tmpl.impact),

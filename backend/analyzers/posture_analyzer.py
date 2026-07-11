@@ -45,12 +45,62 @@ _SENSITIVE_NAME_TOKENS = (
 )
 
 
+def _is_library_owned_component(fqn: str) -> bool:
+    """Whether the component's implementing CLASS is library/framework-owned,
+    resolved by the shared ownership engine (never a bespoke prefix list)."""
+    if not fqn or "." not in fqn:
+        return False
+    try:
+        from .ownership import classify_component_class, is_library_owner
+        return is_library_owner(classify_component_class(fqn, platform="android").owner_type)
+    except Exception:
+        return False
+
+
+def _is_signature_protected(comp: dict) -> bool:
+    """Whether the component sits behind a permission no third-party app can hold
+    (signature / signatureOrSystem / privileged / internal / system).
+
+    Reads the already-resolved ``permission_protection`` first (from
+    ``_permission_protection_level``), then falls back to the authoritative
+    signature/system permission table for the raw permission name.
+    """
+    prot = str(comp.get("permission_protection") or "").lower()
+    if any(tok in prot for tok in ("signature", "privileged", "internal", "system")):
+        return True
+    perm = comp.get("permission")
+    if not perm:
+        return False
+    try:
+        from .common import is_signature_or_system_permission
+        return is_signature_or_system_permission(perm)
+    except Exception:
+        return False
+
+
 def _component_risk(comp: dict, comp_type: str) -> str:
     """Reachable-impact risk for a single exported component (mirrors the
     detection engine's _exported_severity, recomputed here so the inventory is
     self-contained and does not depend on finding text)."""
     if not comp.get("exported"):
         return "info"
+
+    # (a) Ownership gate — a library/framework-provided receiver/activity is the
+    # library vendor's surface, not the app's. Cap it low unless it carries
+    # app-owned reachability evidence (a taint flow / call chain into app code).
+    fqn = comp.get("name") or comp.get("short_name") or ""
+    has_app_reach = bool(comp.get("taint_flow") or comp.get("call_chain")
+                         or comp.get("app_owned_reachability"))
+    if _is_library_owned_component(fqn) and not has_app_reach:
+        return "low"
+
+    # (b) Permission-boundary gate — a component that is NOT reachable without a
+    # permission (it declares one) AND that permission is signature/privileged/
+    # system/internal cannot be triggered by any third-party app → not high-risk.
+    reachable_without_permission = not bool(comp.get("permission"))
+    if not reachable_without_permission and _is_signature_protected(comp):
+        return "low"
+
     name = (comp.get("short_name") or "").lower()
     schemes = comp.get("schemes") or []
     deeplinks = comp.get("deeplinks") or []

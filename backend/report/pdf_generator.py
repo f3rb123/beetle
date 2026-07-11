@@ -360,6 +360,7 @@ def _executive_summary(story, results, T, styles):
             ("False positives removed (pre-triage)", acct.get("fp_removed_pre_triage",
                                                               es.get("false_positives_suppressed", 0))),
             ("Low-value data flows pruned",          es.get("low_value_flows_pruned", 0)),
+            ("Low-confidence findings hidden",        es.get("low_confidence_hidden", 0)),
             ("High-signal findings presented",       es.get("high_signal_findings", 0)),
         ]
         srows = [["Stage", "Count"]] + [

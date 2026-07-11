@@ -21,7 +21,7 @@ import {
 import {
   getEvidenceView, detectionSources, trustScore, trustBand, confidenceContributions,
   reachabilityLabel, matchesFilters, findingDetectionSourceSet, findingFrameworkSet,
-  OWNERSHIP_OPTIONS, parseStepEvidence, chainEvidenceView,
+  OWNERSHIP_OPTIONS, parseStepEvidence, chainEvidenceView, isResourceConstantTarget,
 } from './evidence-model.js'
 import { useWorkspaceNav } from './workspace-context.jsx'
 
@@ -988,7 +988,7 @@ function ChainEvidenceBlock({ finding, onOpenCode }) {
             {e.file ? <div className="ws-mono ws-muted" style={{ fontSize: 11.5, marginTop: 2 }}>{e.file}{e.line ? `:${e.line}` : ''}</div> : null}
           </div>
           {e.confidence ? <SoftTag>{e.confidence}</SoftTag> : null}
-          {e.file ? <button type="button" className="ws-btn" onClick={() => onOpenCode(e.file, e.line ? [e.line] : [])}><FileCode2 size={13} /></button> : null}
+          {e.file && !isResourceConstantTarget(e.file, e.snippet) ? <button type="button" className="ws-btn" onClick={() => onOpenCode(e.file, e.line ? [e.line] : [])}><FileCode2 size={13} /></button> : null}
         </div>
       ))}
       {(cx.checks || []).length ? (
@@ -1040,7 +1040,8 @@ export function ChainsPanel({ results, onOpenCode }) {
             <div className="ws-timeline">
               {steps.map((s, j) => {
                 const stepFile = s.file || s.file_path
-                const clickable = !!(onOpenCode && stepFile)
+                // Never let a step's View Code open an R-constants class.
+                const clickable = !!(onOpenCode && stepFile && !isResourceConstantTarget(stepFile, s.snippet))
                 return (
                 <div key={j} className="ws-step">
                   <div className="ws-step__rail">

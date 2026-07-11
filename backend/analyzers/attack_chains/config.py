@@ -74,6 +74,9 @@ REQUIRED_VISIBILITIES = frozenset(("Show", "Highlight", "Review"))
 # Secret statuses that disqualify a "secret" link (not a real secret).
 REJECT_SECRET_STATUSES = frozenset((
     "False Positive", "Documentation Example", "Public Value", "Generated Constant",
+    # A package-restricted client key (Firebase/GCP AIza) is visible/INFO but is NOT
+    # a confidential secret — never a chain secret member.
+    "Client Key",
 ))
 REAL_SECRET_STATUSES = frozenset(("Validated Secret", "Probable Secret", "Possible Secret"))
 

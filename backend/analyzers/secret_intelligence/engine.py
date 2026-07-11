@@ -31,10 +31,13 @@ def _norm_ident(s: str) -> str:
 
 
 def _is_preference_key_value(value: str, ctx: dict) -> bool:
-    """True when the value is a pure identifier (letters/underscores, no digits, no
-    special chars → no entropy) that equals its own assignment's constant name — a
-    preference/resource key, not a real credential."""
-    if not value or not re.fullmatch(r"[A-Za-z][A-Za-z_]*", value):
+    """True when the value is a plain identifier (letters/digits/underscore, starts
+    with a letter → no credential entropy or special chars) that equals its own
+    assignment's constant/field name — a preference/resource key, not a real
+    credential (e.g. an APKLeaks keyword hit where the matched VALUE is the field
+    NAME, not a secret). Digits are allowed (``field2``); a random token never
+    equals a field name so real secrets are untouched."""
+    if not value or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", value):
         return False
     vn = _norm_ident(value)
     if not vn:
@@ -145,7 +148,7 @@ class SecretIntelligenceEngine:
     @staticmethod
     def _validate_format(value: str, rec: dict | None) -> dict:
         kind = rec["kind"] if rec else P.KIND_WEAK
-        format_valid = kind in (P.KIND_PROVIDER, P.KIND_STRUCTURED, P.KIND_PUBLIC)
+        format_valid = kind in (P.KIND_PROVIDER, P.KIND_STRUCTURED, P.KIND_PUBLIC, P.KIND_CLIENT)
         structure = rec.get("structure") if rec else None
         structure_valid = None
         detail = ""
@@ -297,6 +300,8 @@ class SecretIntelligenceEngine:
             return C.DETECTION_STRUCTURED, "structured secret (JWT/PEM)"
         if kind == P.KIND_PUBLIC:
             return C.DETECTION_STRUCTURED, "public key/certificate format"
+        if kind == P.KIND_CLIENT:
+            return C.DETECTION_PROVIDER_FORMAT, "recognized client-key format (package-restricted)"
         if kind == P.KIND_GENERIC:
             base = C.DETECTION_GENERIC_HIGH_ENTROPY if entropy >= C.ENTROPY_MIN_RANDOM else C.DETECTION_WEAK
             return base, "generic token"
@@ -343,6 +348,14 @@ class SecretIntelligenceEngine:
             return C.Status.VALIDATED, "live-validated by a provider prober"
         if kind == P.KIND_PUBLIC:
             return C.Status.PUBLIC_VALUE, "public key/certificate — not a secret"
+        if kind == P.KIND_CLIENT:
+            # A Firebase/GCP AIza client key ships in the app by design and is
+            # restricted server-side (package + signing SHA-1). It stays VISIBLE as an
+            # INFO client-key note but is NOT a confidential secret, so it can never
+            # drive a HIGH "API key abuse" chain.
+            return (C.Status.CLIENT_KEY,
+                    "Firebase/GCP client API key — package-restricted (SHA-1 + package), "
+                    "not a confidential secret")
         if fp_kind == "doc_example":
             return C.Status.DOC_EXAMPLE, "known documentation/example value"
         if fp_kind == "crypto_constant":
