@@ -16,9 +16,38 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 from . import config as C
 from . import patterns as P
+
+# A bare-identifier value that equals its own constant/field NAME is a preference/
+# resource KEY string, not a credential (e.g. BRIEFLY_SHOW_PASSWORD="brieflyShowPassword").
+_FIELD_ASSIGN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]{2,})\s*=\s*['\"]")
+
+
+def _norm_ident(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _is_preference_key_value(value: str, ctx: dict) -> bool:
+    """True when the value is a plain identifier (letters/digits/underscore, starts
+    with a letter → no credential entropy or special chars) that equals its own
+    assignment's constant/field name — a preference/resource key, not a real
+    credential (e.g. an APKLeaks keyword hit where the matched VALUE is the field
+    NAME, not a secret). Digits are allowed (``field2``); a random token never
+    equals a field name so real secrets are untouched."""
+    if not value or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", value):
+        return False
+    vn = _norm_ident(value)
+    if not vn:
+        return False
+    # The captured variable/constant name equals the value.
+    if _norm_ident(ctx.get("name") or "") == vn:
+        return True
+    # …or an assignment in the surrounding snippet does.
+    blob = "\n".join(str(ctx.get(k) or "") for k in ("snippet", "code_context", "title"))
+    return any(_norm_ident(nm) == vn for nm in _FIELD_ASSIGN_RE.findall(blob))
 
 log = logging.getLogger("cortex.secret_intel_engine")
 
@@ -119,7 +148,7 @@ class SecretIntelligenceEngine:
     @staticmethod
     def _validate_format(value: str, rec: dict | None) -> dict:
         kind = rec["kind"] if rec else P.KIND_WEAK
-        format_valid = kind in (P.KIND_PROVIDER, P.KIND_STRUCTURED, P.KIND_PUBLIC)
+        format_valid = kind in (P.KIND_PROVIDER, P.KIND_STRUCTURED, P.KIND_PUBLIC, P.KIND_CLIENT)
         structure = rec.get("structure") if rec else None
         structure_valid = None
         detail = ""
@@ -271,6 +300,8 @@ class SecretIntelligenceEngine:
             return C.DETECTION_STRUCTURED, "structured secret (JWT/PEM)"
         if kind == P.KIND_PUBLIC:
             return C.DETECTION_STRUCTURED, "public key/certificate format"
+        if kind == P.KIND_CLIENT:
+            return C.DETECTION_PROVIDER_FORMAT, "recognized client-key format (package-restricted)"
         if kind == P.KIND_GENERIC:
             base = C.DETECTION_GENERIC_HIGH_ENTROPY if entropy >= C.ENTROPY_MIN_RANDOM else C.DETECTION_WEAK
             return base, "generic token"
@@ -317,12 +348,22 @@ class SecretIntelligenceEngine:
             return C.Status.VALIDATED, "live-validated by a provider prober"
         if kind == P.KIND_PUBLIC:
             return C.Status.PUBLIC_VALUE, "public key/certificate — not a secret"
+        if kind == P.KIND_CLIENT:
+            # A Firebase/GCP AIza client key ships in the app by design and is
+            # restricted server-side (package + signing SHA-1). It stays VISIBLE as an
+            # INFO client-key note but is NOT a confidential secret, so it can never
+            # drive a HIGH "API key abuse" chain.
+            return (C.Status.CLIENT_KEY,
+                    "Firebase/GCP client API key — package-restricted (SHA-1 + package), "
+                    "not a confidential secret")
         if fp_kind == "doc_example":
             return C.Status.DOC_EXAMPLE, "known documentation/example value"
         if fp_kind == "crypto_constant":
             return C.Status.GENERATED_CONSTANT, "crypto test vector / library constant"
         if fp_kind == "unreferenced_generic":
             return C.Status.FALSE_POSITIVE, "long random value with no credential context"
+        if fp_kind == "preference_key":
+            return C.Status.FALSE_POSITIVE, "bare identifier equal to its field/preference key name"
         if fp_kind in ("placeholder", "garbage"):
             return C.Status.FALSE_POSITIVE, "placeholder or low-entropy non-secret"
         if owner_type == "GeneratedCode" and kind not in (P.KIND_PROVIDER, P.KIND_STRUCTURED):
@@ -362,7 +403,14 @@ class SecretIntelligenceEngine:
         # Heroku API key, which is just a bare UUID): those are indistinguishable
         # from any request/correlation id, so they also require credential context.
         is_generic = self._needs_context(rec)
-        if (not is_fp and not validated and is_generic and context_score is not None
+        # Fix 4: a password/secret-named GENERIC value that is just its own field/
+        # constant name (a bare identifier, no entropy) is a preference/resource KEY,
+        # not a credential — score it as an unreferenced constant, never HIGH.
+        if not is_fp and not validated and is_generic and _is_preference_key_value(value, ctx):
+            is_fp, fp_kind = True, "preference_key"
+            fp_reason = ("value is a bare identifier equal to its own field/constant name "
+                         "— a preference/resource key, not a credential")
+        elif (not is_fp and not validated and is_generic and context_score is not None
                 and context_score <= C.CONTEXT_GENERIC_FP_MAX):
             is_fp, fp_kind = True, "unreferenced_generic"
             fp_reason = ("high-entropy value with no credential variable name or "

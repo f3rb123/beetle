@@ -52,6 +52,12 @@ SEVERITY_DOWNGRADE_EXPLOIT = 40
 # high-confidence on capability co-occurrence alone.
 HEURISTIC_CONFIDENCE_CAP = 59
 
+# Max supporting findings shown per chain. Supporting evidence is deduped by
+# (title, file:line) and (rule_id, file, line), then the strongest are kept
+# (severity, then evidence quality, then id) so a chain shows a handful of distinct
+# rows — not ~40 duplicates of one library string.
+MAX_SUPPORTING = 6
+
 
 # ── Eligibility — which findings may participate (SAFE CHAINING) ──────────────
 # Triage decisions (Phase 1.6) that exclude a finding from being a REQUIRED link.
@@ -68,6 +74,9 @@ REQUIRED_VISIBILITIES = frozenset(("Show", "Highlight", "Review"))
 # Secret statuses that disqualify a "secret" link (not a real secret).
 REJECT_SECRET_STATUSES = frozenset((
     "False Positive", "Documentation Example", "Public Value", "Generated Constant",
+    # A package-restricted client key (Firebase/GCP AIza) is visible/INFO but is NOT
+    # a confidential secret — never a chain secret member.
+    "Client Key",
 ))
 REAL_SECRET_STATUSES = frozenset(("Validated Secret", "Probable Secret", "Possible Secret"))
 

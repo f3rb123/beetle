@@ -134,7 +134,8 @@ def test_cert_validation_bypass_mitm():
 def test_hardcoded_secret_abuse():
     chains = _chains([
         F("Hardcoded AWS Key", "Secrets", cid="aws",
-          secret_intelligence={"status": "Probable Secret", "secret_type": "AWS Access Key"}),
+          secret_intelligence={"status": "Probable Secret", "secret_type": "AWS Access Key",
+                               "recognized_format": True, "overall_confidence": 85}),
     ])
     c = _by_type(chains, "Hardcoded Secrets")
     _check(c, "expected secret abuse chain")
@@ -143,7 +144,8 @@ def test_hardcoded_secret_abuse():
 
 def test_backup_debuggable_storage_crypto():
     backup = _by_type(_chains([F("android:allowBackup is true", "Configuration", cid="bk")]), "Backup Abuse")
-    dbg = _by_type(_chains([F("Application is debuggable", "Configuration", cid="db")]), "Debuggable Abuse")
+    dbg = _by_type(_chains([F("Application is debuggable", "Configuration", cid="db",
+                               rule_id="manifest_debuggable")]), "Debuggable Abuse")
     store = _by_type(_chains([F("Sensitive data in SharedPreferences", "Data Storage", cid="st")]),
                      "Insecure Storage")
     crypto = _by_type(_chains([F("Weak cipher MD5 used", "Cryptography", cid="cr",
@@ -155,7 +157,8 @@ def test_backup_debuggable_storage_crypto():
 def test_ios_hardcoded_secret_chain():
     chains = _chains([
         F("Hardcoded API Key in plist", "Secrets", platform="ios", file="Payload/App.app/Info.plist",
-          secret_intelligence={"status": "Probable Secret", "secret_type": "API Key"}, cid="ios-key"),
+          secret_intelligence={"status": "Probable Secret", "secret_type": "API Key",
+                               "recognized_format": True, "overall_confidence": 85}, cid="ios-key"),
     ], platform="ios")
     _check(_by_type(chains, "Hardcoded Secrets"), "expected iOS secret chain")
 

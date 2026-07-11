@@ -25,10 +25,12 @@ from .engine import (
     OwnershipEngine,
     annotate,
     classify,
+    classify_component_class,
     context_from_results,
     derive_signals,
     enrich,
     get_engine,
+    is_library_owner,
 )
 from .types import (
     Confidence,
@@ -42,4 +44,5 @@ __all__ = [
     "OwnershipEngine", "OwnershipResult", "OwnershipContext", "OwnerType",
     "Stage", "Confidence", "classify", "enrich", "annotate", "get_engine",
     "context_from_results", "derive_signals",
+    "classify_component_class", "is_library_owner",
 ]

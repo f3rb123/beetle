@@ -80,14 +80,50 @@ def _collapse_by_library(binary_results: list) -> list:
     return out
 
 
+def _lib_name(b: dict) -> str:
+    """Base library name for a collapsed binary entry."""
+    return b.get("name") or Path(b.get("path", "")).name
+
+
 def _lib_names(bins: list, limit: int = 5) -> str:
     """Human-readable library list for finding text: ``libfoo.so (arm64-v8a, x86)``."""
     parts = []
     for b in bins[:limit]:
         archs = b.get("architectures") or []
-        name = b.get("name") or Path(b.get("path", "")).name
+        name = _lib_name(b)
         parts.append(f"{name} ({', '.join(archs)})" if archs else name)
     return ", ".join(parts)
+
+
+def _detect_flutter(binary_results: list, results: dict | None = None) -> bool:
+    """Whether this is a Flutter app.
+
+    A Flutter app ships the Flutter engine (``libflutter.so``) alongside the Dart
+    AOT snapshot (``libapp.so``). Detected primarily from the binary set already in
+    scope; falls back to the framework recorded on the scan results.
+    """
+    names = {_lib_name(b).lower() for b in binary_results}
+    if "libflutter.so" in names:
+        return True
+    if results:
+        fw = str((results.get("app_info") or {}).get("framework")
+                 or (results.get("framework") or {}).get("type") or "").lower()
+        if fw == "flutter":
+            return True
+    return False
+
+
+def _is_flutter_aot_blob(binary: dict, is_flutter: bool) -> bool:
+    """True when this library is the Dart AOT snapshot (``libapp.so``) of a Flutter app.
+
+    The snapshot is emitted by the Dart AOT compiler, not a C/C++ toolchain, so
+    stack-canary / Full-RELRO / FORTIFY simply do not apply — the developer cannot
+    add them. The real native hardening surface is ``libflutter.so``. This never
+    reclassifies a genuine C/C++ ``.so`` (only ``libapp.so`` on a Flutter target).
+    """
+    if not is_flutter:
+        return False
+    return _lib_name(binary).lower() == "libapp.so"
 
 
 def analyze_elf_binaries(tmpdir: str, results: dict):
@@ -115,11 +151,20 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
     results["binaries"] = binary_results
 
     # ── Generate aggregate findings ───────────────────────────────────────────
+    # Flutter's Dart AOT snapshot (libapp.so) inherently lacks stack canary / Full
+    # RELRO / FORTIFY — it is Dart-compiled, not built by a C toolchain, so those
+    # C hardening flags do not apply and cannot be added. Exclude it from exactly
+    # those finding lists (never from NX/PIE, which the snapshot does carry) and
+    # surface it once as an INFO note instead. Genuine C/C++ .so files are untouched.
+    is_flutter  = _detect_flutter(binary_results, results)
+    def _aot(b): return _is_flutter_aot_blob(b, is_flutter)
+    flutter_aot = [b for b in binary_results if _aot(b)]
+
     no_nx      = [b for b in binary_results if not b.get("nx")]
-    no_canary  = [b for b in binary_results if not b.get("stack_canary")]
+    no_canary  = [b for b in binary_results if not b.get("stack_canary") and not _aot(b)]
     no_pie     = [b for b in binary_results if not b.get("pie")]
-    no_relro   = [b for b in binary_results if b.get("relro") == "none"]
-    partial_relro = [b for b in binary_results if b.get("relro") == "partial"]
+    no_relro   = [b for b in binary_results if b.get("relro") == "none" and not _aot(b)]
+    partial_relro = [b for b in binary_results if b.get("relro") == "partial" and not _aot(b)]
     not_stripped  = [b for b in binary_results if not b.get("stripped")]
     rpath_bins    = [b for b in binary_results if b.get("rpath")]
 
@@ -236,18 +281,40 @@ def analyze_elf_binaries(tmpdir: str, results: dict):
             "confidence":     "medium",
         })
 
-    # Summary finding
+    # Flutter AOT snapshot note — replaces the C-hardening findings for libapp.so.
+    if flutter_aot:
+        results["findings"].append({
+            "rule_id":        "elf_flutter_aot_snapshot",
+            "title":          "Flutter AOT Snapshot (libapp.so) — hardening flags N/A",
+            "severity":       "info",
+            "category":       "Binary Hardening",
+            "description":    f"{_lib_names(flutter_aot)} is the Dart AOT-compiled snapshot produced by the "
+                              "Flutter/Dart toolchain, not a C/C++ library. Standard native C hardening "
+                              "(stack canary, Full RELRO, FORTIFY) does not apply and cannot be enabled by the "
+                              "developer. The real native hardening surface is libflutter.so (the Flutter engine).",
+            "recommendation": "No action required for libapp.so. Ensure libflutter.so and any genuine C/C++ "
+                              "libraries are hardened (NX, PIE, Full RELRO, stack canary).",
+            "masvs":          "MASVS-CODE-4",
+            "owasp":          "M7",
+        })
+
+    # Summary finding — the Dart AOT snapshot is excluded from the hardened/total
+    # math (its C hardening flags are N/A) and footnoted instead of counted as an
+    # unhardened app-owned C library.
     if binary_results:
-        total = len(binary_results)
-        protected = sum(1 for b in binary_results
+        hardening_scope = [b for b in binary_results if not _aot(b)]
+        total = len(hardening_scope)
+        protected = sum(1 for b in hardening_scope
                        if b.get("nx") and b.get("stack_canary") and b.get("pie") and b.get("relro") != "none")
+        aot_note = (f" {len(flutter_aot)} Dart AOT snapshot (libapp.so) excluded — C hardening flags N/A."
+                    if flutter_aot else "")
         results["findings"].append({
             "rule_id":     "elf_hardening_summary",
             "title":       f"Native Binary Analysis — {protected}/{total} Fully Hardened",
             "severity":    "info",
             "category":    "Binary Hardening",
             "description": f"Analyzed {total} native .so libraries. {protected} have all protections (NX, PIE, RELRO, Stack Canary). "
-                           f"{total - protected} have at least one missing protection.",
+                           f"{total - protected} have at least one missing protection.{aot_note}",
         })
 
 

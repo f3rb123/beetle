@@ -77,6 +77,7 @@ _LIBRARY_PREFIXES = (
     "okhttp3.", "okhttp.", "okio.", "retrofit2.", "retrofit.",
     "com.squareup.", "com.bumptech.glide.", "dagger.",
     "io.reactivex.", "rx.", "com.facebook.", "com.android.installreferrer.",
+    "io.flutter.", "com.journeyapps.",
     "org.apache.", "io.grpc.", "com.airbnb.", "com.jakewharton.",
     "io.fabric.", "com.crashlytics.", "io.sentry.", "com.appsflyer.",
     "com.adjust.", "com.amplitude.", "com.mixpanel.", "com.onesignal.",
@@ -868,6 +869,100 @@ def _looks_like_root_detection(finding: dict, text: str) -> bool:
     if _SU_ARG_RE.search(blob) and any(h in blob for h in _ROOT_PROBE_HINTS):
         return True
     return False
+
+
+# Library/framework/generated owners (both the Ownership Engine's owner_type and
+# finding_model's own ownership_label vocabulary) — findings owned by these are not
+# the application's vulnerabilities.
+_LIB_OWNER_TYPES = frozenset((
+    "ThirdPartySDK", "AndroidFramework", "GoogleSDK", "AppleFramework",
+    "VendorSDK", "OpenSourceLibrary", "GeneratedCode",
+))
+_LIB_OWNER_LABELS = frozenset((
+    THIRD_PARTY_LIBRARY, ANDROID_FRAMEWORK, GOOGLE_SDK, FIREBASE, JETPACK,
+    "THIRD_PARTY_SDK", "APPLE_FRAMEWORK", "VENDOR_SDK", "OPEN_SOURCE_LIBRARY", "GENERATED_CODE",
+))
+
+
+def _finding_library_owned(f: dict) -> bool:
+    """True when a finding's RESOLVED ownership is library/framework/generated.
+    APPLICATION and UNKNOWN return False (kept as-is)."""
+    if str(f.get("owner_type") or "") in _LIB_OWNER_TYPES:
+        return True
+    return str(f.get("ownership_label") or "").upper() in _LIB_OWNER_LABELS
+
+
+# Suppression reasons that mean "removed BECAUSE it is library/framework code".
+_LIBRARY_SUPPRESSION_REASONS = frozenset({"framework_library_taint", "library"})
+
+
+def _hidden_as_library(f: dict) -> bool:
+    """A finding hidden BECAUSE its owner is library/framework/generated code.
+
+    Independent of whether it landed in ``kept`` or ``suppressed``. Covers resolved
+    ownership (owner_type engine vocab OR ownership_label finding_model vocab), the
+    6.3 library-noise demotion flag, and library-specific suppression reasons. Used
+    so "Library findings hidden" counts EVERY library finding removed from the
+    default view — the old count looked only inside ``kept`` and read a misleading 0
+    when library findings had been suppressed as framework/library noise."""
+    if _finding_library_owned(f):
+        return True
+    if f.get("library_noise"):
+        return True
+    return str(f.get("suppressed_reason") or "") in _LIBRARY_SUPPRESSION_REASONS
+
+
+# Manifest exported-component finding rule_ids that are not caught by the
+# "manifest_exported_" prefix but still describe a component's exposed surface.
+_COMPONENT_SURFACE_RULE_IDS = frozenset((
+    "manifest_weak_exported_permission", "manifest_custom_scheme_deeplink",
+))
+
+
+def demote_library_code_findings(results: dict) -> dict:
+    """Fix 2 — make severity/eligibility consume ownership.
+
+    A library/framework/generated-owned finding that is a generic code-pattern hit
+    (a SAST/code-rule match, e.g. addJavascriptInterface inside io.flutter.plugins)
+    is library NOISE, not a HIGH application finding. Demote it to INFO unless it
+    carries app-owned reachability evidence (a taint flow / call chain proving
+    attacker-controlled data reaches it in application code).
+
+    Only library/framework/generated owners are touched; APPLICATION and UNKNOWN are
+    never demoted (guard: do not suppress genuinely app-owned findings). Additive:
+    preserves severity_original and marks the finding library_noise. Deterministic.
+    """
+    stats = {"demoted": 0}
+    for f in results.get("findings") or []:
+        if not isinstance(f, dict) or f.get("is_attack_chain"):
+            continue
+        if str(f.get("severity") or "").lower() == "info":
+            continue
+        if not _finding_library_owned(f):
+            continue
+        # Generic code-pattern hit: a SAST / code-rule match (not a validated secret
+        # or a first-class data-flow finding). OR a manifest exported-component
+        # finding whose implementing class is library code — an androidx/Flutter/
+        # Firebase component the app merely bundles is the library vendor's surface,
+        # not a high-risk app finding, unless attacker-controlled data reaches app
+        # code (checked below).
+        rid = str(f.get("rule_id") or f.get("id") or "")
+        is_code_pattern = (str(f.get("source") or "").upper() == "SAST"
+                           or rid.startswith(("android_", "ios_")))
+        is_component = rid.startswith("manifest_exported_") or rid in _COMPONENT_SURFACE_RULE_IDS
+        if not (is_code_pattern or is_component):
+            continue
+        # App-owned reachability evidence keeps it (a real, reachable weakness).
+        if f.get("taint_flow") or f.get("call_chain"):
+            continue
+        f["severity_original"] = f.get("severity_original") or f.get("severity")
+        f["severity"] = "info"
+        f["library_noise"] = True
+        f["library_noise_reason"] = ("library/framework-owned generic code pattern with no "
+                                     "app-owned reachability evidence")
+        stats["demoted"] += 1
+    results["library_noise_stats"] = stats
+    return stats
 
 
 def _reclassify_root_detection(finding: dict, text: str) -> bool:
@@ -1763,13 +1858,32 @@ def _build_quality_stats(raw_total: int, kept: list[dict], suppressed: list[dict
     high_conf = [f for f in kept if _coerce_int(f.get("confidence_score"), 0) >= 70]
     # Default view = application-owned AND high confidence AND not suppressed.
     default_view = [f for f in app_only if _coerce_int(f.get("confidence_score"), 0) >= 70]
-    # Phase E: library / framework / SDK findings are kept but hidden from the
-    # default analyst view ("39 library findings hidden"). Count them explicitly.
-    _LIB_LABELS = (THIRD_PARTY_LIBRARY, ANDROID_FRAMEWORK, GOOGLE_SDK, FIREBASE, JETPACK)
-    library_hidden = [f for f in kept if f.get("ownership_label") in _LIB_LABELS]
 
-    # Noise reduction is measured against the raw (pre-Phase-3) finding count:
-    # collapsed dups + suppressed FPs + library/low-confidence hidden by default.
+    # Partition the KEPT-but-hidden findings (kept − default view) into DISJOINT
+    # buckets so the Findings-header "hidden from this view" total and the
+    # Signal-Quality funnel can never contradict each other.
+    hidden_kept_library = 0     # library/framework/generated-owned, hidden by ownership
+    hidden_kept_low_conf = 0    # app-owned but below the confidence floor
+    hidden_kept_other = 0       # unknown-owned, etc.
+    for f in kept:
+        conf = _coerce_int(f.get("confidence_score"), 0)
+        if f.get("is_app_code") and conf >= 70:
+            continue  # shown in the default view
+        if _hidden_as_library(f):
+            hidden_kept_library += 1
+        elif f.get("is_app_code"):
+            hidden_kept_low_conf += 1
+        else:
+            hidden_kept_other += 1
+    hidden_from_view = hidden_kept_library + hidden_kept_low_conf + hidden_kept_other
+
+    # "Library findings hidden" spans BOTH kept-but-hidden AND suppressed — a
+    # library finding suppressed as framework/library noise is still hidden BECAUSE
+    # it is library code, and must be counted here rather than reading a false 0.
+    suppressed_library = sum(1 for f in suppressed if _hidden_as_library(f))
+    library_hidden_total = hidden_kept_library + suppressed_library
+
+    # Noise reduction is measured against the raw (pre-Phase-3) finding count.
     default_n = len(default_view)
     reduction = round((1 - (default_n / raw_total)) * 100) if raw_total else 0
 
@@ -1781,7 +1895,14 @@ def _build_quality_stats(raw_total: int, kept: list[dict], suppressed: list[dict
         "kept_total": len(kept),
         "application_only_count": len(app_only),
         "high_confidence_count": len(high_conf),
-        "suppressed_library_count": len(library_hidden),
+        # Kept for backward-compat readers; now spans kept+suppressed library.
+        "suppressed_library_count": library_hidden_total,
+        "library_findings_hidden": library_hidden_total,
+        "library_hidden_kept": hidden_kept_library,
+        "library_hidden_suppressed": suppressed_library,
+        "low_confidence_hidden": hidden_kept_low_conf,
+        "hidden_from_view": hidden_from_view,
+        "hidden_other": hidden_kept_other,
         "default_view_count": default_n,
         "noise_reduction_pct": reduction,
         "by_ownership_label": dict(by_label),
@@ -1805,13 +1926,24 @@ def build_executive_summary(stats: dict, suppressed: list[dict]) -> dict:
     raw detections were reduced to the presented set (duplicates grouped,
     library noise hidden, false positives removed, low-value flows pruned).
     """
-    reasons = Counter(f.get("suppressed_reason", "") for f in (suppressed or []))
-    false_positives = sum(reasons.get(r, 0) for r in _FP_SUPPRESSION_REASONS)
-    low_value = sum(reasons.get(r, 0) for r in _NOISE_SUPPRESSION_REASONS)
+    # DISJOINT attribution: a library-owned suppression counts as LIBRARY (in
+    # library_findings_hidden), never as a false positive or a low-value flow, so
+    # the funnel lines don't double-count the same finding.
+    false_positives = 0
+    low_value = 0
+    for f in (suppressed or []):
+        if _hidden_as_library(f):
+            continue
+        reason = str(f.get("suppressed_reason") or "")
+        if reason in _FP_SUPPRESSION_REASONS:
+            false_positives += 1
+        elif reason in _NOISE_SUPPRESSION_REASONS:
+            low_value += 1
 
     raw = stats.get("raw_total", 0)
     dups = stats.get("collapsed_duplicates", 0)
-    lib = stats.get("suppressed_library_count", 0)
+    lib = stats.get("library_findings_hidden", stats.get("suppressed_library_count", 0))
+    low_conf = stats.get("low_confidence_hidden", 0)
     high_signal = stats.get("default_view_count", 0)
 
     return {
@@ -1820,6 +1952,7 @@ def build_executive_summary(stats: dict, suppressed: list[dict]) -> dict:
         "library_findings_hidden": lib,
         "false_positives_suppressed": false_positives,
         "low_value_flows_pruned": low_value,
+        "low_confidence_hidden": low_conf,
         "high_signal_findings": high_signal,
         "lines": [
             f"{raw} detections found",
@@ -1827,6 +1960,7 @@ def build_executive_summary(stats: dict, suppressed: list[dict]) -> dict:
             f"{lib} library findings hidden",
             f"{false_positives} false positives removed",
             f"{low_value} low-value data flows pruned",
+            f"{low_conf} low-confidence findings hidden",
             f"{high_signal} high-signal findings presented",
         ],
     }

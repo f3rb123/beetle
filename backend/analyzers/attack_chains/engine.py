@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 
 from .. import security_controls
 from ..ownership import OwnerType, context_from_results, get_engine as _get_ownership_engine
@@ -100,6 +101,37 @@ def _secret_status(f: dict) -> str:
     return si.get("status") or f.get("secret_status") or ""
 
 
+# A HIGH "shipped exploitable secret" chain requires a secret that is high-confidence
+# by pattern, has a real credential format, and is NOT a known-public client key.
+_CONFIDENTIAL_SECRET_STATUSES = frozenset(("Validated Secret", "Probable Secret"))
+
+
+def _is_confidential_secret(f: dict) -> bool:
+    """Whether a secret finding is a genuine, abusable backend credential.
+
+    Requires (a) a high-confidence status (Validated/Probable — not a weakly
+    evidenced "Possible"), (b) a recognized credential FORMAT (a provider/structured
+    match, never a keyword/field-name hit), and (c) NOT a package-restricted client
+    key (Firebase/GCP AIza). Client keys and low-confidence keyword hits are excluded
+    so they can never be the sole basis of a HIGH API-key-abuse chain."""
+    si = f.get("secret_intelligence") or {}
+    if _secret_status(f) not in _CONFIDENTIAL_SECRET_STATUSES:
+        return False
+    if not si.get("recognized_format", False):
+        return False
+    stype = str(si.get("secret_type") or "").lower()
+    provider = str(si.get("provider") or "").lower()
+    kind = str(si.get("kind") or "").lower()
+    if kind == "client" or "client key" in stype or "client" in stype:
+        return False
+    # An AIza Google "API key" is the client shape even if mislabeled upstream.
+    if provider == "google" and stype == "google api key":
+        return False
+    conf = _coerce_int(si.get("overall_confidence"), 0) or _coerce_int(
+        f.get("secret_overall_confidence"), 0)
+    return conf >= 70
+
+
 _STRUCTURAL_CAPS = frozenset(("WEBVIEW", "WEBVIEW_JS", "JS_INTERFACE", "WEBVIEW_FILE",
                               "WEBVIEW_SSL", "EXPORTED", "DEEPLINK", "EXPORTED_PROVIDER",
                               "NATIVE", "NETWORK"))
@@ -178,6 +210,13 @@ def tag_capabilities(f: dict, results: dict | None = None) -> set:
             caps.add("API_KEY")
         if "token" in st or "jwt" in st or "bearer" in blob or "session" in blob:
             caps.add("TOKEN")
+        # A CONFIDENTIAL secret is one that can actually be abused as a backend
+        # credential — high-confidence status, a recognized credential FORMAT (not a
+        # keyword/field-name hit) and NOT a package-restricted client key. Only this
+        # may drive the HIGH "Hardcoded Secret / API Key Abuse" chain; a Firebase/GCP
+        # client key or a low-confidence keyword hit never does.
+        if _is_confidential_secret(f):
+            caps.add("CONFIDENTIAL_SECRET")
     # Network / crypto / cert
     # CLEARTEXT only when cleartext is ACTUALLY permitted: never when the
     # authoritative resolution says it's blocked, and only for a finding that
@@ -203,7 +242,16 @@ def tag_capabilities(f: dict, results: dict | None = None) -> set:
         caps.add("INSECURE_STORAGE")
     if "allowbackup" in blob or "backup enabled" in blob or "backup allowed" in blob:
         caps.add("BACKUP")
-    if "debuggable" in blob:
+    # DEBUGGABLE only when the app is ACTUALLY debuggable — never from a textual
+    # mention (e.g. a "not declared" breadcrumb). Absent android:debuggable
+    # defaults to false. Mirrors the allowBackup discipline: real =true only,
+    # resolved from the authoritative manifest_security state, not the blob.
+    _dbg_state = ""
+    if results is not None:
+        _dbg_state = str(
+            ((results.get("manifest_security") or {}).get("debuggable") or {}).get("state") or ""
+        ).lower()
+    if rule_id == "manifest_debuggable" or ("debuggable" in blob and _dbg_state == "true"):
         caps.add("DEBUGGABLE")
     if cat == "binary hardening" or str(f.get("file_path") or "").endswith((".so", ".dylib")):
         caps.add("NATIVE")
@@ -212,8 +260,61 @@ def tag_capabilities(f: dict, results: dict | None = None) -> set:
     return caps
 
 
+# Legacy finding_model ownership labels (uppercase) that mean library/framework code —
+# the counterpart to the OwnerType constants in _NON_APP_OWNERS.
+_NON_APP_LABELS = frozenset((
+    "THIRD_PARTY_LIBRARY", "THIRD_PARTY_SDK", "ANDROID_FRAMEWORK", "GOOGLE_SDK",
+    "APPLE_FRAMEWORK", "VENDOR_SDK", "OPEN_SOURCE_LIBRARY", "GENERATED_CODE",
+    "FIREBASE", "JETPACK",
+))
+
+
+def _finding_is_library_owned(f: dict) -> bool:
+    """Whether a finding's RESOLVED ownership is a library/framework/generated owner.
+
+    Reads the ownership the pipeline already attached (owner_type from the Ownership
+    Engine, ownership_label from finding_model) — never recomputes it."""
+    ot = str(f.get("owner_type") or "")
+    if ot in _NON_APP_OWNERS:
+        return True
+    return str(f.get("ownership_label") or "").upper() in _NON_APP_LABELS
+
+
+# Defensive controls that are IN USE — never a step in a weakness chain. A finding
+# marked security_control, or asserting one of these controls without a weakness
+# qualifier, is positive evidence, not an attack step.
+_POSITIVE_CONTROL_TOKENS = (
+    "encryptedsharedpreferences", "encrypted shared preferences", "encrypted storage",
+    "flutter secure storage", "flutter_secure_storage", "androidx.security.crypto",
+    "androidx.security", "masterkey", "sqlcipher", "keystore-backed", "keychain",
+    "secure storage", "secure enclave",
+)
+_CONTROL_WEAKNESS_TOKENS = (
+    "no ", "not ", "missing", "without", "insecure", "weak", "plaintext",
+    "unencrypted", "world readable", "world writable", "cleartext", "disabled",
+)
+
+
+def _is_positive_control(f: dict) -> bool:
+    """A defensive control that is PRESENT/in use — must never be listed as a step in
+    a weakness chain (e.g. Flutter Secure Storage / EncryptedSharedPreferences in an
+    Insecure-Storage or Weak-Crypto chain)."""
+    if f.get("security_control"):
+        return True
+    blob = _blob(f)
+    if not any(tok in blob for tok in _POSITIVE_CONTROL_TOKENS):
+        return False
+    # A control token present WITHOUT a weakness qualifier → the control is in use.
+    return not any(neg in blob for neg in _CONTROL_WEAKNESS_TOKENS)
+
+
 def chain_role(f: dict) -> str:
-    """required | supporting | excluded — SAFE CHAINING from Triage + Secret status."""
+    """required | supporting | excluded — SAFE CHAINING from Triage + Secret status +
+    resolved ownership."""
+    # An explicitly non-chainable finding (e.g. an AOT-symbol capability note, a
+    # "not declared" breadcrumb) is never a required OR supporting chain step.
+    if f.get("do_not_chain"):
+        return "excluded"
     if _secret_status(f) in C.REJECT_SECRET_STATUSES:
         return "excluded"
     tri = f.get("triage") or {}
@@ -225,6 +326,11 @@ def chain_role(f: dict) -> str:
         return "supporting" if (tag_capabilities(f) & _STRUCTURAL_CAPS) else "excluded"
     if decision in C.SUPPORTING_ONLY_DECISIONS:
         return "supporting"
+    # Ownership enforcement (Fix 2): a library/framework/generated-owned finding is
+    # NOT the application's vulnerability. It can never be a REQUIRED link — at most
+    # supporting context when it carries a structural cap (e.g. a framework WebView).
+    if _finding_is_library_owned(f):
+        return "supporting" if (tag_capabilities(f) & _STRUCTURAL_CAPS) else "excluded"
     vis = tri.get("visibility", "")
     if vis == "HiddenByDefault":
         return "supporting" if (tag_capabilities(f) & _STRUCTURAL_CAPS) else "excluded"
@@ -402,12 +508,42 @@ class ChainContext:
         return None
 
     def supporting(self, caps: frozenset, used: set) -> list[dict]:
-        out = []
+        """Distinct, deterministically-ranked, capped supporting findings for a chain.
+
+        Excludes positive controls (a defensive control is never an attack step),
+        deduplicates by (title, file:line) and (rule_id, file, line) so one library
+        string can't render ~40 times, then keeps the strongest MAX_SUPPORTING by
+        severity, then evidence quality, then id."""
+        cand = []
         for t in self.tagged:
             if t["id"] in used:
                 continue
-            if t["caps"] & caps:
-                out.append(t)
+            if not (t["caps"] & caps):
+                continue
+            if _is_positive_control(t["f"]):
+                continue
+            cand.append(t)
+
+        # Deterministic strongest-first ordering before dedup, so the row kept for a
+        # duplicate location is the highest-severity / best-evidenced one.
+        cand.sort(key=lambda t: (C.sev_rank(t["f"].get("severity", "info")),
+                                 C.EVIDENCE_RANK.get(_equality(t["f"]), 4), t["id"]))
+
+        out, seen = [], set()
+        for t in cand:
+            f = t["f"]
+            fp, line = _finding_location(f)
+            loc = f"{fp}:{line}" if fp else ""
+            title = str(f.get("title") or "").strip().lower()
+            rid = str(f.get("rule_id") or f.get("id") or "")
+            keys = ((title, loc), (rid, fp, line))
+            if any(k in seen for k in keys):
+                continue
+            for k in keys:
+                seen.add(k)
+            out.append(t)
+            if len(out) >= C.MAX_SUPPORTING:
+                break
         return out
 
 
@@ -532,23 +668,59 @@ def _selection_primary(f: dict):
     return "", 0, ""
 
 
-def _aggregate_evidence(findings: list[dict]):
+def _finding_location(f: dict) -> tuple[str, int]:
+    """(file, line) for a finding — the corrected Evidence Selection primary when
+    present, else the evidence-bundle primary / legacy fields."""
+    sel_file, sel_line, _ = _selection_primary(f)
+    if sel_file:
+        return sel_file, int(sel_line or 0)
+    prim = (f.get("evidence_bundle") or {}).get("primary") or {}
+    fp = prim.get("relative_path") or prim.get("file_path") or f.get("file_path") or ""
+    line = prim.get("line") or f.get("line") or f.get("line_number") or 0
+    return fp, int(line or 0)
+
+
+def _non_resource_location(f: dict, fp, line, snippet, r_classes):
+    """Ensure a chain member's proof location is NOT an auto-generated resource-ID
+    class (R.java / obfuscated R). If it is, substitute the finding's first non-R
+    evidence (file_evidence — e.g. res/values/strings.xml or the APKLeaks source).
+    Returns ("", None) when the member has no real, non-R location."""
+    from ..code_analyzer import is_resource_id_target
+    if fp and not is_resource_id_target(fp, snippet or "", r_classes):
+        return fp, line
+    for e in (f.get("file_evidence") or []):
+        if not isinstance(e, dict):
+            continue
+        ep = (e.get("path") or "").strip()
+        if ep and not is_resource_id_target(ep, e.get("snippet") or "", r_classes):
+            lines = e.get("lines") or []
+            return ep, (lines[0] if lines else None)
+    return "", None
+
+
+def _aggregate_evidence(findings: list[dict], r_classes=None):
     files, classes, methods, refs = [], [], [], []
+    ref_seen: set = set()
     for f in findings:
         eb = f.get("evidence_bundle") or {}
         prim = eb.get("primary") or {}
         # Phase 1.97: prefer the Evidence Selection primary (application-owned, not a
         # framework/library file) so chains never present a library-only node as
         # proof. Falls back to the evidence bundle / file_path when selection is absent.
-        sel_file, sel_line, _sel_snip = _selection_primary(f)
+        sel_file, sel_line, sel_snip = _selection_primary(f)
         # File AND line must come from the SAME source: when selection corrected the
         # file, its line must accompany it (the bundle line belongs to the old file).
         # This is what lets "view code" on a chain land on the exact evidence line.
         if sel_file:
-            fp, line = sel_file, sel_line
+            fp, line, snip = sel_file, sel_line, sel_snip
         else:
             fp = prim.get("relative_path") or prim.get("file_path") or f.get("file_path")
             line = prim.get("line") or f.get("line") or f.get("line_number")
+            snip = prim.get("snippet") or f.get("snippet") or f.get("code_context") or ""
+        # An R-constants class (0x7f resource IDs) is never a real proof location —
+        # refuse it and fall back to the member's real evidence file so "view code"
+        # never lands on N0/a.java resource constants.
+        fp, line = _non_resource_location(f, fp, line, snip, r_classes)
         if fp and fp not in files:
             files.append(fp)
         loc = prim.get("locator") or {}
@@ -561,9 +733,12 @@ def _aggregate_evidence(findings: list[dict]):
         # carry None so the frontend omits the jump gracefully rather than opening
         # at the top with no indication.
         if fp:
-            refs.append({"finding": _finding_id(f),
-                         "evidence_id": eb.get("evidence_id") or f"EV-{_finding_id(f)}",
-                         "file": fp, "line": (line or None)})
+            ref_key = (fp, line or None)
+            if ref_key not in ref_seen:
+                ref_seen.add(ref_key)
+                refs.append({"finding": _finding_id(f),
+                             "evidence_id": eb.get("evidence_id") or f"EV-{_finding_id(f)}",
+                             "file": fp, "line": (line or None)})
     return files, classes, methods, refs
 
 
@@ -630,13 +805,45 @@ def _build_narrative(template, entry: dict, required: list[dict], goal_label: st
     return steps
 
 
+_ALLOW_BACKUP_TRUE_RE = re.compile(r'allowbackup\s*=\s*"(?:true|1)"')
+
+
+def _allow_backup_true(results: dict) -> bool:
+    """Whether android:allowBackup is actually true (manifest / manifest_security, or a
+    genuine allowBackup finding derived from the manifest). The BACKUP chain's premise
+    is this flag; without it there is no backup path — and a debuggable finding, which
+    never asserts allowBackup, can never stand in for it."""
+    mx = str(results.get("manifest_xml") or "").lower()
+    if _ALLOW_BACKUP_TRUE_RE.search(mx):
+        return True
+    ms = results.get("manifest_security") or {}
+    ab = ms.get("allow_backup", ms.get("allowBackup"))
+    if isinstance(ab, dict):
+        ab = ab.get("state", ab.get("value"))
+    if str(ab).strip().lower() in ("true", "1", "enabled"):
+        return True
+    # A finding that genuinely asserts allowBackup is enabled (manifest-derived).
+    for f in results.get("findings") or []:
+        if not isinstance(f, dict):
+            continue
+        blob = " ".join(str(f.get(k) or "") for k in ("title", "description", "rule_id")).lower()
+        if "allowbackup" in blob.replace(" ", "") and not any(
+                neg in blob for neg in ("false", "disabled", "not ", "= \"false\"")):
+            return True
+    return False
+
+
 def _template_suppressed_by_controls(tmpl, results: dict) -> bool:
-    """Authoritative-state veto: a template must never be emitted when the security
-    control it depends on contradicts it. The CLEARTEXT-MITM-TOKEN chain cannot exist
-    when cleartext is resolved to ``blocked`` (usesCleartextTraffic="false" / NSC
-    cleartextTrafficPermitted="false"). Belt-and-suspenders to the CLEARTEXT cap gate."""
+    """Authoritative-state veto: a template must never be emitted when the state it
+    depends on contradicts it.
+
+    * CLEARTEXT-MITM-TOKEN cannot exist when cleartext is resolved to ``blocked``.
+    * BACKUP-DATA-EXTRACTION requires android:allowBackup="true"; without it there is
+      no backup path (and a debuggable finding must never stand in as its entry)."""
     if tmpl.id == "CLEARTEXT-MITM-TOKEN":
         return security_controls.state_of(results, "cleartext") == "blocked"
+    if tmpl.id == "BACKUP-DATA-EXTRACTION":
+        return not _allow_backup_true(results)
     return False
 
 
@@ -714,6 +921,19 @@ class AttackChainEngine:
         evidence_q = _evidence_quality(required)
         severity = _chain_severity(tmpl.goal, exploitability, blocked)
 
+        # Secret-abuse gate: the "backend/API abuse" chain is HIGH only when a member
+        # is a CONFIDENTIAL secret (high-confidence, recognized credential format, not
+        # a package-restricted client key). With only low-confidence keyword hits it is
+        # an UNVERIFIED exposure — cap it at MEDIUM so a client key / weak hit never
+        # drives a HIGH "API Key Abuse" verdict.
+        secret_unverified = False
+        if tmpl.goal == "credential_abuse" and not blocked:
+            if not any("CONFIDENTIAL_SECRET" in tag_capabilities(f, ctx.results)
+                       for f in (required + supporting)):
+                secret_unverified = True
+                if C.sev_rank(severity) < C.sev_rank("medium"):
+                    severity = "medium"
+
         # Reachability gate (Flaw B): an injection/RCE chain with no taint flow from
         # external input to the matching sink is heuristic — it may exist, but it is
         # capped below CRITICAL and below 60 confidence so it can never present as a
@@ -726,14 +946,22 @@ class AttackChainEngine:
             conf_expl = {**conf_expl, "reachability_cap": C.HEURISTIC_CONFIDENCE_CAP,
                          "reachability_proof": proof}
 
-        files, classes, methods, refs = _aggregate_evidence(required + supporting)
+        files, classes, methods, refs = _aggregate_evidence(
+            required + supporting, (ctx.results or {}).get("resource_id_classes"))
         components = [entry["component"]] if entry.get("component") else []
 
         members = required + supporting
+        chain_name = tmpl.name
+        chain_summary = tmpl.summary
+        if secret_unverified:
+            chain_name = "Unverified Secret Exposure"
+            chain_summary = ("A string that pattern-matched a secret is embedded in the app, but it "
+                             "is not a confirmed confidential credential (no recognized credential "
+                             "format at high confidence). Verify whether it is a real, abusable secret.")
         chain = AttackChain(
             id=self._chain_id(tmpl, required),
-            name=tmpl.name, type=tmpl.type, goal=tmpl.summary,
-            summary=tmpl.summary,
+            name=chain_name, type=tmpl.type, goal=tmpl.summary,
+            summary=chain_summary,
             prerequisites=list(tmpl.prerequisites),
             entry_point=entry,
             steps=_build_narrative(tmpl, entry, required, tmpl.impact),

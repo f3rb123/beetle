@@ -99,10 +99,16 @@ def to_first_class_findings(results: dict) -> list:
 
         file_evidence = _evidence_from_references(chain)
         # Guarantee at least one pointer per participating link even when a member
-        # carried no evidence_reference (e.g. a manifest-declared exposure).
+        # carried no evidence_reference (e.g. a manifest-declared exposure) — but
+        # never point at an R-constants class (N0/a.java resource IDs).
+        from ..code_analyzer import is_resource_id_target
+        _r_classes = results.get("resource_id_classes")
         for ref in member_refs:
-            if ref["file_path"] and not any(e["path"] == ref["file_path"] for e in file_evidence):
-                file_evidence.append({"path": ref["file_path"], "lines": [], "snippet": ref["title"]})
+            fp = ref["file_path"]
+            if fp and is_resource_id_target(fp, "", _r_classes):
+                continue
+            if fp and not any(e["path"] == fp for e in file_evidence):
+                file_evidence.append({"path": fp, "lines": [], "snippet": ref["title"]})
 
         confidence = int(chain.get("overall_confidence") or 0)
         findings.append({

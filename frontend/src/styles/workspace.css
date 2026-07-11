@@ -523,10 +523,13 @@
 }
 .ws-intel__cell {
   border: 1px solid var(--ws-line); border-radius: 10px; padding: 8px 10px;
-  background: var(--ws-bg-soft);
+  background: var(--ws-bg-soft); min-width: 0;   /* allow the value to wrap, not spill */
 }
 .ws-intel__label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--ws-ink-3); }
-.ws-intel__value { font-size: 14px; font-weight: 650; color: var(--ws-ink); margin-top: 2px; }
+.ws-intel__value {
+  font-size: 14px; font-weight: 650; color: var(--ws-ink); margin-top: 2px;
+  overflow-wrap: anywhere; word-break: break-word;   /* "Third-Party SDK" wraps inside its tile */
+}
 .ws-intel__cell--high   { border-color: #14532d33; background: #ecfdf3; }
 .ws-intel__cell--medium { border-color: #ea860033; background: #fff7ed; }
 .ws-intel__cell--low    { border-color: #3b82f633; background: #eff6ff; }
@@ -538,7 +541,10 @@
   border: 1px solid var(--ws-line);
 }
 .ws-badge--engine { background: #eef2ff; color: #3730a3; border-color: #c7d2fe; }
-.ws-badge--own { background: #f1f5f9; color: #334155; }
+.ws-badge--own {
+  background: #f1f5f9; color: #334155;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* Primary evidence card — the highlighted, most-useful proof. */
 .ws-primary {

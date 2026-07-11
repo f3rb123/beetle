@@ -147,7 +147,12 @@ TEMPLATES: list[ChainTemplate] = [
                 "downloads it, enabling backend/API abuse.",
         impact="Unauthorized use of backend APIs / cloud resources with the leaked credential.",
         entry_kind="distribution", entry_label="Attacker downloads the distributed app and extracts strings",
-        required=[{"SECRET"}], slot_labels=["A real secret is embedded in the application"],
+        # Forms on any real (non-client, non-FP) secret, but stays HIGH only when a
+        # member is a CONFIDENTIAL secret (high-confidence, recognized credential
+        # format, NOT a package-restricted client key). A client key is rejected as a
+        # secret entirely; a low-confidence keyword hit forms only a downgraded
+        # "unverified secret exposure" chain (severity gated in _assemble).
+        required=[{"SECRET"}], slot_labels=["A secret is embedded in the application"],
         supporting=("API_KEY", "TOKEN"),
         prerequisites=["The app is publicly distributable (store or sideload)"],
         mitigations=["Move secrets server-side", "Use short-lived, scoped tokens", "Rotate the exposed key"]),
@@ -158,7 +163,9 @@ TEMPLATES: list[ChainTemplate] = [
         impact="Theft of sensitive data from device storage.",
         entry_kind="device", entry_label="Attacker with device access (rooted / physical / malware)",
         required=[{"INSECURE_STORAGE"}], slot_labels=["Sensitive data stored without encryption"],
-        supporting=("SECRET", "TOKEN"),
+        # Topically coherent supporting only: more storage weakness (backup-eligible
+        # data). Hardcoded SECRET/TOKEN are their own chain, never appended here.
+        supporting=("BACKUP",),
         prerequisites=["Rooted device, physical access, or co-resident malware"],
         mitigations=["Use EncryptedSharedPreferences / Keystore-backed encryption"]),
 
@@ -168,7 +175,8 @@ TEMPLATES: list[ChainTemplate] = [
         impact="Extraction of the app data directory without root.",
         entry_kind="device", entry_label="Attacker with ADB access runs adb backup",
         required=[{"BACKUP"}], slot_labels=["Application data is backup-eligible"],
-        supporting=("INSECURE_STORAGE", "SECRET"),
+        # Only storage weakness (what backup extracts). Not secrets, not debuggable.
+        supporting=("INSECURE_STORAGE",),
         prerequisites=["USB debugging / ADB access to the device"],
         mitigations=["Set android:allowBackup=false", "Exclude sensitive data via backup rules"]),
 
@@ -187,7 +195,8 @@ TEMPLATES: list[ChainTemplate] = [
         impact="Recovery of sensitive data protected by weak crypto.",
         entry_kind="distribution", entry_label="Attacker obtains ciphertext (from the app or storage)",
         required=[{"WEAK_CRYPTO"}], slot_labels=["Weak/broken cryptographic primitive in use"],
-        supporting=("SECRET", "INSECURE_STORAGE"),
+        # Only data-at-rest weakness the weak crypto protects. Secrets are their own chain.
+        supporting=("INSECURE_STORAGE",),
         mitigations=["Use AES-GCM / modern KDFs", "Avoid ECB/DES/MD5/SHA-1 for protection"]),
 ]
 

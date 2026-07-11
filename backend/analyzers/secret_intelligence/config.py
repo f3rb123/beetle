@@ -24,6 +24,8 @@ class Status:
     FALSE_POSITIVE = "False Positive"    # placeholder / garbage / known non-secret
     DOC_EXAMPLE = "Documentation Example"  # a known docs/RFC/test sample
     PUBLIC_VALUE = "Public Value"        # public key / certificate — not sensitive
+    CLIENT_KEY = "Client Key"            # package/referrer-restricted client key
+                                         # (Firebase/GCP AIza) — visible/INFO, not confidential
     GENERATED_CONSTANT = "Generated Constant"  # crypto constant / generated code value
     UNKNOWN = "Unknown"
 

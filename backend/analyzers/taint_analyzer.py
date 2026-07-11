@@ -142,6 +142,12 @@ SINKS: list[tuple[str, str, str, str, str]] = [
     ("android/content/SharedPreferences$Editor", "putString", "SharedPrefs.putString", "Storage", "low"),
 ]
 
+# Log (and similar) methods that share a substring with a sink method pattern but
+# are NOT sinks — they read/format, they don't write tainted data anywhere.
+# isLoggable(tag, level) -> boolean; getStackTraceString(t) -> String. Excluded
+# regardless of matching mode as defence-in-depth.
+_NON_SINK_METHODS = frozenset({"isLoggable", "getStackTraceString"})
+
 # Map sink category → CWE / MASVS
 _SINK_META: dict[str, dict] = {
     "Logging":    {"cwe": "CWE-532", "masvs": "MASVS-STORAGE-2",  "owasp": "M2"},
@@ -180,7 +186,7 @@ def _run_with_timeout(apk_path: str, results: dict, metrics: dict):
 
     def _worker():
         try:
-            flows = _analyze(apk_path)
+            flows = _analyze(apk_path, results)
             outcome["flows"] = flows
         except Exception as e:
             exc_box.append(e)
@@ -207,7 +213,7 @@ def _run_with_timeout(apk_path: str, results: dict, metrics: dict):
         results["findings"].append(_flow_to_finding(flow))
 
 
-def _analyze(apk_path: str) -> list[dict]:
+def _analyze(apk_path: str, results: dict | None = None) -> list[dict]:
     """Core analysis — loads DEX via androguard and finds source→sink paths."""
     try:
         # androguard v4.x
@@ -221,6 +227,10 @@ def _analyze(apk_path: str) -> list[dict]:
         raise RuntimeError(f"DEX too large ({dex_total:.1f} MB > {MAX_DEX_MB} MB limit)")
 
     _apk, _dex_list, dx = AnalyzeAPK(apk_path)
+
+    # Ownership classifier (reused engine + fingerprints) so library→library flows
+    # can be dropped and each kept flow can carry owner_type. Built once per scan.
+    owner_lookup = _OwnershipLookup(results)
 
     # Build lookup: (class_substr, method_substr) → MethodAnalysis objects
     source_methods = _collect_method_refs(dx, SOURCES)
@@ -248,6 +258,18 @@ def _analyze(apk_path: str) -> list[dict]:
                 continue
             seen_keys.add(flow_key)
 
+            # Ownership filter: a flow whose ENTIRE call chain (source caller +
+            # every hop + sink host) is library/framework code is framework-internal
+            # logging, not an app vulnerability — drop it. Keep the flow when the app
+            # owns the source or ANY intermediate hop (attacker-controlled input
+            # entering app code that reaches a library logger is the real signal).
+            chain_classes = _chain_class_names(caller_m, path)
+            chain_owners  = [owner_lookup.owner_type(c) for c in chain_classes]
+            if chain_owners and all(_is_library_owner(o) for o in chain_owners):
+                continue
+            # owner_type of the displayed source class (class_name below).
+            source_owner = chain_owners[0] if chain_owners else "Unknown"
+
             flows.append({
                 "source":      src_label,
                 "source_cat":  src_cat,
@@ -257,6 +279,7 @@ def _analyze(apk_path: str) -> list[dict]:
                 "call_chain":  _format_chain(caller_m, path),
                 "class_name":  caller_m.get_method().get_class_name().replace("/", ".").lstrip("L"),
                 "method_name": caller_m.get_method().get_name(),
+                "owner_type":  source_owner,
             })
 
             if len(flows) >= MAX_PATHS:
@@ -282,7 +305,10 @@ def _collect_method_refs(
                 continue
             for m in cls_analysis.get_methods():
                 mn = m.name
-                if mth_pat and mth_pat not in mn:
+                # EXACT method match when a name is specified (a source method
+                # "get" must match Bundle.get, never "getClass"). An empty pattern
+                # is an explicit class-prefix intent → match every method.
+                if mth_pat and mn != mth_pat:
                     continue
                 # Collect all methods that call this method
                 for _, call_m, _ in m.get_xref_from():
@@ -308,7 +334,14 @@ def _collect_sink_refs(
                 continue
             for m in cls_analysis.get_methods():
                 mn = m.name
-                if mth_pat and mth_pat not in mn:
+                # Never treat a known non-sink (isLoggable, getStackTraceString) as
+                # a sink even if it shares a substring with a sink method pattern.
+                if mn in _NON_SINK_METHODS:
+                    continue
+                # EXACT method match when a name is specified: "e"/"i" must match
+                # Log.e / Log.i, never "isLoggable". Empty pattern = class-prefix
+                # intent (e.g. "retrofit2/") → match every method.
+                if mth_pat and mn != mth_pat:
                     continue
                 key = _ma_key(m)
                 result[key] = {
@@ -432,6 +465,84 @@ def _fmt_method(m) -> str:
         return "?"
 
 
+# ── Ownership filtering (BUG B) ───────────────────────────────────────────────
+# Owner-type vocabulary that denotes library/framework/generated code (mirrors
+# ownership.types.OwnerType — the values the engine emits). Application / Unknown
+# are NOT here, so an app-owned or obfuscated-app class always survives the filter.
+_LIBRARY_OWNER_TYPES = frozenset((
+    "ThirdPartySDK", "AndroidFramework", "GoogleSDK", "AppleFramework",
+    "VendorSDK", "OpenSourceLibrary", "GeneratedCode",
+))
+
+
+def _is_library_owner(owner_type: str) -> bool:
+    return owner_type in _LIBRARY_OWNER_TYPES
+
+
+def _chain_class_names(start_ma, path: list[dict]) -> list[str]:
+    """Dotted class FQNs of every method in a flow (source caller + each hop)."""
+    names: list[str] = []
+
+    def _cn(ma):
+        try:
+            m = ma.get_method() if hasattr(ma, "get_method") else ma
+            return m.get_class_name().replace("/", ".").lstrip("L").rstrip(";")
+        except Exception:
+            return ""
+
+    n = _cn(start_ma)
+    if n:
+        names.append(n)
+    for hop in path:
+        ma = hop.get("ma")
+        if ma is None:
+            continue
+        n = _cn(ma)
+        if n:
+            names.append(n)
+    return names
+
+
+class _OwnershipLookup:
+    """Caches ownership classification of class FQNs for the taint pass.
+
+    Reuses the shared Ownership Engine + fingerprints (never a hand-rolled prefix
+    list) plus the scan's application namespaces, so a taint flow is classified the
+    same way as every other finding. If ownership is unavailable (import failure),
+    every class resolves to 'Unknown' → nothing is dropped (fail-open, never lose
+    a real flow to a classification error).
+    """
+
+    def __init__(self, results: dict | None):
+        self._cache: dict[str, str] = {}
+        self._engine = None
+        self._ctx = None
+        self._ownership = None
+        try:
+            from . import ownership
+            self._ownership = ownership
+            self._engine = ownership.get_engine()
+            self._ctx = ownership.context_from_results(results or {})
+        except Exception:
+            self._ownership = None
+
+    def owner_type(self, fqn: str) -> str:
+        if not fqn:
+            return "Unknown"
+        cached = self._cache.get(fqn)
+        if cached is not None:
+            return cached
+        ot = "Unknown"
+        if self._engine is not None and self._ownership is not None:
+            try:
+                ot = self._ownership.classify_component_class(
+                    fqn, platform="android", ctx=self._ctx).owner_type
+            except Exception:
+                ot = "Unknown"
+        self._cache[fqn] = ot
+        return ot
+
+
 # ── Severity calibration (Phase 5.2) ─────────────────────────────────────────
 # Sources that carry inherently sensitive data — logging THESE warrants a bump.
 _SENSITIVE_SOURCES = {
@@ -487,6 +598,7 @@ def _flow_to_finding(flow: dict) -> dict:
         "snippet":      chain_str,
         "confidence":   72,
         "exploitability": 60,
+        "owner_type":   flow.get("owner_type", "Unknown"),
         "source":       "TAINT",
         "rule_id":      f"TAINT-{sink_cat.upper().replace(' ', '_')}",
         "cwe":          meta["cwe"],

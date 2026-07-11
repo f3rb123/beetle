@@ -75,13 +75,14 @@ t('chainEvidenceTargets resolves each step evidence "path:line" to its line', ()
 })
 
 t('references take precedence, then steps, then affected_files', () => {
+  // NB: a neutral filename — 'R.java' is now (correctly) rejected as a resource class.
   const refsFirst = chainEvidenceTargets({
     is_attack_chain: true,
-    evidence_references: [{ file: 'R.java', line: 5 }],
+    evidence_references: [{ file: 'Ref.java', line: 5 }],
     steps: [{ evidence: 'S.java:9' }],
     affected_files: ['F.java'],
   })
-  assert.equal(refsFirst[0].file, 'R.java')
+  assert.equal(refsFirst[0].file, 'Ref.java')
   assert.ok(refsFirst.some(x => x.file === 'S.java' && x.line === 9), 'step target also included')
   assert.ok(!refsFirst.some(x => x.file === 'F.java'), 'affected_files only used as a last resort')
 })

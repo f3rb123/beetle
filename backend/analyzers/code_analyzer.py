@@ -111,6 +111,37 @@ def is_resource_id_class(source_text: str) -> bool:
     return len(_LOGIC_RE.findall(source_text)) <= _RES_LOGIC_TOLERANCE
 
 
+# A decompiled R-constants class by PATH: R.java / R2.java / R$layout.java, plus the
+# smali/kt equivalents. Obfuscated R classes (N0/a.java) have no path signal — those
+# are matched against the ``r_classes`` set recorded during the secret walk instead.
+_R_CLASS_PATH_RE = re.compile(r'(?:^|/)R\d?(?:\$[A-Za-z0-9_]+)?\.(?:java|kt|smali)$', re.I)
+# A snippet that is an Android resource-ID constant assignment (``… = 0x7f0a00b3``).
+_RES_ID_SNIPPET_RE = re.compile(r'0x7[fF][0-9a-fA-F]{6}\b')
+
+
+def is_resource_id_target(path: str, snippet: str = "", r_classes=None) -> bool:
+    """True when a (path, snippet) points at an auto-generated resource-ID constant
+    class — an R.java / R$* / R2 by path, an obfuscated R class recorded in
+    ``r_classes`` (the secret walk's ``resource_id_classes``), or a snippet that is a
+    0x7f resource-ID assignment. Such a location can NEVER hold a secret or be a valid
+    code-viewer / chain-evidence target, so callers must refuse it and fall back to
+    the real evidence file."""
+    p = (path or "").replace("\\", "/").strip()
+    if not p:
+        return False
+    if r_classes:
+        pl = p.lower()
+        for rc in r_classes:
+            rcl = str(rc or "").replace("\\", "/").lower()
+            if rcl and (pl == rcl or pl.endswith("/" + rcl) or rcl.endswith("/" + pl)):
+                return True
+    if _R_CLASS_PATH_RE.search(p):
+        return True
+    if snippet and _RES_ID_SNIPPET_RE.search(snippet):
+        return True
+    return False
+
+
 # ── Raw-SQL severity resolution (android_sqlite_raw_query) ────────────────────
 # rawQuery/execSQL/compileStatement fire on EVERY raw query, including safe
 # parameterized calls like rawQuery("… WHERE id = ?", args). HIGH must require
