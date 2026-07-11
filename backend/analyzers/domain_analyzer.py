@@ -43,7 +43,11 @@ def check_domains(endpoints: list, results: dict):
     - Add heuristic reputation scoring
     - Flag sanctioned-country and suspicious infrastructure patterns
     """
-    domains = _extract_unique_domains(endpoints)
+    # Placeholder / example / reserved hosts are NEVER DNS-resolved or reported —
+    # mirrors the _PLACEHOLDER_IPS gate for domains (default.url, example.com, …).
+    from .network_intel import is_placeholder_domain, looks_like_registrable_domain
+    domains = [d for d in _extract_unique_domains(endpoints)
+               if not is_placeholder_domain(d) and looks_like_registrable_domain(d)]
     domain_intel = []
 
     for domain in list(domains)[:30]:

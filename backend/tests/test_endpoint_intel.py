@@ -41,8 +41,11 @@ def _tree() -> tempfile.TemporaryDirectory:
 
 
 def test_extracts_across_sources_and_schemes():
+    # Extraction breadth across source types/schemes. These fixtures are bare
+    # constants (not passed to an HTTP client), so they are "referenced" — verbose
+    # returns the full inventory (the default now surfaces only "called" URLs).
     with _tree() as root:
-        eps = endpoint_intel.extract_endpoints(root)
+        eps = endpoint_intel.extract_endpoints(root, verbose=True)
     joined = "\n".join(eps)
     assert "https://api.bank.example-corp.io/v2/login" in eps          # .kt
     assert "http://legacy.bank-corp.net/transfer" in eps               # .smali

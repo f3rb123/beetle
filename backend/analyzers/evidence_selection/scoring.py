@@ -14,6 +14,7 @@ read as analyst-facing bullet points ("Application-owned", "AndroidX library").
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -230,6 +231,22 @@ def _rule_specificity_signal(c: Candidate, ctx: SelectionContext) -> list:
         if ctx.rule_specificity else []
 
 
+_LOCALIZED_RES_RE = re.compile(r"(?:^|/)res/values-[^/]+/", re.I)
+
+
+def _localized_resource_signal(c: Candidate, ctx: SelectionContext) -> list:
+    """A LOCALIZED resource string (``res/values-<locale>/…``) is a UI translation,
+    never the app's detection logic — penalize it as proof so a code site or the base
+    ``res/values/strings.xml`` wins (e.g. a root-check finding anchors to the isRooted
+    source, not a Serbian-Latin Play-Services label). Base ``res/values/`` (no locale
+    qualifier) is NOT penalized. Only re-ranks candidates; never blanks sole evidence."""
+    p = (c.file_path or "").replace("\\", "/").lower()
+    if _LOCALIZED_RES_RE.search(p):
+        return [(C.LOCALIZED_RESOURCE_PENALTY,
+                 "Localized UI resource string (translation, not the detection logic)")]
+    return []
+
+
 def _manifest_signal(c: Candidate, ctx: SelectionContext) -> list:
     """For declaration-driven findings, the manifest is the authoritative proof —
     it must beat a framework/library implementation file (e.g. an exported component
@@ -250,6 +267,7 @@ _BUILTIN_CONTRIBUTORS = (
     (_app_relevance_signal, FILE_SCOPE),
     (_framework_path_signal, FILE_SCOPE),
     (_chain_priority_signal, FILE_SCOPE),
+    (_localized_resource_signal, FILE_SCOPE),
     (_manifest_signal, FILE_SCOPE),
     (_multi_engine_file_signal, FILE_SCOPE),
     (_already_selected_signal, FILE_SCOPE),

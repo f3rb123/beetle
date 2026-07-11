@@ -1459,6 +1459,24 @@ def _analyze_components(apk, tmpdir, results):
             _process_component(elem, comp_type, pkg, results)
 
 
+# Relative strength of a resolved protectionLevel — a HIGHER number is a stronger
+# access boundary. Used to detect a <path-permission> that RELAXES a provider's own
+# permission (e.g. a normal-level read where the provider requires signature).
+_PERM_STRENGTH = {
+    "signature": 3, "signatureorsystem": 3, "signature|privileged": 3,
+    "privileged": 3, "system": 3, "internal": 3, "development": 3,
+    "dangerous": 2, "normal": 1, "unknown": 0, "none": 0, "": 0,
+}
+
+
+def _perm_strength(level: str) -> int:
+    lvl = str(level or "").lower()
+    if lvl in _PERM_STRENGTH:
+        return _PERM_STRENGTH[lvl]
+    # Composite protectionLevels ("signature|privileged") — strongest token wins.
+    return max((_PERM_STRENGTH.get(tok, 0) for tok in lvl.split("|")), default=0)
+
+
 def _exported_severity(comp_type, short_name, browsable, schemes, deeplinks, actions):
     """Phase 6 Task 3 — contextual exploitability severity for exported components.
 
@@ -1523,23 +1541,54 @@ def _process_component(elem, comp_type, pkg, results):
     schemes   = []
     hosts     = []
     deeplinks = []
+    deep_links: list[dict] = []   # structured per-<data>: scheme→host→path + badges
     browsable = False
+    is_launcher = False
 
     for intent_filter in intent_filters:
+        # BROWSABLE / autoVerify are per intent-filter and apply to every <data> in it.
+        if_browsable = False
+        auto_verify = str(intent_filter.get(ns("autoVerify"))
+                          or intent_filter.get("autoVerify") or "").lower() in ("true", "1")
         for action in intent_filter.iter("action"):
             name = action.get(ns("name")) or action.get("name") or ""
             if name: actions.append(name)
         for category in intent_filter.iter("category"):
             cat = category.get(ns("name")) or ""
-            if "BROWSABLE" in cat: browsable = True
+            if "BROWSABLE" in cat: browsable = True; if_browsable = True
+            if "LAUNCHER" in cat: is_launcher = True
         for data in intent_filter.iter("data"):
             scheme = data.get(ns("scheme")) or ""
             host   = data.get(ns("host"))   or ""
-            path   = data.get(ns("path"))   or data.get(ns("pathPattern")) or data.get(ns("pathPrefix")) or ""
+            port   = data.get(ns("port"))   or ""
+            # Keep the path KIND distinct (path / pathPrefix / pathPattern) — a
+            # pathPattern is a broader match than an exact path.
+            if data.get(ns("path")):
+                p, p_kind = data.get(ns("path")), "path"
+            elif data.get(ns("pathPrefix")):
+                p, p_kind = data.get(ns("pathPrefix")), "pathPrefix"
+            elif data.get(ns("pathPattern")):
+                p, p_kind = data.get(ns("pathPattern")), "pathPattern"
+            else:
+                p, p_kind = "", ""
             if scheme: schemes.append(scheme)
             if host:   hosts.append(host)
             if scheme and host:
-                deeplinks.append(f"{scheme}://{host}{path}")
+                deeplinks.append(f"{scheme}://{host}{p}")
+            if scheme or host:
+                low = scheme.lower()
+                is_http = low in ("http", "https")
+                deep_links.append({
+                    "scheme": scheme, "host": host, "port": port,
+                    "path": p, "path_kind": p_kind,
+                    "browsable": if_browsable, "auto_verify": auto_verify,
+                    # A VERIFIED App Link needs https + autoVerify + a host (assetlinks
+                    # binding). Everything else is an UNVERIFIED / custom-scheme link —
+                    # the higher attack surface (any app can register the same scheme).
+                    "app_link": is_http and bool(host),
+                    "verified": is_http and auto_verify and bool(host),
+                    "custom_scheme": bool(scheme) and not is_http,
+                })
 
     comp_info = {
         "name":       full_name,
@@ -1554,6 +1603,7 @@ def _process_component(elem, comp_type, pkg, results):
         "schemes":    schemes,
         "hosts":      hosts,
         "deeplinks":  deeplinks,
+        "deep_links": deep_links,   # structured scheme→host→path + BROWSABLE/autoVerify
         "browsable":  browsable,
     }
 
@@ -1680,6 +1730,128 @@ def _process_component(elem, comp_type, pkg, results):
                 "masvs":          "MASVS-PLATFORM-1",
                 "owasp":          "M1",
             })
+
+    def _sub_attr(el, name):
+        return el.get(ns(name)) or el.get(name)
+
+    # ── A: Task hijacking / StrandHogg (exported activities) ──────────────────
+    # A non-default android:taskAffinity (including empty "") or a singleTask/
+    # singleInstance launchMode lets a malicious app inject its own activity into
+    # this task and overlay-spoof it (StrandHogg / StrandHogg 2.0). Exported only.
+    if comp_type == "activity":
+        # NB: read taskAffinity directly (not via attr()) so an EMPTY string ""
+        # (StrandHogg 2.0's classic marker) is preserved rather than collapsed to None
+        # by the `x or y` fallback.
+        task_affinity = elem.get(ns("taskAffinity"))
+        if task_affinity is None:
+            task_affinity = elem.get("taskAffinity")
+        launch_mode = (attr("launchMode") or "").strip()
+        non_default_affinity = task_affinity is not None and task_affinity != pkg
+        risky_launch = launch_mode.lower() in ("singletask", "singleinstance")
+        if non_default_affinity or risky_launch:
+            label = attr("label") or ""
+            blob = f"{short_name} {label}".lower()
+            sensitive = any(t in blob for t in ("login", "auth", "payment", "pin"))
+            # MEDIUM by default; HIGH for a sensitive flow or the LAUNCHER/main activity.
+            th_sev = "high" if (sensitive or is_launcher) else "medium"
+            reasons = []
+            if non_default_affinity:
+                reasons.append(f'a non-default android:taskAffinity="{task_affinity}"')
+            if risky_launch:
+                reasons.append(f'android:launchMode="{launch_mode}"')
+            spec = ({"attr": "launchMode", "value": launch_mode} if risky_launch
+                    else {"attr": "taskAffinity"})
+            scope = ("the LAUNCHER/main activity" if is_launcher
+                     else "a security-sensitive activity" if sensitive else "an exported activity")
+            results["findings"].append({
+                "rule_id":        "manifest_task_hijacking",
+                "title":          f"Task Hijacking / StrandHogg Risk — {short_name}",
+                "severity":       th_sev,
+                "category":       "Attack Surface",
+                "description":    (f"Exported activity `{short_name}` declares {' and '.join(reasons)}. "
+                                   "A malicious app can set a matching taskAffinity (or abuse the "
+                                   "singleTask/singleInstance launch mode) to inject its own activity into "
+                                   "this task and present a spoofed overlay in place of the real screen "
+                                   f"(StrandHogg / StrandHogg 2.0). This is {scope}."),
+                "impact":         ("Task injection lets an attacker phish credentials, capture input, or "
+                                   "hijack the UI flow while the user believes they are in the real app."),
+                "recommendation": ('Avoid singleTask/singleInstance for exported activities and do not set a '
+                                   'non-default taskAffinity; set android:exported="false" where external '
+                                   "launch is not required. Target API 30+ for the StrandHogg 2.0 platform "
+                                   "mitigations and verify task reparenting cannot be abused."),
+                "cwe":            "CWE-926",
+                "masvs":          "MASVS-PLATFORM-1",
+                "owasp":          "M1",
+                "manifest_evidence_spec": spec,
+            })
+
+    # ── B: ContentProvider grant-uri-permission / path-permission ─────────────
+    if comp_type == "provider":
+        prov_strength = _perm_strength(permission_level)
+        # (1) Wildcard <grant-uri-permission> — grants temp access to ANY path.
+        for gup in elem.iter("grant-uri-permission"):
+            gpath = (_sub_attr(gup, "path") or "").strip()
+            gpattern = (_sub_attr(gup, "pathPattern") or "").strip()
+            if gpath == "/" or gpattern == ".*":
+                wildcard = "/" if gpath == "/" else ".*"
+                # A wildcard grant on a weakly/un-protected provider is HIGH; a
+                # signature-protected provider is MEDIUM (the grant still defeats
+                # any path scoping, but only signed apps reach the provider at all).
+                gsev = "medium" if prov_strength >= 3 else "high"
+                spec = ({"attr": "path", "value": "/"} if gpath == "/"
+                        else {"attr": "pathPattern", "value": ".*"})
+                results["findings"].append({
+                    "rule_id":        "manifest_provider_wildcard_grant_uri",
+                    "title":          f"Wildcard grant-uri-permission — {short_name}",
+                    "severity":       gsev,
+                    "category":       "Attack Surface",
+                    "description":    (f"ContentProvider `{short_name}` (authority: `{authority}`) declares a "
+                                       f"<grant-uri-permission> with a wildcard path (`{wildcard}`), so it can "
+                                       "grant temporary read/write access to ANY URI under the provider — "
+                                       "defeating a path-scoped permission model."),
+                    "impact":         ("An app receiving a wildcard URI grant can read or write any record the "
+                                       "provider exposes, not just the intended path."),
+                    "recommendation": ("Grant URI permissions to specific paths only (android:path / "
+                                       "android:pathPrefix), never `/` or pathPattern `.*`. Prefer explicit, "
+                                       "short-lived per-URI FLAG_GRANT_READ_URI_PERMISSION grants."),
+                    "cwe":            "CWE-926",
+                    "masvs":          "MASVS-PLATFORM-1",
+                    "owasp":          "M1",
+                    "manifest_evidence_spec": spec,
+                })
+                break  # one wildcard-grant finding per provider
+        # (2) <path-permission> weaker than the provider's own android:permission.
+        if permission and prov_strength > 0:
+            for pp in elem.iter("path-permission"):
+                pp_perm = _sub_attr(pp, "permission")
+                for role, p in (("read", _sub_attr(pp, "readPermission") or pp_perm),
+                                ("write", _sub_attr(pp, "writePermission") or pp_perm)):
+                    if not p or p == permission:
+                        continue
+                    pp_level = _permission_protection_level(p, results)
+                    if _perm_strength(pp_level) < prov_strength:
+                        pp_path = (_sub_attr(pp, "path") or _sub_attr(pp, "pathPrefix")
+                                   or _sub_attr(pp, "pathPattern") or "?")
+                        results["findings"].append({
+                            "rule_id":        "manifest_path_permission_weaker",
+                            "title":          f"path-permission weaker than provider permission — {short_name}",
+                            "severity":       "high" if _perm_strength(pp_level) <= 1 else "medium",
+                            "category":       "Attack Surface",
+                            "description":    (f"ContentProvider `{short_name}` requires `{permission}` "
+                                               f"({permission_level}) but a <path-permission> for `{pp_path}` "
+                                               f"only requires `{p}` ({pp_level}) for {role} access — a weaker "
+                                               "boundary that lets a less-privileged app reach that path."),
+                            "impact":         ("An app that cannot satisfy the provider's permission can still "
+                                               f"{role} the exposed path, bypassing the intended access control."),
+                            "recommendation": ("Make every <path-permission> read/writePermission at least as "
+                                               "strong as the provider's android:permission (prefer signature)."),
+                            "cwe":            "CWE-926",
+                            "masvs":          "MASVS-PLATFORM-1",
+                            "owasp":          "M1",
+                            "manifest_evidence_spec": ({"attr": "readPermission", "value": p} if role == "read"
+                                                       else {"attr": "writePermission", "value": p}),
+                        })
+                        break  # one finding per path-permission element
 
     # Phase B: point each exported-component finding at the component's class so
     # the source resolver can locate decompiled source and offer View Code, AND
@@ -1969,6 +2141,39 @@ def _build_behavior_findings(results: dict):
         p = str(p or "").lower()
         return p.endswith((".dex", ".so", ".dylib", ".arsc", ".odex", ".vdex", ".oat"))
 
+    # Ownership of a source FILE, via the shared ownership engine (cached). A behavior
+    # sourced 100% from framework/library files (io.flutter / firebase / androidx /
+    # play-core) is the engine's own primitive, not the app's — it must not read HIGH.
+    from . import ownership as _own
+    from .canonical_finding import CanonicalFinding as _CF
+    _own_ctx = _own.context_from_results(results)
+    _own_engine = _own.get_engine()
+    _owner_cache: dict[str, str] = {}
+
+    def _owner_of(path: str) -> str:
+        if path in _owner_cache:
+            return _owner_cache[path]
+        try:
+            ot = _own_engine.classify(
+                _CF(title="_behavior", file_path=path, platform="android"), _own_ctx).owner_type
+        except Exception:
+            ot = "Unknown"
+        _owner_cache[path] = ot
+        return ot
+
+    def _is_library_file(path: str) -> bool:
+        return _own.is_library_owner(_owner_of(path))
+
+    # OS-command taint gate (reuse taint results — never re-scan): does a tainted
+    # source reach an Execution/CMD sink in an APP-OWNED class? If not, an exec API in
+    # the code is a capability (INFO), not a proven command-injection vulnerability.
+    _app_exec_taint = any(
+        isinstance(tf, dict)
+        and str(tf.get("sink_cat")) in ("Execution", "CMD")
+        and str(tf.get("owner_type")) == "Application"
+        for tf in (results.get("taint_flows") or [])
+    )
+
     for category, files in api_results.items():
         rule = BEHAVIOR_RULES.get(category)
         if not rule:
@@ -1980,14 +2185,34 @@ def _build_behavior_findings(results: dict):
         evidence = [e for e in api_evidence.get(category, [])
                     if e.get("path") and not _is_binary(e.get("path")) and e.get("line") and e.get("snippet")]
 
+        # ── Ownership partition of the attributed files ───────────────────────
+        app_owned_files = [f for f in source_files if not _is_library_file(f)]
+        framework_only = bool(source_files) and not app_owned_files
+
+        # ── Severity derivation (evidence-driven, never a bare constant) ──────
         # Permission/service gate: a privacy capability the app is not permissioned
-        # to use (no RECORD_AUDIO, no bound accessibility service, …) is code-only
-        # and cannot run — downgrade it to INFO with a note rather than presenting a
-        # HIGH capability the app cannot exercise. A declared prerequisite keeps the
-        # rule's real severity.
+        # to use (no RECORD_AUDIO, no bound accessibility service, …) is code-only.
         met, prereq_note = _behavior_prereq_met(category, results)
         severity = rule["severity"] if met else "info"
-        description = rule["description"] if met else f"{rule['description']} Note: {prereq_note}."
+        notes = []
+        if not met and prereq_note:
+            notes.append(prereq_note)
+        # 100% framework/library-owned → the platform engine's primitive, not the app's.
+        if framework_only:
+            severity = "info"
+            notes.append("all attributed files are framework/library-owned (not application code)")
+        # OS command execution with no tainted flow into an app-owned exec sink → capability.
+        if category == "Execute OS Command" and not _app_exec_taint:
+            severity = "info"
+            notes.append("no tainted input reaches an OS-command sink in application code "
+                         "(capability, not a proven command-injection vulnerability)")
+
+        description = rule["description"]
+        if notes:
+            description = f"{description} Note: " + "; ".join(notes) + "."
+        owner_scope = ("framework" if framework_only
+                       else "application" if source_files and len(app_owned_files) == len(source_files)
+                       else "mixed" if source_files else "unknown")
 
         behavior_entries.append({
             "category": category,
@@ -1996,6 +2221,10 @@ def _build_behavior_findings(results: dict):
             "description": description,
             "files": source_files[:10],
             "file_count": len(source_files),
+            "app_owned_files": app_owned_files[:10],
+            "app_owned_file_count": len(app_owned_files),
+            "framework_owned": framework_only,
+            "owner_scope": owner_scope,
             "cwe": rule["cwe"],
             "masvs": rule["masvs"],
             "owasp": rule["owasp"],
@@ -2020,6 +2249,10 @@ def _build_behavior_findings(results: dict):
             "masvs": rule["masvs"],
             "owasp": rule["owasp"],
             "prerequisite_met": met,
+            "framework_owned": framework_only,
+            "owner_scope": owner_scope,
+            "app_owned_files": app_owned_files[:10],
+            "app_owned_file_count": len(app_owned_files),
             "file_path": primary["path"],
             "line": primary["line"],
             "snippet": primary["snippet"],
@@ -2501,7 +2734,8 @@ def _extract_endpoints(tmpdir, results, extra_dirs=None, *, corpus: SourceCorpus
     # config + ws/wss/ftp + custom-scheme deep links), shared with iOS via
     # endpoint_intel. Replaces the previous narrow http(s)-only resource scan.
     from . import endpoint_intel
-    results["endpoints"] = endpoint_intel.extract_endpoints(tmpdir, extra_dirs, corpus=corpus or SourceCorpus())
+    results["endpoints"] = endpoint_intel.extract_endpoints(
+        tmpdir, extra_dirs, corpus=corpus or SourceCorpus(), results=results)
 
 
 # ─── APK Protection Checks ────────────────────────────────────────────────────

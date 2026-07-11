@@ -15,6 +15,19 @@ except ImportError:
     CRYPTO_AVAILABLE = False
 
 
+def _format_key_type(key_class_name: str) -> str:
+    """The public-key ALGORITHM from its class name: "_RSAPublicKey" → "RSA".
+
+    Strips the cryptography framework/backend suffixes AND the "PublicKey" suffix +
+    leading underscore, so the report shows "RSA"/"DSA", not "RSAPublicKey" (mirrors
+    _format_signature_algorithm). EllipticCurve keys are reported as "EC"."""
+    name = (key_class_name or "").replace("_CryptographyBackend", "").replace("Backend", "")
+    name = re.sub(r"PublicKey.*$", "", name).lstrip("_")
+    if name.lower().startswith("ellipticcurve"):
+        return "EC"
+    return name
+
+
 def _format_signature_algorithm(hash_name: str, key_class_name: str) -> str:
     """Compose the signature algorithm from the hash + KEY ALGORITHM only.
 
@@ -136,7 +149,9 @@ def analyze_certificate(apk_path: str, results: dict):
             # Public key
             pub = cert.public_key()
             try:
-                cert_info["key_type"] = type(pub).__name__.replace("_CryptographyBackend", "").replace("Backend", "")
+                # e.g. "_RSAPublicKey" → "RSA" (mirrors the signature-algo path). EC is
+                # set explicitly in the branch below.
+                cert_info["key_type"] = _format_key_type(type(pub).__name__)
                 cert_info["key_size"] = pub.key_size
             except AttributeError:
                 try:
