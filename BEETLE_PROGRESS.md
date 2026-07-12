@@ -252,6 +252,25 @@ Baseline before start: iOS grade A 97/100 (0/0/0); MobSF 50/100 grade B. Target:
     Commit-ready: Y
     Tests: 780 passed, 11 skipped (incl. all 8 icon tests).
 
+[x] RUN 5.1 — lift the CgBI decoder into a SHARED helper (placement only, no behaviour change)
+    WHY: every PNG in a shipped iOS bundle is CgBI-crushed, so the app icon is NOT the only
+      consumer — RUN 12 (Property Lists) and any future image-rendering path hit the identical
+      broken-image bug. Burying the reversal inside _extract_ios_app_icon would guarantee the
+      next image surface re-introduces it.
+    Files changed: NEW backend/analyzers/apple_png.py (public API: PNG_SIG/PNG_END,
+      is_cgbi_png, decode_cgbi_png, renderable_image_bytes, png_dimensions, iter_png_chunks,
+      iter_carved_pngs, best_icon_png_from_assets_car). ios_analyzer.py now imports it and
+      keeps zero private PNG helpers. NEW backend/tests/test_apple_png.py (4 tests).
+      backend/tests/test_ios_report_fixes_abcd.py: one reference updated
+      ios._png_dimensions -> ios.png_dimensions (pure symbol move; the assertion is unchanged).
+    THE GATE TO USE: renderable_image_bytes(raw) is the ONE call every image path should make
+      before shipping bytes to a report — standard PNG/JPEG passes through, CgBI is converted,
+      and anything undecodable returns None so the caller picks another candidate instead of
+      emitting a broken image. Never base64 raw bundle PNG bytes into a report again.
+    Tests: 784 passed, 11 skipped. The new tests encode the RUN 5 lesson: one asserts the
+      decoded pixel is still TEAL (0,179,179) — a missed BGRA swap decodes fine but renders
+      orange, so only a pixel assertion actually proves correctness.
+
 [ ] RUN 6 — Info.plist section label + render (iOS-only)
     Files changed:
     Acceptance (3 permissions + ATS render, Android still "AndroidManifest"): 

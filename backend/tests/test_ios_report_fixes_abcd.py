@@ -120,7 +120,7 @@ def test_icon_carved_from_assets_car_prefers_square():
     assert ai.get("icon_data", "").startswith("data:image/png;base64,")
     import base64
     raw = base64.b64decode(ai["icon_data"].split(",", 1)[1])
-    assert ios._png_dimensions(raw) == (120, 120)  # largest SQUARE, not the 200x100 launch image
+    assert ios.png_dimensions(raw) == (120, 120)  # largest SQUARE, not the 200x100 launch image
 
 
 def test_assets_car_without_png_records_reason():
