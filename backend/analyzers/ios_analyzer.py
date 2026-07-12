@@ -874,10 +874,80 @@ def _analyze_info_plist(plist_path: str, results: dict):
         summary = f"ATS enforced with {len(doms)} per-domain exception(s): {', '.join(doms[:5])}."
     else:
         state, summary = "enforced", "ATS declared and enforced; no arbitrary loads, no exception domains."
+
+    # The global relaxations, each reported by name. NSAllowsArbitraryLoadsInWebContent /
+    # ...InMedia are narrower than the blanket switch, so they are their own rows rather than
+    # being collapsed into "ATS disabled" — the report should say WHICH door is open.
+    global_flags = [
+        {"key": "NSAllowsArbitraryLoads",
+         "value": bool(ats.get("NSAllowsArbitraryLoads")),
+         "severity": "high" if ats.get("NSAllowsArbitraryLoads") else "info",
+         "meaning": ("Cleartext HTTP allowed to ANY host — ATS fully disabled."
+                     if ats.get("NSAllowsArbitraryLoads")
+                     else "Not set — HTTPS required for all connections.")},
+        {"key": "NSAllowsArbitraryLoadsInWebContent",
+         "value": bool(ats.get("NSAllowsArbitraryLoadsInWebContent")),
+         "severity": "medium" if ats.get("NSAllowsArbitraryLoadsInWebContent") else "info",
+         "meaning": ("WebView content may load over cleartext HTTP (app's own requests still "
+                     "protected)." if ats.get("NSAllowsArbitraryLoadsInWebContent")
+                     else "Not set — WebView content must use HTTPS.")},
+        {"key": "NSAllowsArbitraryLoadsForMedia",
+         "value": bool(ats.get("NSAllowsArbitraryLoadsForMedia")),
+         "severity": "medium" if ats.get("NSAllowsArbitraryLoadsForMedia") else "info",
+         "meaning": ("AV media may load over cleartext HTTP."
+                     if ats.get("NSAllowsArbitraryLoadsForMedia")
+                     else "Not set — media must use HTTPS.")},
+        {"key": "NSAllowsLocalNetworking",
+         "value": bool(ats.get("NSAllowsLocalNetworking")),
+         "severity": "info",     # local-network exemption is not an internet exposure
+         "meaning": ("Local-network (.local / literal IP) connections exempt from ATS."
+                     if ats.get("NSAllowsLocalNetworking")
+                     else "Not set.")},
+    ]
+
+    # Per-exception-domain rows. An exception that permits INSECURE HTTP loads is the real
+    # weakness; one that merely lowers the TLS floor or disables forward secrecy is weaker but
+    # still a downgrade, so each is scored on what it actually relaxes.
+    domain_rows = []
+    for domain, cfg in (ats.get("NSExceptionDomains") or {}).items():
+        cfg = cfg if isinstance(cfg, dict) else {}
+        insecure = bool(cfg.get("NSExceptionAllowsInsecureHTTPLoads")
+                        or cfg.get("NSThirdPartyExceptionAllowsInsecureHTTPLoads"))
+        min_tls = str(cfg.get("NSExceptionMinimumTLSVersion")
+                      or cfg.get("NSThirdPartyExceptionMinimumTLSVersion") or "")
+        no_pfs = (cfg.get("NSExceptionRequiresForwardSecrecy") is False
+                  or cfg.get("NSThirdPartyExceptionRequiresForwardSecrecy") is False)
+        weak_tls = min_tls in ("TLSv1.0", "TLSv1.1")
+        if insecure:
+            sev, why = "high", "Allows cleartext HTTP to this domain."
+        elif weak_tls:
+            sev, why = "medium", f"Lowers the TLS floor to {min_tls}."
+        elif no_pfs:
+            sev, why = "medium", "Disables forward secrecy for this domain."
+        else:
+            sev, why = "info", "Exception declared but no insecure relaxation."
+        domain_rows.append({
+            "domain": domain,
+            "allows_insecure_http": insecure,
+            "includes_subdomains": bool(cfg.get("NSIncludesSubdomains")),
+            "minimum_tls": min_tls or "TLSv1.2 (default)",
+            "requires_forward_secrecy": not no_pfs,
+            "severity": sev,
+            "why": why,
+        })
+    domain_rows.sort(key=lambda d: {"high": 0, "medium": 1, "info": 2}[d["severity"]])
+
+    enforced = state in ("default", "enforced") and not any(
+        f["value"] for f in global_flags if f["severity"] != "info")
     results["app_info"]["ats_state"] = {
         "declared": declared, "state": state, "summary": summary,
+        "enforced": enforced,
         "allows_arbitrary_loads": bool(ats.get("NSAllowsArbitraryLoads")),
         "exception_domains": list(ats.get("NSExceptionDomains") or {}),
+        "global_flags": global_flags,
+        "domains": domain_rows,
+        "posture": ("ATS enforced" if enforced else
+                    ("ATS disabled" if ats.get("NSAllowsArbitraryLoads") else "ATS weakened")),
     }
 
     if ats.get("NSAllowsArbitraryLoads"):

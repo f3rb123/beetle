@@ -43,6 +43,10 @@ export const PANELS = [
   { id: 'manifest', label: 'Manifest', labelByPlatform: { ios: 'Info.plist & Entitlements' },
     group: 'Investigation', icon: 'ScrollText', status: STATUS_READY },
   { id: 'malware', label: 'Malware Analysis', group: 'Investigation', icon: 'Bug', status: STATUS_READY },
+  // iOS-only: App Transport Security is an Info.plist concept with no Android equivalent
+  // (Android's counterpart is the Network Security Config, shown in the Network panel).
+  { id: 'ats', label: 'App Transport Security', group: 'Investigation', icon: 'ShieldHalf',
+    status: STATUS_READY, platforms: ['ios'] },
 
   // ── Static Analysis — derived posture & coverage ────────────────────────────
   { id: 'masvs', label: 'MASVS Coverage', group: 'Static Analysis', icon: 'ShieldCheck', status: STATUS_READY, count: 'masvs' },
@@ -90,10 +94,19 @@ export function panelLabel(panel, platform) {
   return (panel.labelByPlatform && panel.labelByPlatform[platform]) || panel.label
 }
 
+// A panel with a `platforms` list only appears for those platforms. Panels without one are
+// platform-neutral and appear everywhere, so Android's nav is unchanged.
+export function panelAppliesTo(panel, platform) {
+  if (!panel.platforms) return true
+  if (!platform) return true          // unknown platform: show everything rather than hide
+  return panel.platforms.includes(platform)
+}
+
 export function navGroups({ includePlanned = true, platform = '' } = {}) {
   const groups = GROUP_ORDER.map(label => ({
     label,
     items: PANELS.filter(p => p.group === label && (includePlanned || p.status === STATUS_READY))
+      .filter(p => panelAppliesTo(p, platform))
       .map(p => ({ ...p, label: panelLabel(p, platform) })),
   })).filter(g => g.items.length)
   return groups

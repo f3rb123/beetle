@@ -576,11 +576,37 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Tests: 808 passed, 11 skipped (incl. 8 new FP-guard tests, from the PROTECTION-FLAG angle -
       complementing RUN 8's import-symbol angle on the same guard).
 
-[ ] RUN 10 — Dedicated ATS section (iOS-only)
+[x] RUN 10 - Dedicated ATS section (iOS-only)  DONE
     Files changed:
-    Acceptance: 
-    Commit-ready:
-    Resume notes:
+      backend/analyzers/ios_analyzer.py - ats_state extended: global_flags (all four ATS keys,
+        each named with its own severity + meaning), per-exception-domain rows, enforced flag,
+        posture string.
+      frontend workspace-registry.js - NEW iOS-ONLY panel { id: 'ats', platforms: ['ios'] } +
+        panelAppliesTo(); panels2.jsx - NEW AtsPanel; Workspace.jsx - route; workspace.css.
+      NEW backend/tests/test_ios_ats_section.py (7 tests).
+    THE POINT OF THIS SECTION (carried from RUN 6): iOS enforces ATS BY DEFAULT, so an app that
+      never declares NSAppTransportSecurity is in the SECURE state, not an unconfigured one.
+      MobSF shows an EMPTY TABLE here, which reads like a gap when it is the opposite. Beetle
+      states the posture plainly: "ATS enforced" with a green verdict card.
+    Acceptance: PASS (iOS report regenerated).
+      posture  = "ATS enforced"   enforced = True   declared = False   state = "default"
+      summary  = "Not declared - ATS enforced by default (HTTPS required)."
+      Global Settings: all four keys listed, each "not set" + what that means:
+        NSAllowsArbitraryLoads / ...InWebContent / ...ForMedia / NSAllowsLocalNetworking
+      Exception Domains: 0 - "none declared; every connection must satisfy ATS"
+      findings 86 -> 86 UNCHANGED - the ATS section is a SURFACE, not a new finding.
+    GRADED, NOT COLLAPSED: a WebContent/Media relaxation is NOT reported as "ATS disabled" - it
+      is narrower (the app's own requests stay protected), so it is MEDIUM and named
+      individually. The report says WHICH door is open. Per-domain severity is keyed on what the
+      exception actually relaxes: cleartext HTTP -> HIGH; TLS floor lowered to 1.0/1.1 -> MEDIUM;
+      forward secrecy disabled -> MEDIUM; exception that relaxes nothing -> INFO. Worst domain
+      listed first. All locked by tests.
+    Android: UNAFFECTED BY CONSTRUCTION - the ATS panel is registry-gated to platforms:['ios'].
+      Verified against the real registry: ATS visible on iOS = true, on Android = false, and the
+      rest of Android's nav is unchanged (ATS is an Info.plist concept; Android's counterpart is
+      the Network Security Config, already in the Network panel).
+    Commit-ready: Y
+    Tests: 820 passed, 11 skipped.
 
 [ ] RUN 11 — iOS tracker detection wire-up (iOS-only)
     Files changed:

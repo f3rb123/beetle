@@ -855,6 +855,77 @@ function IosApplicationConfig({ results }) {
   )
 }
 
+// ───────────────────────── App Transport Security ─────────────────────────
+// iOS-only. ATS is enforced by iOS BY DEFAULT: an app that never declares
+// NSAppTransportSecurity is in the SECURE state, not an unconfigured one. Saying "no ATS
+// config found" (MobSF shows an empty table) reads like a gap when it is the opposite, so
+// this section states the posture plainly and names which door is open when one is.
+export function AtsPanel({ results }) {
+  const ats = (results.app_info || {}).ats_state || {}
+  const flags = ats.global_flags || []
+  const domains = ats.domains || []
+  const enforced = !!ats.enforced
+
+  return (
+    <div>
+      <div className="ws-section__head">
+        <h1>App Transport Security</h1>
+        <span className="ws-muted">Info.plist · NSAppTransportSecurity</span>
+      </div>
+
+      <div className={`ws-card ws-card--pad ws-section ws-ats ws-ats--${enforced ? 'ok' : 'risk'}`}>
+        <div className="ws-ats__verdict">
+          {enforced ? <ShieldCheck size={20} /> : <ShieldAlert size={20} />}
+          <div>
+            <div className="ws-ats__posture">{ats.posture || (enforced ? 'ATS enforced' : 'ATS weakened')}</div>
+            <div className="ws-muted" style={{ fontSize: 12.5 }}>
+              {ats.summary || 'No App Transport Security configuration parsed.'}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="ws-card ws-card--pad ws-section">
+        <h2>Global Settings</h2>
+        <div className="ios-usage-list">
+          {flags.length ? flags.map((f, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', borderBottom: '1px solid var(--ws-border, #2a2a2a)' }}>
+              <SeverityTag severity={normSev(f.value ? f.severity : 'info')} compact />
+              <span className="ws-mono" style={{ fontSize: 12.5, minWidth: 260 }}>{f.key}</span>
+              <span className="ws-mono" style={{ fontSize: 12.5, fontWeight: 700 }}>{f.value ? 'true' : 'not set'}</span>
+              <span className="ws-muted" style={{ fontSize: 12.5 }}>{f.meaning}</span>
+            </div>
+          )) : <p className="ws-muted" style={{ fontSize: 12.5 }}>No ATS keys declared — iOS enforces ATS by default.</p>}
+        </div>
+      </div>
+
+      <div className="ws-card ws-card--pad ws-section">
+        <h2>Exception Domains <span className="ws-muted">· {domains.length}</span></h2>
+        {domains.length ? (
+          <div className="ios-usage-list">
+            {domains.map((d, i) => (
+              <div key={i} style={{ padding: '8px 0', borderBottom: '1px solid var(--ws-border, #2a2a2a)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <SeverityTag severity={normSev(d.severity)} compact />
+                  <span className="ws-mono" style={{ fontSize: 12.5 }}>{d.domain}</span>
+                  {d.includes_subdomains ? <span className="ws-badge">+ subdomains</span> : null}
+                  <span className="ws-muted" style={{ fontSize: 12.5 }}>min TLS {d.minimum_tls}</span>
+                  {d.requires_forward_secrecy ? null : <span className="ws-badge">no forward secrecy</span>}
+                </div>
+                <div style={{ fontSize: 12.5, marginTop: 3 }}>{d.why}</div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="ws-muted" style={{ fontSize: 12.5 }}>
+            No per-domain exceptions declared — every connection must satisfy ATS.
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function ManifestPanel({ results }) {
   if (results.platform === 'ios') return <IosApplicationConfig results={results} />
   const info = results.app_info || {}

@@ -716,3 +716,12 @@
 .ws-ex-quick__btn.is-active .ws-ex-quick__n { background: rgba(255, 255, 255, 0.22); color: #fff; }
 .ws-ex-quick__soon { font: 600 9px/1 inherit; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ws-ink-3); }
 .ws-ex-quick__sep { width: 1px; align-self: stretch; background: var(--ws-line); margin: 2px 4px; }
+
+/* App Transport Security verdict card (RUN 10). ATS is enforced by iOS by DEFAULT, so an
+   app that declares nothing is SECURE — the card must read as a pass, not as "unconfigured". */
+.ws-ats__verdict { display: flex; align-items: center; gap: 12px; }
+.ws-ats__posture { font-weight: 700; font-size: 15px; }
+.ws-ats--ok { border-left: 3px solid #16a34a; }
+.ws-ats--ok .ws-ats__verdict > svg { color: #16a34a; }
+.ws-ats--risk { border-left: 3px solid #dc2626; }
+.ws-ats--risk .ws-ats__verdict > svg { color: #dc2626; }

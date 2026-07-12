@@ -24,8 +24,7 @@ import {
   CertificatePanel, NetworkPanel, ManifestPanel, ComponentsPanel, AndroidApiPanel,
   MalwarePanel, ComparePanel, AiAssistantPanel,
   PermissionsPanel, AndroidPosturePanel, TaintFlowPanel,
-  CisoSummaryPanel, DeveloperGuidePanel, AskAiPanel,
-} from './panels2.jsx'
+  CisoSummaryPanel, DeveloperGuidePanel, AskAiPanel, AtsPanel } from './panels2.jsx'
 import { SourceExplorerPanel } from './SourceExplorer.jsx'
 import { findingPath, useEscape } from './ui.jsx'
 import { useCollab, canManage, SHARE_MODES } from '../../lib/collab.js'
@@ -190,6 +189,7 @@ function WorkspaceShell({ results, scanId, actions, deepLink }) {
       case 'files': return <FilesPanel results={results} onOpenCode={onOpenCode} />
       case 'exports': return <ExportsPanel actions={actions} results={results} />
       case 'manifest': return <ManifestPanel results={results} />
+      case 'ats': return <AtsPanel results={results} />
       case 'permissions': return <PermissionsPanel results={results} onOpenCode={onOpenCode} />
       case 'network': return <NetworkPanel results={results} />
       case 'certificate': return <CertificatePanel results={results} />
