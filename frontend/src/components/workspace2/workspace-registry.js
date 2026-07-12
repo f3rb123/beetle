@@ -47,6 +47,10 @@ export const PANELS = [
   // (Android's counterpart is the Network Security Config, shown in the Network panel).
   { id: 'ats', label: 'App Transport Security', group: 'Investigation', icon: 'ShieldHalf',
     status: STATUS_READY, platforms: ['ios'] },
+  // iOS-only: property lists have no Android equivalent (Android's config surface is the
+  // manifest + resources, already covered by the Manifest panel).
+  { id: 'plists', label: 'Property Lists', group: 'Investigation', icon: 'FileCode2',
+    status: STATUS_READY, platforms: ['ios'] },
 
   // ── Static Analysis — derived posture & coverage ────────────────────────────
   { id: 'masvs', label: 'MASVS Coverage', group: 'Static Analysis', icon: 'ShieldCheck', status: STATUS_READY, count: 'masvs' },

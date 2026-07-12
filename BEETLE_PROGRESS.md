@@ -656,11 +656,51 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Commit-ready: Y
     Tests: 830 passed, 11 skipped.
 
-[ ] RUN 12 — Property Lists section (iOS-only)
-    Files changed:
-    Acceptance: 
-    Commit-ready:
-    Resume notes:
+[x] RUN 12 - Property Lists section (iOS-only)  DONE
+    Files changed: NEW backend/analyzers/ios_plists.py; ios_analyzer.py (one call);
+      frontend workspace-registry.js (iOS-gated panel), panels2.jsx (PropertyListsPanel),
+      Workspace.jsx (route); NEW backend/tests/test_ios_plists.py (9 tests).
+    Acceptance: PASS. 95 property lists enumerated (69 .plist + 26 .xcprivacy):
+      67 BINARY (bplist00) / 28 XML - ALL decoded via plistlib, ZERO unreadable, ZERO text reads.
+      findings 86 -> 86 UNCHANGED, severity unchanged (enumeration surface, not a detector).
+    RULE 1 - plistlib everywhere: 67 of 69 plists are BINARY. RUN 3 and RUN 4 both traced real
+      bugs to binary plists treated as text (empty snippet -> the Firebase key was silently
+      dropped; a "line 3" that does not exist). One read path, no garbage.
+    RULE 2 - raw bytes NEVER emitted: a data value is summarised ("<data: N bytes>") and anything
+      image-like goes through RUN 5.1's renderable_image_bytes() gate, so a CgBI PNG can never
+      reach a report as a broken image. This bundle happens to carry ZERO data-bearing plists, so
+      the guard is locked by TEST (a synthetic CgBI PNG in a plist) rather than by luck.
+    RULE 3 - cross-links, does not re-report: ATS -> RUN 10's section; Firebase API_KEY/CLIENT_ID/
+      GOOGLE_APP_ID -> already INFO secrets from RUN 3; usage descriptions -> RUN 6. No findings.
+    *** SECRET LEAK CAUGHT AND FIXED (found only in the REGENERATED report, 4th time) ***
+      The first cut printed the Firebase API key IN PLAINTEXT
+      ("AIzaSyCw2rXeRTyaNxZ3cBm3gUip5sfZ1fW88rI"). RUN 3 deliberately MASKS it, and
+      secret_intel's cross-scrub only purges raw values from the secrets it knows about - it has
+      never heard of results["property_lists"]. Enumerating a plist had become a way to leak the
+      exact secret the rest of the pipeline is careful to mask.
+      FIX: credential-valued keys are masked with secret_intel.mask_value (ONE masking
+      implementation, not a second that drifts). Verified in the live report:
+        API_KEY = AIza*******************************88rI   (matches RUN 3 exactly)
+      and the raw key appears NOWHERE in the entire report. Locked by test.
+    BONUS SURFACE (not in the prompt): 26 Apple PRIVACY MANIFESTS (PrivacyInfo.xcprivacy) rolled
+      up - declares_tracking=false, tracking domains: NONE declared, accessed API categories
+      (UserDefaults 6x, FileTimestamp 3x, DiskSpace 1x, SystemBootTime 1x), collected data types
+      (OtherDiagnosticData 4x, CrashData 1x). MobSF does not show this at all.
+    HONEST "ABSENT" REPORTING (RUN 10 discipline): NSAppTransportSecurity, CFBundleURLTypes/
+      CFBundleURLSchemes, LSApplicationQueriesSchemes, NSUserTrackingUsageDescription and
+      UIFileSharingEnabled are ALL GENUINELY ABSENT from this bundle. The section says so rather
+      than implying a gap. The ONLY plist with security keys is GoogleService-Info.plist.
+    >>> CANDIDATE FINDING - NOT EMITTED, FLAGGED FOR THE HUMAN (per instruction #4):
+      The app SHIPS analytics + ad-attribution trackers (RUN 11: Firebase Analytics, Google Ads
+      On-Device Conversion, Apple AdServices) but NO privacy manifest declares NSPrivacyTracking
+      or ANY tracking domain, AND there is no NSUserTrackingUsageDescription (so no ATT prompt).
+      That is a plausible privacy-compliance discrepancy (App Store requires the declaration).
+      I did NOT emit a finding - findings stay 86. Human to decide whether this warrants one.
+    Android: registry-gated to platforms:['ios'] - verified against the real registry (visible on
+      iOS = true, Android = false). property_lists key absent on Android; endpoints/ips/secrets/
+      severity/finding-identities all identical.
+    Commit-ready: Y
+    Tests: 839 passed, 11 skipped.
 
 [ ] RUN 13 — Strings section + email FP filter (SHARED: both platforms)
     Files changed:

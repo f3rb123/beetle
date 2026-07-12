@@ -372,6 +372,13 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         if app_bundle:
             _analyze_embedded_frameworks(app_bundle, results)
 
+            # ── Property Lists (enumeration surface — emits NO findings) ─────
+            try:
+                from . import ios_plists
+                ios_plists.analyze(app_bundle, results)
+            except Exception:
+                log.exception("[plists] iOS property-list enumeration failed")
+
             # ── Tracker detection ────────────────────────────────────────────
             # MUST run AFTER _analyze_embedded_frameworks: it is what populates results["sdks"]
             # from the real Frameworks/ directory. Running earlier left the pod list EMPTY, so

@@ -926,6 +926,105 @@ export function AtsPanel({ results }) {
   )
 }
 
+// ───────────────────────────── Property Lists ─────────────────────────────
+// iOS-only enumeration surface. It REPORTS NOTHING NEW: ATS lives in its own section, the
+// Firebase keys are already INFO secrets, and the usage descriptions are in Info.plist &
+// Entitlements. This lists every plist (67 of 69 are BINARY in a typical bundle, decoded via
+// plistlib) and cross-links the security-relevant keys to where they are already reported.
+export function PropertyListsPanel({ results }) {
+  const pl = results.property_lists || {}
+  const plists = pl.plists || []
+  const pm = pl.privacy_manifests || {}
+  const [q, setQ] = useState('')
+  const withKeys = plists.filter(p => (p.security_keys || []).length)
+  const rows = plists.filter(p => !q || p.path.toLowerCase().includes(q.toLowerCase()))
+
+  if (!plists.length) return <EmptyState title="No property lists" body="No .plist files were found in this bundle." />
+
+  return (
+    <div>
+      <div className="ws-section__head">
+        <h1>Property Lists</h1>
+        <span className="ws-muted">every .plist in the bundle · binary and XML</span>
+      </div>
+
+      <div className="ws-metrics ws-section">
+        <Metric label="Property Lists" value={pl.count ?? 0} />
+        <Metric label="Binary (bplist00)" value={pl.binary_count ?? 0} sub="decoded, not read as text" />
+        <Metric label="With security keys" value={pl.with_security_keys ?? 0} />
+        <Metric label="Privacy Manifests" value={pm.count ?? 0} sub=".xcprivacy" />
+      </div>
+
+      {withKeys.length ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>Security-Relevant Keys</h2>
+          <div className="ios-usage-list">
+            {withKeys.map((p, i) => (
+              <div key={i} style={{ padding: '8px 0', borderBottom: '1px solid var(--ws-border, #2a2a2a)' }}>
+                <div className="ws-mono" style={{ fontSize: 12.5, fontWeight: 650 }}>{p.path}</div>
+                {(p.security_keys || []).map((k, j) => (
+                  <div key={j} style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'baseline', marginTop: 4 }}>
+                    <span className="ws-badge">{k.category}</span>
+                    <span className="ws-mono" style={{ fontSize: 12.5 }}>{k.key}</span>
+                    <span className="ws-mono ws-muted" style={{ fontSize: 12.5 }}>= {k.value}</span>
+                    <span className="ws-muted" style={{ fontSize: 12 }}>· {k.note}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>Security-Relevant Keys</h2>
+          <p className="ws-muted" style={{ fontSize: 12.5 }}>
+            No ATS config, custom URL schemes, or file-sharing keys declared in any plist.
+          </p>
+        </div>
+      )}
+
+      {pm.count ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>Privacy Manifests <span className="ws-muted">· {pm.count} .xcprivacy</span></h2>
+          <div style={{ fontSize: 12.5, marginBottom: 8 }}>
+            Declares tracking: <b>{pm.declares_tracking ? 'yes' : 'no'}</b>
+            {' · '}Tracking domains: <b>{(pm.tracking_domains || []).length || 'none declared'}</b>
+          </div>
+          <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ fontWeight: 620, fontSize: 12.5, marginBottom: 4 }}>Accessed API categories</div>
+              {(pm.accessed_api_types || []).map(([name, n], i) => (
+                <div key={i} className="ws-mono ws-muted" style={{ fontSize: 12 }}>{n}× {name.replace('NSPrivacyAccessedAPICategory', '')}</div>
+              ))}
+            </div>
+            <div>
+              <div style={{ fontWeight: 620, fontSize: 12.5, marginBottom: 4 }}>Collected data types</div>
+              {(pm.collected_data_types || []).map(([name, n], i) => (
+                <div key={i} className="ws-mono ws-muted" style={{ fontSize: 12 }}>{n}× {name.replace('NSPrivacyCollectedDataType', '')}</div>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="ws-card ws-card--pad ws-section">
+        <h2>All Property Lists <span className="ws-muted">· {plists.length}</span></h2>
+        <input className="ws-input" placeholder="Filter by path…" value={q} onChange={e => setQ(e.target.value)} style={{ marginBottom: 10 }} />
+        <div className="ws-scroll" style={{ maxHeight: 460, overflowY: 'auto' }}>
+          {rows.map((p, i) => (
+            <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '5px 0', borderBottom: '1px solid var(--ws-border, #2a2a2a)' }}>
+              <span className="ws-badge">{p.format}</span>
+              <span className="ws-mono" style={{ fontSize: 12.5, flex: 1, wordBreak: 'break-all' }}>{p.path}</span>
+              <span className="ws-muted" style={{ fontSize: 12 }}>{p.key_count} keys</span>
+              {(p.security_keys || []).length ? <span className="ws-badge">{p.security_keys.length} sec</span> : null}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function ManifestPanel({ results }) {
   if (results.platform === 'ios') return <IosApplicationConfig results={results} />
   const info = results.app_info || {}
