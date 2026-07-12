@@ -26,8 +26,16 @@ def _findings(results: dict) -> list:
 
 
 def _real_findings(results: dict) -> list:
-    """App findings minus the synthesized attack-chain pseudo-findings."""
-    return [f for f in _findings(results) if not f.get("is_attack_chain")]
+    """App findings for the DEFAULT (non-verbose) summaries — minus the synthesized
+    attack-chain pseudo-findings AND minus verbose_only items.
+
+    verbose_only findings (JNI static-method inventory from the ELF path, shallow iOS taint)
+    are low-signal inventory retained for the full export but deliberately kept OUT of the
+    default high-signal view — the PDF already excludes them (pdf_generator.py:769). Without
+    this gate they could be picked as the CISO "most critical issue" or counted in the
+    developer buckets, leaking a verbose-only item into the default summary (RUN 16a)."""
+    return [f for f in _findings(results)
+            if not f.get("is_attack_chain") and not f.get("verbose_only")]
 
 
 def _sev_of(f: dict) -> str:

@@ -1359,10 +1359,15 @@ def _check_app_flags(app_elem, results):
 
 # ─── Permissions ─────────────────────────────────────────────────────────────
 def _analyze_permissions(apk, results):
-    perms = apk.get_permissions() or []
+    # androguard's apk.get_permissions() returns SET-DERIVED output, so its order changes on
+    # every process (PYTHONHASHSEED). Sort once here (L3): the whole permissions surface —
+    # all / classified / dangerous, and everything derived from iterating them — is then
+    # deterministic and run-to-run reproducible, without changing the SET of permissions.
+    perms = sorted(apk.get_permissions() or [])
     results["permissions"]["all"] = perms
 
-    # Classify every permission with status + description
+    # Classify every permission with status + description (iterating the sorted list, so
+    # classified/dangerous inherit the same stable order).
     classified = []
     dangerous = []
     for p in perms:

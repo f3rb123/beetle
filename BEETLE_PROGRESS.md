@@ -17,12 +17,23 @@ apk.get_permissions() at android_analyzer.py:1353). Compare these as SETS / mult
     permissions (all / classified / dangerous), and any other set-derived collection.
 Concretely:  sorted(json.dumps(x, sort_keys=True) for x in lst)  on both sides, then compare.
 
-ALSO MASK VOLATILE FIELDS before any byte-compare: timestamp / scan_time / generated_at /
-created_at / updated_at. evidence_bundle carries a scan-time timestamp, so two scans of the
-SAME apk on the SAME build are never byte-equal.
-AND: Android findings still contain residual run-to-run nondeterminism even after masking
-(see L4) - a rejected evidence candidate's line number moves between runs. Prove any findings
-delta with a SAME-BUILD DOUBLE SCAN before attributing it to your change.
+ALSO MASK VOLATILE FIELDS before any byte-compare (all construction-varying, NOT analysis
+nondeterminism): timestamp / scan_time / generated_at / created_at / updated_at; scan-id UUIDs
+in filesystem paths (/tmp/cortex/scans/<uuid>/...); and TIMING metrics
+(duration_ms / total_duration_ms / parallel_phase_ms).
+
+*** UPDATED AT RUN 16 — the byte-identical guarantee is now STRONG, with ONE narrow tolerance ***
+After RUN 16 fixed L3 (permission order), Android is byte-stable EXCEPT:
+  TOLERATE: +/-1 line drift on REJECTED (non-primary) LIBRARY-candidate evidence, and ONLY there.
+    Cause: jadx decompiles the same APK to byte-different source across runs (proven: two
+    ViewPager2.java decompiles had different md5 AND different line counts, 1121 vs 1122), so a
+    match lands on line 428 vs 429. Out of Beetle's control.
+  MUST STAY BYTE-STABLE (tolerance does NOT extend here): primary evidence, finding identities,
+    severity_summary, score, grade, and permissions. If any of THOSE move, it is a real bug.
+  iOS has an analogous ENVIRONMENTAL variance: domain_intel geo (live DNS/geo of CDN IPs, e.g.
+    Mountain View vs Bangkok) — same class as jadx, network-driven, not analysis. Exclude
+    domain_intel city/country/geo from iOS byte-diffs; iOS analysis output (findings/score/
+    primaries) is otherwise fully deterministic (no jadx on the iOS path).
 
 WHY THIS RULE EXISTS: RUN 6's Android diff reported "permissions identical: False" and it was
 a PHANTOM failure — same 5 permissions, different order, cause proven pre-existing (3 container
@@ -932,12 +943,43 @@ NO code change and show the order moves on its own). Only then is it safe to pas
 
 ═══════════════ TIER 4 — PENDING ANDROID + WEB/PDF ═══════════════
 
-[ ] RUN 16 — Android 5.1a verbose summary gate (SHARED: report_summaries.py)
-    Files changed:
-    Android diff (only intended gating): 
-    Acceptance: 
-    Commit-ready:
-    Resume notes:
+[x] RUN 16 - Android determinism + verbose gate (SHARED; 3 intended changes, one review)  DONE
+    INVERTED-GUARD DISCIPLINE (Android output is SUPPOSED to change): wrote the expected delta
+    per change BEFORE regenerating; every byte of Android movement had to map to the list.
+    CHANGE 1 - verbose_only gate (report_summaries.py _real_findings). verbose_only findings
+      (JNI inventory, shallow iOS taint) no longer leak into the DEFAULT CISO/developer summaries
+      (the PDF already excluded them). EXPECTED + OBSERVED delta: ZERO on both platforms - neither
+      app produces a verbose_only finding, so the gate is defensive (0 to gate here).
+    CHANGE 2 - L3 sorted(perms) at android_analyzer.py:1363. *** THE HEADLINE RESULT ***
+      permissions.all/classified/dangerous are now BYTE-STABLE across two same-build scans
+      (previously flipped on every restart - PYTHONHASHSEED set iteration). VERIFIED byte-identical
+      run-to-run. L3 RESOLVED.
+    CHANGE 3 - L4 candidate sort in _candidates_from_finding (engine.py). Correct + safe, but
+      INSUFFICIENT - and the inverted guard CAUGHT that:
+      *** L4's LOGGED ROOT CAUSE WAS WRONG. *** Not candidate ordering. PROVEN root: jadx
+      decompiles the same APK to BYTE-DIFFERENT source across runs - two ViewPager2.java
+      decompiles had different md5 AND different line counts (1121 vs 1122), so a match lands on
+      line 428 vs 429. No Beetle-side sort can fix the underlying line DATA. I did NOT claim the
+      byte-equality payoff for the part that is not achievable.
+    RECLASSIFIED L4: jadx decompiler nondeterminism, out of scope; candidate sort kept as the
+      correct partial mitigation (removes candidate-ORDER nondeterminism).
+    PRECISE ANDROID SCOPE (2 same-build runs, uuid+timestamp masked): 28 differing leaves =
+      24 timing metrics (duration_ms etc - construction-varying) + 1 rejected-candidate LINE
+      (android_obfuscation_missing / ViewPager2.java 428 vs 429, jadx). Finding identities,
+      severity_summary, score (35/F), permissions, primary evidence: ALL byte-stable.
+    METHODOLOGY UPDATED (narrowed, not loose): Android diffs EXCLUDE timestamps + scan-id UUIDs +
+      timing metrics; TOLERATE +/-1 line drift on REJECTED library-candidate evidence ONLY;
+      everything that affects a finding must stay byte-stable. L3 retired the permission-order
+      workaround; the jadx tolerance is the one narrow residual.
+    iOS HELD (L4 sort is in SHARED engine.py - proven not to shift iOS): 14 findings, 92/B, every
+      finding's PRIMARY evidence (file+line+snippet+binary) unchanged, evidence_selection content
+      identical (order-insensitive). iOS domain_intel geo (Mountain View vs Bangkok for CDN IPs)
+      is pre-existing live-DNS/geo variance - environmental, same class as jadx, untouched by
+      these changes.
+    Files: backend/report/report_summaries.py, backend/analyzers/android_analyzer.py,
+      backend/analyzers/evidence_selection/engine.py.
+    Commit-ready: Y
+    Tests: 889 passed, 11 skipped.
 
 [ ] RUN 17 — Android 5.1b promote privacy taint finding (Android)
     Files changed:
@@ -974,7 +1016,8 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     platform-gated) and pass the Android binary set.
     NOT a regression introduced by RUN 4 — pre-existing, merely unmasked by it.
 
-[ ] L4 - Android FINDINGS are nondeterministic run-to-run (PRE-EXISTING, deeper than L3).
+[~] L4 - Android FINDINGS run-to-run drift — RECLASSIFIED in RUN 16: jadx decompiler
+    nondeterminism (NOT candidate ordering). Beetle-side mitigation applied; residual out of scope.
     FOUND during RUN 8's Android guard. Two scans of the SAME InsecureShop.apk on the SAME
     build, code byte-identical, produce different findings JSON:
         evidence_selection.rejected[...] for "Exported Intent to JS-Enabled WebView"
@@ -987,13 +1030,21 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     WHY IT MATTERS: same reason as L3, one level deeper - literal "byte-identical Android
     output" is NOT achievable, so a naive byte-diff always fails and can be misread as a
     regression. The guard must mask timestamps AND tolerate this rejected-candidate jitter.
-    LIKELY CAUSE: candidate collection walks a dict/set or races the parallel scan pool, so two
-    equal-scoring match lines in the same file swap order. NOT yet root-caused.
-    OWNER: RUN 16/17. Fix = make candidate collection deterministic in
-    evidence_selection/engine.py _candidates_from_finding (:95) — sort candidates by
-    (file_path, line) before selection.
+    ROOT CAUSE (RUN 16, PROVEN — the earlier 'candidate ordering' guess was WRONG): jadx
+    decompiles the same APK to BYTE-DIFFERENT source across runs. The two ViewPager2.java
+    decompiles had different md5 and different LINE COUNTS (1121 vs 1122), so the same regex
+    match lands on line 428 in one run and 429 in the other. This is decompiler nondeterminism,
+    not anything in Beetle's candidate/evidence code — no Beetle-side sort can fix the underlying
+    line DATA.
+    MITIGATION APPLIED (kept, correct-but-partial): _candidates_from_finding (engine.py) now
+    sorts candidates by (file_path, line), removing any candidate-ORDER nondeterminism. Residual
+    is limited to the LINE VALUE of rejected library-candidate evidence (1 leaf on this app:
+    android_obfuscation_missing / ViewPager2.java).
+    NOT FIXED (out of scope): forcing jadx single-threaded/deterministic would cost scan time and
+    is a decompiler concern, not RUN 16's. Methodology now TOLERATES this one narrow drift (see
+    the methodology section). Primary evidence / identities / severity / score stay byte-stable.
 
-[ ] L3 — Android permission ORDER is nondeterministic across processes (PRE-EXISTING).
+[x] L3 — Android permission ORDER nondeterministic — RESOLVED in RUN 16 (sorted(perms)).
     FOUND during RUN 6's Android diff. results["permissions"]["all"/"classified"/"dangerous"]
     come back in a DIFFERENT ORDER on every backend restart, with byte-identical code and the
     same APK. PROVEN, not assumed: restarted the container 3x with no rebuild and got 3

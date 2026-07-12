@@ -133,6 +133,14 @@ def _candidates_from_finding(f: dict, platform: str = "android",
         mname = _manifest_filename(platform)
         if not any(c.file_path.replace("\\", "/").lower().endswith(mname.lower()) for c in out):
             add(mname, f.get("line") or 0, f.get("snippet") or "", "manifest")
+    # Deterministic candidate order (L4). file_evidence / merged_locations arrive in a
+    # nondeterministic order (built from sets upstream), and the selection sort in select() is
+    # STABLE and does NOT tiebreak on line — so two candidates in the same file differing only
+    # by line (e.g. ViewPager2.java 428 vs 429) kept their nondeterministic input order, making
+    # evidence_selection.rejected/supporting change run-to-run. Sorting here by (file, line)
+    # makes the stable sort's output reproducible. Does not change WHICH candidates exist, and
+    # never overrides a real score difference — only resolves exact ties deterministically.
+    out.sort(key=lambda c: (c.file_path.replace("\\", "/").lower(), _int(c.line)))
     return out
 
 
