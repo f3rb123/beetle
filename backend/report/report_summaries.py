@@ -96,19 +96,31 @@ def build_ciso_summary(results: dict) -> dict:
     overall_posture = ". ".join(posture_bits) + "."
 
     # Most critical issue — prefer the top correlated attack chain, else worst finding.
+    # Severity guard: an item below HIGH is NOT a "most critical issue". On a clean report
+    # (0 crit / 0 high) the top item is whatever ranked first — a LOW — and headlining it
+    # as critical misrepresents the app's posture to an executive. Applies to BOTH branches.
     most_critical = ""
+    top, top_sev = None, "info"
     if chains:
         top = chains[0]
-        most_critical = top.get("title", "")
-        if top.get("impact"):
-            most_critical = f"{most_critical} — {top['impact']}"
+        top_sev = str(top.get("severity") or "info").lower()
     else:
         ranked = sorted(_real_findings(results), key=lambda f: _SEV_RANK.get(_sev_of(f), 4))
         if ranked:
             top = ranked[0]
-            most_critical = top.get("title", "")
+            top_sev = _sev_of(top)
+
+    if top:
+        title = top.get("title", "")
+        if _SEV_RANK.get(top_sev, 4) <= _SEV_RANK["high"]:
+            most_critical = title
             if top.get("impact"):
                 most_critical = f"{most_critical} — {top['impact']}"
+        else:
+            most_critical = (
+                f"No critical or high-severity issues. "
+                f"Most notable: {title} ({top_sev.upper()})."
+            )
 
     # Business risks — concrete, signal-driven (no generic filler).
     business_risks: list[dict] = []
