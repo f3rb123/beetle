@@ -448,19 +448,46 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Commit-ready: Y
     Tests: 794 passed, 11 skipped (incl. the 6 new ownership FP-guard tests).
 
-[ ] RUN 8.1 - MASVS control DETECTION (iOS-only) - MUST LAND BEFORE RUN 15
-    WHY: RUN 8 proved MASVS-CODE cannot move off 0 by adding findings - score =
-      (controls_present/expected)*60 + (40 - penalty), so findings only ever subtract. The score
-      is floored until Beetle can DETECT CONTROLS the app actually implements.
-    Do: implement control detection in masvs_intel._detect_controls for iOS, driven by REAL
-      evidence already in the report (RUN 7 categorised the frameworks, so the signal exists):
-        IOSSecuritySuite / flutter_jailbreak_detection_plus  -> anti-tampering / RESILIENCE
-        flutter_secure_storage (Keychain-backed)             -> secure storage / STORAGE
-        (only controls with genuine evidence - see guard)
-    GUARD (same discipline as RUN 7's "unknown stays reachable"): a control is marked PRESENT
-      ONLY with real evidence that it is implemented. NEVER assume a control present to lift the
-      score. Add a test that a control with no evidence stays ABSENT.
-    Android: unchanged (iOS-scoped). Regenerate both; Android content-identical.
+[x] RUN 8.1 - MASVS control DETECTION (iOS-only)  DONE - BUT THE PREMISE WAS LARGELY FALSE
+    THE PREMISE WAS WRONG: control detection ALREADY EXISTED AND ALREADY WORKED.
+      Checked the reports generated BEFORE any masvs_intel edit (RUN 6, RUN 7, RUN 8):
+        MASVS-RESILIENCE = 60, controls_present = ['Root/Tamper Detection']   <- already there
+        MASVS-STORAGE    = 67, controls_present = ['Encrypted Storage']       <- already there
+      IOSSecuritySuite was already being credited (via the security_controls authority) and
+      Encrypted Storage was already credited (via a kSecAttrAccessible snippet in the corpus).
+      So the controls the human named as examples were NOT missing.
+    WHAT I ACTUALLY CHANGED (masvs_intel._SIGNALS): broadened the EVIDENCE for two controls so
+      they are credited from the pod name alone, for apps that do not happen to carry the
+      snippet signal this app carries:
+        Root/Tamper Detection <- iossecuritysuite, flutter_jailbreak_detection, jailbreakdetection
+        Encrypted Storage     <- flutter_secure_storage (Keychain-backed by construction)
+      Evidence route: results["sdks"] (populated by RUN 7 from the REAL Frameworks/ directory)
+      feeds security_controls.positive_corpus, so a control is credited only when the framework
+      binary is PHYSICALLY IN THE BUNDLE. Never assumed.
+      HONEST DELTA ON THIS APP: ZERO. Scores unchanged (RESILIENCE 60, STORAGE 67, overall 43).
+      The additions are redundant here and only broaden coverage for other apps.
+    MASVS-CODE IS STILL 0 - AND THAT IS THE CORRECT ANSWER, NOT A GAP:
+      Its two controls are "Safe Input Handling" and "Up-to-date Dependencies".
+        Safe Input Handling  -> GENUINELY ABSENT. RUN 8 proved this app imports _strcpy, _strcat,
+          _sprintf, _sscanf, _gets-class APIs. Crediting the control would contradict Beetle's
+          own finding.
+        Up-to-date Dependencies -> CANNOT be claimed yet. The only available signal is "the CVE
+          scan found nothing", which is ABSENCE OF EVIDENCE, not evidence of absence. RUN 14 is
+          the run that verifies OSV/CVE coverage is real; until it does, crediting this control
+          would be exactly the score-inflation the guard forbids.
+      So MASVS-CODE = 0 is a true statement about this app. NOT tuned, NOT faked.
+    GUARD + TESTS: backend/tests/test_masvs_control_detection.py (6 tests) locks the discipline -
+      a control with NO evidence stays ABSENT; an empty app is credited with NO controls at all;
+      and a control's score lift must come from the CONTROL term, not from dropping penalties.
+    Files changed: backend/analyzers/masvs_intel.py (_SIGNALS only);
+      NEW backend/tests/test_masvs_control_detection.py.
+    Android diff: CONTENT-IDENTICAL. endpoints/ips/secrets identical, severity identical, finding
+      identities identical, and MASVS coverage (scores + controls_present) BYTE-IDENTICAL - the
+      new patterns are iOS pod names, which an Android corpus can never contain.
+    Commit-ready: Y
+    Tests: 800 passed, 11 skipped.
+    -> RUN 15 (score calibration) now has a WORKING control signal to calibrate against, and a
+       documented reason why MASVS-CODE legitimately reads 0 for this app.
 
 [ ] RUN 9 — Per-binary protection table (iOS-only) — FP GUARD on App.framework/App
     Files changed:

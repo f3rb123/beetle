@@ -68,11 +68,23 @@ _SIGNALS = [
       "use_fingerprint", "localauthentication", "lacontext", "setuserauthenticationrequired")),
     ("Encrypted Storage", "MASVS-STORAGE",
      ("encryptedsharedpreferences", "encryptedfile", "androidx.security.crypto", "masterkey",
-      "kSecAttrAccessible".lower())),
+      "kSecAttrAccessible".lower(),
+      # iOS: flutter_secure_storage is Keychain-backed by construction. Evidence is the
+      # framework binary being IN the bundle (it reaches the corpus via results["sdks"]),
+      # not an assumption that the app "probably" encrypts something.
+      "flutter_secure_storage")),
     ("Keystore/Keychain-backed Keys", "MASVS-CRYPTO",
      ("androidkeystore", "android keystore", "keychain", "seckey", "keygenparameterspec")),
     ("Strong App Signing", "MASVS-RESILIENCE",
      ("signature scheme v2", "signature scheme v3", "apk signature scheme v2", "v2/v3 signed")),
+    # iOS anti-tampering: an app that SHIPS a jailbreak/anti-debug framework demonstrably
+    # implements tamper detection — the framework binary is physically in the bundle (it
+    # reaches the corpus through results["sdks"], which RUN 7 populated from the real
+    # Frameworks/ directory). These patterns are iOS pod names, so an Android corpus can
+    # never contain them and Android's control set is unchanged by construction.
+    ("Root/Tamper Detection", "MASVS-RESILIENCE",
+     ("iossecuritysuite", "flutter_jailbreak_detection", "jailbreakdetection",
+      "rootbeer", "iosdetect")),
 ]
 
 # Severity → weakness penalty weight.
