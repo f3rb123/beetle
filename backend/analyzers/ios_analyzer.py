@@ -747,6 +747,14 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     # and promote it into the legacy location fields so every surface shows the right
     # file. Runs BEFORE attack chains so chains reference corrected primaries. Mirror
     # of the Android placement. ──
+    # A finding on a BINARY plist carries a raw-bplist "line" that is a parse artifact (e.g.
+    # line 3), meaningless for the XML the source viewer actually shows. Re-map it to the
+    # decoded-XML line of the finding's own value so View Code scrolls to the real key. Runs
+    # BEFORE evidence_selection so the corrected line flows through the whole pipeline.
+    try:
+        _remap_decodable_plist_finding_lines(app_bundle, results, tmpdir)
+    except Exception:
+        log.exception("[plist] finding-line remap failed")
     try:
         from . import evidence_selection
         evidence_selection.annotate(results, platform="ios")
@@ -1183,17 +1191,95 @@ def _iter_macho_binaries(app_bundle: str):
                 return
 
 
-def _record_binary_format_files(app_bundle: str, results: dict, base_dir: str = "") -> None:
-    """Record every file in the bundle that is BINARY-FORMAT, by magic bytes.
+def _remap_decodable_plist_finding_lines(app_bundle: str, results: dict, base_dir: str = "") -> None:
+    """For a finding whose evidence is a DECODABLE binary plist, set its line/snippet to the
+    decoded-XML line of the finding's own value — so View Code scrolls to the real key instead
+    of the meaningless raw-bplist line. Renders the same XML the file server shows (plistlib
+    FMT_XML), so the line the finding declares matches the line the viewer displays.
 
-    Mach-O binaries and BINARY plists (bplist00) both carry "line numbers" that are not
-    source lines: a Mach-O match indexes the extracted-strings listing, and a binary plist
-    has no text lines at all (GoogleService-Info.plist reports line 3 with an empty
-    snippet). The evidence view consumes this set so neither is ever rendered as file:line.
-    Detected by content, not by extension — an IPA's Info.plist may be XML or binary.
+    Purely a location correction: never changes severity, ownership, category or finding count.
+    """
+    import plistlib
+    findings = results.get("findings") or []
+    if not app_bundle or not findings:
+        return
+    _xml_cache: dict[str, list] = {}
+
+    def _xml_lines(rel: str):
+        if rel in _xml_cache:
+            return _xml_cache[rel]
+        # Finding file_path is relative to the scan extraction root (base_dir/tmpdir).
+        if base_dir and not os.path.isabs(rel):
+            full = os.path.join(base_dir, rel)
+        elif os.path.isabs(rel):
+            full = rel
+        else:
+            full = os.path.join(app_bundle, rel)
+        lines = None
+        try:
+            with open(full, "rb") as f:
+                if f.read(8) == b"bplist00":
+                    f.seek(0)
+                    xml = plistlib.dumps(plistlib.load(f), fmt=plistlib.FMT_XML).decode("utf-8", "replace")
+                    lines = xml.split("\n")
+        except Exception:
+            lines = None
+        _xml_cache[rel] = lines
+        return lines
+
+    for f in findings:
+        fp = str(f.get("file_path") or "")
+        if not fp.lower().endswith(".plist"):
+            continue
+        lines = _xml_lines(fp)
+        if not lines:
+            continue
+        # Anchor tokens = the value carried in the finding (title tail after an em/en dash, or
+        # the snippet). Search the decoded XML for the most specific one.
+        title = str(f.get("title") or "")
+        cand = []
+        for sep in (" — ", " – ", " - ", ": "):
+            if sep in title:
+                cand.append(title.split(sep, 1)[1].strip())
+        if f.get("snippet"):
+            cand.append(str(f["snippet"]).strip())
+        cand = [c for c in cand if len(c) >= 4]
+        hit = None
+        for token in cand:
+            for i, line in enumerate(lines, 1):
+                if token in line:
+                    hit = (i, line.strip())
+                    break
+            if hit:
+                break
+        if hit:
+            f["line"] = hit[0]
+            f["snippet"] = hit[1][:240]
+        else:
+            # No anchor found — the raw bplist line is still an artifact, so clear it and let
+            # the viewer fall back to content search rather than scroll to a wrong line.
+            f["line"] = 0
+
+
+def _record_binary_format_files(app_bundle: str, results: dict, base_dir: str = "") -> None:
+    """Record every file in the bundle that is OPAQUE BINARY — no viewable source.
+
+    The evidence view consumes this set to render a "binary" card (hiding View Source) instead
+    of file:line, so it must contain ONLY files a reader genuinely cannot view:
+
+      * Mach-O binaries — a rule match indexes the extracted-strings listing, not a source line.
+      * A binary plist ONLY IF plistlib cannot decode it. A DECODABLE bplist is VIEWABLE: the
+        file server (decompiler._maybe_decode_plist) renders it as readable XML, so a finding on
+        it (e.g. cloud_firebase_storage_bucket on GoogleService-Info.plist) must show that source,
+        NOT a "Binary Property List" card. Only a non-decodable blob (e.g. embedded.mobileprovision,
+        a CMS/PKCS#7 container) is truly opaque. This mirrors the file server exactly — one
+        definition of "viewable", so the finding card and the source viewer never disagree.
+
+    Detected by content, not extension — an IPA's Info.plist may be XML or binary.
     """
     if not app_bundle or not os.path.isdir(app_bundle):
         return
+    import plistlib
     found: list[str] = []
     for root, _dirs, files in os.walk(app_bundle):
         for fn in files:
@@ -1205,8 +1291,16 @@ def _record_binary_format_files(app_bundle: str, results: dict, base_dir: str = 
                     head = f.read(8)
             except OSError:
                 continue
-            if head[:4] in _MACHO_MAGIC or head == b"bplist0" + b"0":
+            if head[:4] in _MACHO_MAGIC:
                 found.append(relativize_path(full, base_dir) if base_dir else full)
+            elif head == b"bplist00":
+                # A bplist that decodes is viewable (rendered as XML) — not binary evidence.
+                try:
+                    with open(full, "rb") as f:
+                        plistlib.load(f)
+                    continue  # decodable -> viewable, skip
+                except Exception:
+                    found.append(relativize_path(full, base_dir) if base_dir else full)
     if found:
         results["binary_evidence_files"] = sorted(set(found))
 
