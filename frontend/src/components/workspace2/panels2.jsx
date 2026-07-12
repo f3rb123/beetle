@@ -241,8 +241,14 @@ export function AndroidPosturePanel({ results }) {
 // ───────────────────────────── Taint Flows ───────────────────────────────
 export function TaintFlowPanel({ results, onOpenCode }) {
   // Prefer taint_graph (carries file/line/risk); fall back to taint_flows.
+  // The card severity MUST be the CALIBRATED risk (flow.risk), so it agrees with the finding
+  // severity a reader is verifying against — calibrate_flow_severity is explicit that every
+  // consumer reads flow.risk, never the raw sink severity. The old `sink_sev || risk` inverted
+  // this: e.g. getString->startActivity is sink_sev=medium but calibrated risk=low, so the card
+  // showed MEDIUM while the model says LOW. Prefer the calibrated value; sink_sev is only a
+  // last-resort fallback for a legacy flow that lacks risk.
   const graph = results.taint_graph || []
-  const flat = (results.taint_flows || []).map(t => ({ ...t, risk: t.sink_sev || t.risk }))
+  const flat = (results.taint_flows || []).map(t => ({ ...t, risk: t.risk || t.sink_sev }))
   const flows = graph.length ? graph : flat
   const [q, setQ] = useState('')
   const [risk, setRisk] = useState('all')

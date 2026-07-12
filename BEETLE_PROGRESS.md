@@ -1008,11 +1008,32 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Commit-ready: Y
     Tests: 893 passed, 11 skipped.
 
-[ ] RUN 18 — Web/PDF parity (P1 panels2.jsx, P2 panels.jsx)
-    Files changed:
-    Acceptance: 
-    Commit-ready:
-    Resume notes:
+[x] RUN 18 — Web/PDF parity (frontend; presentation only)  DONE
+    PRESENTATION-ONLY: only frontend/panels2.jsx changed. No analyzer/report file touched, so
+    findings (46 Android / 14 iOS) and scores (35/F, 92/B) CANNOT have moved (verified by git
+    diff scope). Frontend build passes; evidence-model tests pass (0 fail).
+    P1 — taint-card verifiability:
+      VERIFIED the new RUN 17 TAINT-STORAGE card renders correctly from taint_graph: severity
+        LOW (calibrated), title 'User Input -> Storage', timeline Source=Intent.getStringExtra /
+        Sink=SharedPrefs.putString, call chain PrivateActivity.onCreate -> SharedPreferences$
+        Editor.putString. A reader can verify the flow.
+      FIXED a latent verifiability bug in the taint_flows FALLBACK path: it computed
+        `risk: t.sink_sev || t.risk`, preferring the RAW sink severity over the CALIBRATED risk.
+        calibrate_flow_severity is explicit that every consumer reads flow.risk. Proven on live
+        data: getString->startActivity is sink_sev=medium but calibrated risk=low — the fallback
+        would show MEDIUM while the model says LOW. Now `t.risk || t.sink_sev` (calibrated first).
+        No CURRENT render change: taint_graph is populated on this app and already carries the
+        correct calibrated risk (sink_sev=None), so the buggy fallback was not exercised — the
+        fix hardens it so both paths agree.
+    P2 — verbose toggle: CONFIRMED already-correct, no change needed. panels.jsx:323 gates
+      `f.verbose_only` — the SAME class elf_analyzer/ios_analyzer set and RUN 16's backend gate
+      excludes from the default summaries. Hidden by default, shown in the expanded/Suppressed
+      view — mirrors the backend's two-tier (default vs full) model exactly. Did NOT invent
+      speculative UI against the absent 'prior session spec' (anti-over-build).
+    No registry change; TaintFlowPanel is platform-neutral, so no cross-platform leak.
+    NOTE: frontend change needs a `docker compose build frontend` to go live (baked, not mounted).
+    Commit-ready: Y
+    Tests: frontend build OK; evidence-model tests pass.
 
 [ ] RUN 19 — Hygiene: regex_sast base audit (MEASURE ONLY)
     Files changed (should be none — report only):
