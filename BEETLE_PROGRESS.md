@@ -1035,83 +1035,28 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Commit-ready: Y
     Tests: frontend build OK; evidence-model tests pass.
 
-[ ] RUN 19 — Hygiene: regex_sast base audit (MEASURE ONLY)
-    Files changed (should be none — report only):
-    Acceptance: 
-    Commit-ready:
-    Resume notes:
-
-═══════════════ LATENT / CROSS-PLATFORM (raised mid-run, not yet actioned) ═══════════════
-
-[ ] L1 — RUN 4's Android twin: does Android render a string-index as a source line?
-    RUN 4 fixed this for iOS ONLY (gated on platform == "ios") because widening it would have
-    broken the Android byte-diff that RUN 4 is required to preserve. But the same root cause
-    plausibly exists on Android: classes.dex, resources.arsc and lib/**/*.so are binary too,
-    and if any analyzer scans them as an extracted-strings listing, its "line" is a string
-    index, not a source line — exactly the iOS bug.
-    OWNER: check during RUN 16/17 (Android correctness), where an Android output delta is in
-    scope and expected. Concretely: look for findings whose primary file is .dex/.arsc/.so and
-    that carry a non-zero line, and see whether _collect_android_files string-dumps them the way
-    _collect_ios_files does (code_analyzer.py:552-557). The Android analogue is
-    _collect_android_files (code_analyzer.py:455) — check whether it string-dumps .dex/.so with a
-    line index. If so, reuse _is_binary_evidence / _as_binary_evidence (already written,
-    platform-gated) and pass the Android binary set.
-    NOT a regression introduced by RUN 4 — pre-existing, merely unmasked by it.
-
-[~] L4 - Android FINDINGS run-to-run drift — RECLASSIFIED in RUN 16: jadx decompiler
-    nondeterminism (NOT candidate ordering). Beetle-side mitigation applied; residual out of scope.
-    FOUND during RUN 8's Android guard. Two scans of the SAME InsecureShop.apk on the SAME
-    build, code byte-identical, produce different findings JSON:
-        evidence_selection.rejected[...] for "Exported Intent to JS-Enabled WebView"
-        -> androidx/viewpager2/widget/ViewPager2.java  line 428  (run X)
-        -> androidx/viewpager2/widget/ViewPager2.java  line 429  (run Y)
-    A REJECTED candidate (file_score -89), not the primary - so no user-visible severity or
-    primary-evidence change. Content that matters (severity_summary, endpoints, ips, secrets,
-    permissions, finding identities) is identical.
-    Separately, evidence_bundle.timestamp differs every scan by construction (scan time).
-    WHY IT MATTERS: same reason as L3, one level deeper - literal "byte-identical Android
-    output" is NOT achievable, so a naive byte-diff always fails and can be misread as a
-    regression. The guard must mask timestamps AND tolerate this rejected-candidate jitter.
-    ROOT CAUSE (RUN 16, PROVEN — the earlier 'candidate ordering' guess was WRONG): jadx
-    decompiles the same APK to BYTE-DIFFERENT source across runs. The two ViewPager2.java
-    decompiles had different md5 and different LINE COUNTS (1121 vs 1122), so the same regex
-    match lands on line 428 in one run and 429 in the other. This is decompiler nondeterminism,
-    not anything in Beetle's candidate/evidence code — no Beetle-side sort can fix the underlying
-    line DATA.
-    MITIGATION APPLIED (kept, correct-but-partial): _candidates_from_finding (engine.py) now
-    sorts candidates by (file_path, line), removing any candidate-ORDER nondeterminism. Residual
-    is limited to the LINE VALUE of rejected library-candidate evidence (1 leaf on this app:
-    android_obfuscation_missing / ViewPager2.java).
-    NOT FIXED (out of scope): forcing jadx single-threaded/deterministic would cost scan time and
-    is a decompiler concern, not RUN 16's. Methodology now TOLERATES this one narrow drift (see
-    the methodology section). Primary evidence / identities / severity / score stay byte-stable.
-
-[x] L3 — Android permission ORDER nondeterministic — RESOLVED in RUN 16 (sorted(perms)).
-    FOUND during RUN 6's Android diff. results["permissions"]["all"/"classified"/"dangerous"]
-    come back in a DIFFERENT ORDER on every backend restart, with byte-identical code and the
-    same APK. PROVEN, not assumed: restarted the container 3x with no rebuild and got 3
-    different orders (INTERNET-first, WAKE_LOCK-first, INTERNET-first-but-different-tail).
-    Two scans inside ONE process always agree — classic PYTHONHASHSEED-dependent set iteration.
-    ROOT CAUSE: android_analyzer.py:1362 `perms = apk.get_permissions()` (RE-ANCHORED 2026-07-12;
-    was :1353 before RUN 13 added lines) — androguard returns set-derived, unsorted output,
-    stored as-is at :1363.
-    WHY IT MATTERS: (a) it makes any report diff / scan-compare feature show phantom changes;
-    (b) it partially undermines the "byte-identical Android output" methodology this whole plan
-    relies on — content is stable, ORDER is not. Every Android diff so far compared endpoints /
-    ips / findings / severity / secrets, which ARE stable; permissions were first compared in
-    RUN 6 and is where this surfaced.
-    FIX (one line, but it CHANGES Android output ordering, so it is out of RUN 6's no-delta
-    scope): sort deterministically at android_analyzer.py:1363, e.g.
-        results["permissions"]["all"] = sorted(perms)
-    and keep `classified` derived in that same sorted order.
-    OWNER: RUN 16/17 (Android correctness), where an intentional Android delta is in scope.
-
-[ ] L2 — RUN 4 acceptance clause "file-resolved finding highlights the correct line" is
-    DEFERRED-UNTESTABLE, *not* passed. A Flutter release IPA ships no text source, so no
-    positive case exists in this corpus: the only file-resolved finding WAS the binary plist
-    (now correctly binary evidence). No line-remapping bug was found or fixed. RE-TEST this
-    clause when a Swift/ObjC-source app enters the corpus. Do not mark it passed on the
-    strength of the iOS report alone.
+[x] RUN 19 — Hygiene: regex_sast base audit (MEASURE ONLY)  DONE — REPORT ONLY, no code change
+    Deliverable: <scratchpad>/RUN19_regex_sast_audit.md (report artifact; NOT committed to repo).
+    Scope: code_rules.py CODE_RULES (55 Android) + IOS_CODE_RULES (26 iOS) = 81 base regex rules.
+      (backend/analyzers/sast/ is the Semgrep adapter — not regex rules, out of scope.)
+    METHOD: empirical, not pattern-shape — ranked by ACTUAL match breadth (merged_locations) on the
+      live iOS(14)/Android(46) scans, since shape heuristics over-flag precise rules.
+    8 EMPIRICALLY OVER-BROAD rules (all currently INFO/library-owned after RUN 15 demotion, so they
+      do NOT inflate the score — cost is EVIDENCE NOISE + the L4 jadx carrier):
+        android_reflection (228 locs), android_log_debug (181), android_obfuscation_missing (125),
+        android_process_death (41), android_insecure_random (26), android_print_stack_trace (12),
+        android_content_provider_no_permission (10), ios_jailbreak_detection (10).
+    2 ID/PATTERN MISMATCHES (correctness): android_process_death (pattern is deserialization),
+      android_content_provider_no_permission (pattern is usage, not a missing-permission gap).
+    Proposals written per rule (tighten/boundary/app-code-only/rename) — PROPOSALS ONLY, not applied.
+      Highest-value: obfuscation_missing (retires L4 residual + kills 125 locs); reflection+log_debug
+      (409 combined matches); the 2 mislabels.
+    Also recorded the rules the shape-heuristic flagged that are ACTUALLY FINE (precise cipher/exec/
+      credential rules) so a follow-up does not 'fix' them.
+    NO BEHAVIOR CHANGE: no rule/pattern/finding touched. git working tree CLEAN except this progress
+      line. Findings unchanged: Android 46, iOS 14; scores 35/F, 92/B (verified — nothing regenerated,
+      no analyzer code touched).
+    Commit-ready: N/A (report only; nothing to commit but this note). Human to pick follow-up rules.
 
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
