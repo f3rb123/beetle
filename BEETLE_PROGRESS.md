@@ -981,11 +981,32 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Commit-ready: Y
     Tests: 889 passed, 11 skipped.
 
-[ ] RUN 17 — Android 5.1b promote privacy taint finding (Android)
-    Files changed:
-    Acceptance: 
-    Commit-ready:
-    Resume notes:
+[x] RUN 17 — Android 5.1b: surface the storage taint finding (Android)  DONE
+    Prompt referenced a 'prior session spec' that did not exist; PAUSED and asked the human
+    (CLAUDE.md hard rule). Decision: surface flow #1 (Intent.getStringExtra -> SharedPrefs.putString)
+    as a finding at its CALIBRATED LOW — 'promote' = make visible, NOT raise severity; do NOT
+    touch the calibration rule.
+    CHANGE (surgical): removed 'storage' from finding_model._LOW_VALUE_TAINT_SINKS
+      ({'logging','intent','storage'} -> {'logging','intent'}). A taint flow that PERSISTS
+      user-controlled data to SharedPrefs is a real MASVS-STORAGE data-handling signal, so it is
+      no longer pruned as low-value. Logging + Intent with non-PII source stay suppressed.
+      The taint SEVERITY model (taint_analyzer._calibrate_severity) is UNTOUCHED — the flow is
+      LOW because the model calibrates it LOW, not because anyone assigned it.
+    INVERTED-GUARD RESULT (delta = exactly the human's expected list):
+      findings 45 -> 46; severity LOW 4 -> 5, all other severities unchanged; grade F -> F.
+      NEW: TAINT-STORAGE, LOW, owner=Application, evidence Intent.getStringExtra ->
+        SharedPreferences.putString at com.insecureshop.PrivateActivity.onCreate.
+      flow #3 (TAINT-INTENT) STILL suppressed. iOS BYTE-IDENTICAL (14 findings, 92/B).
+    ONE SECONDARY EFFECT — STOPPED AND REPORTED, then human-ratified as in-scope: the new finding
+      was absorbed as a SUPPORTING member of existing chain CHAIN-84d4e33c83 ('Backup-enabled Data
+      Extraction'), members 2 -> 3. Verified invariants: chain COUNT 6 -> 6, all chain rule_ids
+      and severities identical, this chain stays MEDIUM, no new chain, no severity movement. A
+      real finding SHOULD participate in correlation — correct behaviour, not a regression.
+    Every byte of Android movement traced to the one finding: the finding (+1 LOW), its chain
+      supporting-membership, and +1 in evidence_summary.by_quality. Nothing unexplained.
+    Files: backend/analyzers/finding_model.py; NEW backend/tests/test_taint_storage_promotion.py.
+    Commit-ready: Y
+    Tests: 893 passed, 11 skipped.
 
 [ ] RUN 18 — Web/PDF parity (P1 panels2.jsx, P2 panels.jsx)
     Files changed:
