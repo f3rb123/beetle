@@ -212,11 +212,45 @@ Baseline before start: iOS grade A 97/100 (0/0/0); MobSF 50/100 grade B. Target:
     Commit-ready: Y
     Tests: backend 780 passed / 11 skipped; frontend build OK; evidence-model test passed.
 
-[ ] RUN 5 — iOS app icon fallback (iOS-only)
-    Files changed:
-    Acceptance: 
-    Commit-ready:
-    Resume notes:
+[x] RUN 5 — iOS app icon fallback (iOS-only)  DONE
+    Files changed: backend/analyzers/ios_analyzer.py (_extract_ios_app_icon + new
+      _iter_png_chunks / _is_cgbi_png / _unfilter_scanlines / _decode_cgbi_png /
+      _renderable_icon_bytes; imports io + zlib).
+    THE PROMPT'S PREMISE WAS WRONG — no fallback was missing.
+      Prompt said: "_extract_ios_app_icon carves the icon from Assets.car, fails, no fallback.
+      Add the CFBundleIcons/CFBundleIconFiles -> AppIcon*.png fallback."
+      Reality: that fallback ALREADY EXISTED as step (2) of a 5-step chain (iTunesArtwork ->
+      CFBundleIcons -> appiconset -> heuristic walk -> Assets.car carve LAST, not first). And
+      it WORKED: the pre-change report already had icon_data, icon_path
+      "AppIcon76x76@2x~ipad.png", icon_source "ipa". Adding the prompt's fallback would have
+      changed NOTHING.
+    ACTUAL ROOT CAUSE (found by decoding the bytes, not by reading filenames): the extracted
+      icon is an APPLE CgBI PNG. Chunks were ['CgBI','IHDR','iDOT','IDAT','IDAT','IEND'] —
+      Xcode rewrites every bundled PNG into this crushed form: IDAT is RAW DEFLATE (no zlib
+      header), channels are byte-swapped to BGRA, alpha is premultiplied. It is NOT a standard
+      PNG: Pillow fails with "broken data stream" and every browser refuses it. So icon_data
+      was present but the <img> was a broken image => "no app logo renders".
+    FIX: _decode_cgbi_png() reverses pngcrush exactly — raw-deflate inflate (negative wbits),
+      PNG scanline un-filtering (Sub/Up/Average/Paeth), BGRA->RGBA, un-premultiply alpha, then
+      re-encode a standard PNG via Pillow. Candidates are now judged BY CONTENT: every one is
+      decoded and scored by real pixel dimensions (square, >=20px), and the largest that
+      actually decodes wins — filename and file size are never trusted. A candidate that
+      cannot be decoded is skipped instead of being emitted as a broken image.
+    Acceptance: PASS (iOS report regenerated).
+      BEFORE: 5715 bytes, chunks ['CgBI','IHDR','iDOT','IDAT'...], DECODES = NO (broken image)
+      AFTER : 7187 bytes, chunks ['IHDR','IDAT','IEND'],           DECODES = YES, 152x152 RGBA
+      Visually inspected the decoded PNG: correct teal check-in glyph (hand + checkmark),
+      which also proves the BGRA swap / un-premultiply are right — a wrong channel order would
+      render the teal as orange.
+      findings 82 -> 82, severity unchanged.
+    REGRESSION CAUGHT + FIXED DURING THE RUN: the first rewrite collapsed the Assets.car
+      diagnosis into a generic "unavailable", breaking
+      test_assets_car_without_png_records_reason (which asserts icon_source ==
+      "assets_car_unsupported" + a note when Assets.car exists but has no carveable PNG). That
+      test encodes intended behaviour — "record WHY the icon is missing" — so the distinction
+      was restored rather than the test changed.
+    Commit-ready: Y
+    Tests: 780 passed, 11 skipped (incl. all 8 icon tests).
 
 [ ] RUN 6 — Info.plist section label + render (iOS-only)
     Files changed:
@@ -310,6 +344,28 @@ Baseline before start: iOS grade A 97/100 (0/0/0); MobSF 50/100 grade B. Target:
     Acceptance: 
     Commit-ready:
     Resume notes:
+
+═══════════════ LATENT / CROSS-PLATFORM (raised mid-run, not yet actioned) ═══════════════
+
+[ ] L1 — RUN 4's Android twin: does Android render a string-index as a source line?
+    RUN 4 fixed this for iOS ONLY (gated on platform == "ios") because widening it would have
+    broken the Android byte-diff that RUN 4 is required to preserve. But the same root cause
+    plausibly exists on Android: classes.dex, resources.arsc and lib/**/*.so are binary too,
+    and if any analyzer scans them as an extracted-strings listing, its "line" is a string
+    index, not a source line — exactly the iOS bug.
+    OWNER: check during RUN 16/17 (Android correctness), where an Android output delta is in
+    scope and expected. Concretely: look for findings whose primary file is .dex/.arsc/.so and
+    that carry a non-zero line, and see whether _collect_android_files string-dumps them the way
+    _collect_ios_files does (code_analyzer.py:552-557). If so, reuse _is_binary_evidence /
+    _as_binary_evidence (already written, platform-gated) and pass the Android binary set.
+    NOT a regression introduced by RUN 4 — pre-existing, merely unmasked by it.
+
+[ ] L2 — RUN 4 acceptance clause "file-resolved finding highlights the correct line" is
+    DEFERRED-UNTESTABLE, *not* passed. A Flutter release IPA ships no text source, so no
+    positive case exists in this corpus: the only file-resolved finding WAS the binary plist
+    (now correctly binary evidence). No line-remapping bug was found or fixed. RE-TEST this
+    clause when a Swift/ObjC-source app enters the corpus. Do not mark it passed on the
+    strength of the iOS report alone.
 
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)

@@ -6,6 +6,8 @@ import hashlib
 import logging
 import struct
 import base64
+import io
+import zlib
 import mimetypes
 import tempfile
 from pathlib import Path
@@ -1163,22 +1165,38 @@ def _extract_ios_app_icon(app_bundle: str, plist_path: str, results: dict):
     if not app_bundle or not os.path.exists(app_bundle):
         return
 
-    def _emit(raw: bytes, src_path: str) -> bool:
-        if not raw or len(raw) > 4_000_000:  # app icons can be ~1-3 MB at 1024²
+    # Best candidate seen so far: (pixel_area, renderable_bytes, src_path, source).
+    # Every candidate is judged by what it ACTUALLY DECODES TO, never by its filename:
+    # the bundle's AppIcon PNGs are Apple CgBI (unrenderable until converted), and the
+    # plist-declared name is not necessarily the highest-resolution rendition.
+    best: list = []
+
+    def _consider(raw: bytes, src_path: str, source: str = "ipa") -> None:
+        std = _renderable_icon_bytes(raw)
+        if not std:
+            return
+        dims = _png_dimensions(std) if std[:8] == _PNG_SIG else None
+        if dims:
+            w, h = dims
+            if w != h or w < 20:        # an app icon is square
+                return
+            area = w * h
+        else:
+            area = 1                    # JPEG — keep, but never outrank a sized PNG
+        if not best or area > best[0][0]:
+            best[:] = [(area, std, src_path, source)]
+
+    def _emit_best() -> bool:
+        if not best:
             return False
-        # Quick PNG / JPEG magic sniff
-        is_png = raw[:8] == b"\x89PNG\r\n\x1a\n"
-        is_jpg = raw[:3] == b"\xff\xd8\xff"
-        if not (is_png or is_jpg):
-            return False
-        mime = "image/png" if is_png else "image/jpeg"
-        encoded = base64.b64encode(raw).decode("ascii")
-        results["app_info"]["icon_data"] = f"data:{mime};base64,{encoded}"
+        _area, std, src_path, source = best[0]
+        mime = "image/png" if std[:8] == _PNG_SIG else "image/jpeg"
+        results["app_info"]["icon_data"] = f"data:{mime};base64,{base64.b64encode(std).decode('ascii')}"
         try:
             results["app_info"]["icon_path"] = os.path.relpath(src_path, app_bundle).replace("\\", "/")
         except ValueError:
             results["app_info"]["icon_path"] = os.path.basename(src_path)
-        results["app_info"]["icon_source"] = "ipa"
+        results["app_info"]["icon_source"] = source
         return True
 
     # (1) iTunesArtwork — present in older distribution formats
@@ -1186,8 +1204,7 @@ def _extract_ios_app_icon(app_bundle: str, plist_path: str, results: dict):
         candidate = os.path.join(os.path.dirname(app_bundle), artwork)
         if os.path.isfile(candidate):
             try:
-                if _emit(Path(candidate).read_bytes(), candidate):
-                    return
+                _consider(Path(candidate).read_bytes(), candidate)
             except Exception:
                 pass
 
@@ -1228,46 +1245,58 @@ def _extract_ios_app_icon(app_bundle: str, plist_path: str, results: dict):
                 except OSError:
                     continue
 
-    # Try explicit candidates first (plist-declared).
+    # Consider every plist-declared candidate and every heuristic PNG — then pick the
+    # highest-resolution one that actually decodes (see _consider). Previously the first
+    # readable candidate won, which on this app meant the iPad 76x76@2x rendition.
     seen = set()
     for candidate in icon_candidates:
         if candidate in seen or not os.path.isfile(candidate):
             continue
         seen.add(candidate)
         try:
-            if _emit(Path(candidate).read_bytes(), candidate):
-                return
+            _consider(Path(candidate).read_bytes(), candidate)
         except Exception:
             continue
 
-    # Then largest heuristic match.
     for _, path in sorted(heuristic, reverse=True):
         if path in seen:
             continue
+        seen.add(path)
         try:
-            if _emit(Path(path).read_bytes(), path):
-                return
+            _consider(Path(path).read_bytes(), path)
         except Exception:
             continue
 
-    # (5) Assets.car fallback — modern Xcode/Flutter builds compile the AppIcon
-    # asset-catalog into Assets.car and ship NO loose PNGs, so steps (2)-(4) find
-    # nothing. The catalog embeds each rendition as a raw PNG stream, so carve the
-    # PNGs directly (no actool/macOS needed) and emit the best icon-sized one.
+    # (5) Assets.car — modern Xcode/Flutter builds compile the AppIcon asset-catalog into
+    # Assets.car and may ship NO loose PNGs. Carve the embedded PNG renditions directly
+    # (no actool/macOS needed). Considered alongside the loose files, not only as a last
+    # resort, so the largest rendition wins wherever it lives.
     assets_car = os.path.join(app_bundle, "Assets.car")
+    carved = None
     if os.path.isfile(assets_car):
         try:
-            best = _best_icon_png_from_assets_car(Path(assets_car).read_bytes())
+            carved = _best_icon_png_from_assets_car(Path(assets_car).read_bytes())
         except Exception:
-            best = None
-        if best and _emit(best, assets_car):
-            results["app_info"]["icon_source"] = "assets_car"
-            return
-        # Carve failed — record WHY the icon is missing instead of failing silently.
+            carved = None
+        if carved:
+            _consider(carved, assets_car, source="assets_car")
+
+    if _emit_best():
+        return
+
+    # Nothing decodable anywhere — record WHY instead of failing silently, keeping the
+    # Assets.car diagnosis distinct from "the bundle simply has no icon".
+    if os.path.isfile(assets_car) and not carved:
         results["app_info"]["icon_source"] = "assets_car_unsupported"
         results["app_info"]["icon_note"] = (
             "App icon is embedded in compiled Assets.car and could not be carved. "
             "Install `assetutil` (macOS) or `acextract` to extract PNGs."
+        )
+    else:
+        results["app_info"]["icon_source"] = "unavailable"
+        results["app_info"]["icon_note"] = (
+            "No renderable app icon found: the bundle ships no standard PNG/JPEG icon, and "
+            "no CgBI (Apple-crushed) PNG could be decoded."
         )
 
 
@@ -1287,6 +1316,136 @@ def _iter_carved_pngs(blob: bytes):
         png = blob[start:end + len(_PNG_END)]
         yield png
         start = blob.find(_PNG_SIG, end + len(_PNG_END))
+
+
+def _iter_png_chunks(png: bytes):
+    """Yield (type, data) for each PNG chunk."""
+    off = 8
+    while off + 8 <= len(png):
+        try:
+            length = struct.unpack(">I", png[off:off + 4])[0]
+        except struct.error:
+            return
+        ctype = png[off + 4:off + 8]
+        data = png[off + 8:off + 8 + length]
+        yield ctype, data
+        if ctype == b"IEND":
+            return
+        off += 12 + length
+
+
+def _is_cgbi_png(png: bytes) -> bool:
+    """Apple's 'crushed' PNG: a CgBI chunk precedes IHDR. Xcode rewrites every PNG in a
+    shipped bundle this way. It is NOT a standard PNG — the IDAT stream is raw deflate
+    with no zlib header, the channels are byte-swapped to BGRA, and alpha is
+    premultiplied. Browsers and Pillow both refuse it, which is why an icon extracted
+    verbatim from an IPA renders as a broken image."""
+    return png[:8] == _PNG_SIG and png[12:16] == b"CgBI"
+
+
+def _unfilter_scanlines(raw: bytes, width: int, height: int, bpp: int) -> bytearray | None:
+    """Undo the per-scanline PNG filters (RFC 2083 §6). Returns raw pixel bytes."""
+    stride = width * bpp
+    out = bytearray(stride * height)
+    pos = 0
+    for y in range(height):
+        if pos >= len(raw):
+            return None
+        ft = raw[pos]; pos += 1
+        line = bytearray(raw[pos:pos + stride]); pos += stride
+        if len(line) < stride:
+            return None
+        prev = out[(y - 1) * stride:y * stride] if y else bytes(stride)
+        if ft == 1:      # Sub
+            for i in range(bpp, stride):
+                line[i] = (line[i] + line[i - bpp]) & 0xFF
+        elif ft == 2:    # Up
+            for i in range(stride):
+                line[i] = (line[i] + prev[i]) & 0xFF
+        elif ft == 3:    # Average
+            for i in range(stride):
+                a = line[i - bpp] if i >= bpp else 0
+                line[i] = (line[i] + ((a + prev[i]) >> 1)) & 0xFF
+        elif ft == 4:    # Paeth
+            for i in range(stride):
+                a = line[i - bpp] if i >= bpp else 0
+                b = prev[i]
+                c = prev[i - bpp] if i >= bpp else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                line[i] = (line[i] + pr) & 0xFF
+        elif ft != 0:
+            return None
+        out[y * stride:(y + 1) * stride] = line
+    return out
+
+
+def _decode_cgbi_png(png: bytes) -> bytes | None:
+    """Convert an Apple CgBI PNG into a standard, browser-renderable PNG.
+
+    Reverses exactly what Xcode's pngcrush does: raw-deflate IDAT (no zlib wrapper),
+    BGRA channel order, premultiplied alpha. Returns None if the PNG is not the 8-bit
+    RGBA shape Apple emits, so the caller falls through to another candidate rather
+    than emitting something unrenderable.
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    ihdr = idat = None
+    parts = []
+    for ctype, data in _iter_png_chunks(png):
+        if ctype == b"IHDR":
+            ihdr = data
+        elif ctype == b"IDAT":
+            parts.append(data)
+    if not ihdr or len(ihdr) < 13 or not parts:
+        return None
+    idat = b"".join(parts)
+    width, height, depth, ctype_n = struct.unpack(">IIBB", ihdr[:10])
+    if depth != 8 or ctype_n != 6 or not (0 < width <= 2048 and 0 < height <= 2048):
+        return None    # only the 8-bit RGBA form Apple ships
+    try:
+        # Raw deflate — CgBI strips the zlib header, so negative wbits.
+        raw = zlib.decompressobj(-zlib.MAX_WBITS).decompress(idat)
+    except zlib.error:
+        return None
+    pixels = _unfilter_scanlines(raw, width, height, 4)
+    if pixels is None:
+        return None
+    # BGRA premultiplied -> RGBA straight.
+    for i in range(0, len(pixels), 4):
+        b, g, r, a = pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]
+        if a and a != 255:
+            r = min(255, (r * 255 + a // 2) // a)
+            g = min(255, (g * 255 + a // 2) // a)
+            b = min(255, (b * 255 + a // 2) // a)
+        pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3] = r, g, b, a
+    try:
+        img = Image.frombytes("RGBA", (width, height), bytes(pixels))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def _renderable_icon_bytes(raw: bytes) -> bytes | None:
+    """The bytes to actually ship to the UI, or None if this candidate is unusable.
+
+    Validates by CONTENT: a standard PNG/JPEG passes through; an Apple CgBI PNG is
+    converted; anything else is rejected rather than emitted as a broken image.
+    """
+    if not raw or len(raw) > 4_000_000:
+        return None
+    if raw[:3] == b"\xff\xd8\xff":                 # JPEG
+        return raw
+    if raw[:8] != _PNG_SIG:
+        return None
+    if _is_cgbi_png(raw):
+        return _decode_cgbi_png(raw)
+    return raw
 
 
 def _png_dimensions(png: bytes):
