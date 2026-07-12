@@ -968,8 +968,10 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     OWNER: check during RUN 16/17 (Android correctness), where an Android output delta is in
     scope and expected. Concretely: look for findings whose primary file is .dex/.arsc/.so and
     that carry a non-zero line, and see whether _collect_android_files string-dumps them the way
-    _collect_ios_files does (code_analyzer.py:552-557). If so, reuse _is_binary_evidence /
-    _as_binary_evidence (already written, platform-gated) and pass the Android binary set.
+    _collect_ios_files does (code_analyzer.py:552-557). The Android analogue is
+    _collect_android_files (code_analyzer.py:455) — check whether it string-dumps .dex/.so with a
+    line index. If so, reuse _is_binary_evidence / _as_binary_evidence (already written,
+    platform-gated) and pass the Android binary set.
     NOT a regression introduced by RUN 4 — pre-existing, merely unmasked by it.
 
 [ ] L4 - Android FINDINGS are nondeterministic run-to-run (PRE-EXISTING, deeper than L3).
@@ -987,7 +989,9 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     regression. The guard must mask timestamps AND tolerate this rejected-candidate jitter.
     LIKELY CAUSE: candidate collection walks a dict/set or races the parallel scan pool, so two
     equal-scoring match lines in the same file swap order. NOT yet root-caused.
-    OWNER: RUN 16/17. Fix = sort candidates by (file_path, line) before selection.
+    OWNER: RUN 16/17. Fix = make candidate collection deterministic in
+    evidence_selection/engine.py _candidates_from_finding (:95) — sort candidates by
+    (file_path, line) before selection.
 
 [ ] L3 — Android permission ORDER is nondeterministic across processes (PRE-EXISTING).
     FOUND during RUN 6's Android diff. results["permissions"]["all"/"classified"/"dangerous"]
@@ -995,15 +999,16 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     same APK. PROVEN, not assumed: restarted the container 3x with no rebuild and got 3
     different orders (INTERNET-first, WAKE_LOCK-first, INTERNET-first-but-different-tail).
     Two scans inside ONE process always agree — classic PYTHONHASHSEED-dependent set iteration.
-    ROOT CAUSE: android_analyzer.py:1353 `perms = apk.get_permissions()` — androguard returns
-    set-derived, unsorted output, and it is stored as-is.
+    ROOT CAUSE: android_analyzer.py:1362 `perms = apk.get_permissions()` (RE-ANCHORED 2026-07-12;
+    was :1353 before RUN 13 added lines) — androguard returns set-derived, unsorted output,
+    stored as-is at :1363.
     WHY IT MATTERS: (a) it makes any report diff / scan-compare feature show phantom changes;
     (b) it partially undermines the "byte-identical Android output" methodology this whole plan
     relies on — content is stable, ORDER is not. Every Android diff so far compared endpoints /
     ips / findings / severity / secrets, which ARE stable; permissions were first compared in
     RUN 6 and is where this surfaced.
     FIX (one line, but it CHANGES Android output ordering, so it is out of RUN 6's no-delta
-    scope): sort deterministically at android_analyzer.py:1354, e.g.
+    scope): sort deterministically at android_analyzer.py:1363, e.g.
         results["permissions"]["all"] = sorted(perms)
     and keep `classified` derived in that same sorted order.
     OWNER: RUN 16/17 (Android correctness), where an intentional Android delta is in scope.
