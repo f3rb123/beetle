@@ -287,3 +287,134 @@ def analyze_malware_permissions(permissions: list) -> dict:
             "total":   len(COMMON_MALWARE_PERMISSIONS),
         },
     }
+
+
+# ─── iOS tracker detection (RUN 11) ──────────────────────────────────────────
+# NOT a one-line wire-up of detect_trackers(). Every one of the 73 TRACKER_SIGNATURES above
+# keys on an ANDROID PACKAGE PREFIX ("com.google.firebase.crashlytics") and matches with
+# `p.startswith(pkg)`. An iOS app has no Java packages: its trackers are identified by CocoaPod /
+# framework names ("FirebaseCrashlytics"), by the endpoints they call, and — for SDKs that are
+# STATICALLY LINKED into the main executable rather than shipped as a framework — by marker
+# strings inside the binary itself. Feeding pod names to detect_trackers() would match nothing.
+#
+# EVERY tracker below must be proven by at least one of three EVIDENCE signals. Nothing is
+# inferred from "this app uses Firebase, so it probably also has X".
+#
+#   pods    — a framework/pod physically in the bundle (results["sdks"], from RUN 7's real
+#             Frameworks/ walk)
+#   domains — an endpoint the app actually contains (results["endpoints"], from RUN 1)
+#   markers — a symbol/string statically linked into a Mach-O (RUN 8's binary string scan).
+#             This is what catches Firebase Analytics in THIS app: it ships no
+#             FirebaseAnalytics.framework — it is linked straight into Runner, so a
+#             framework-only check would report it as absent.
+IOS_TRACKER_SIGNATURES = [
+    {"name": "Google Firebase Crashlytics", "category": "Crash Reporting",
+     "url": "https://firebase.google.com/crashlytics",
+     "pods": ["FirebaseCrashlytics"],
+     "domains": ["crashlytics.com", "crashlyticsreports-pa.googleapis.com"],
+     "markers": ["FIRCrashlytics", "FirebaseCrashlytics"]},
+
+    {"name": "Google Firebase Analytics", "category": "Analytics",
+     "url": "https://firebase.google.com",
+     "pods": ["FirebaseAnalytics", "GoogleAppMeasurement"],
+     "domains": ["app-measurement.com", "app-analytics-services.com"],
+     "markers": ["FirebaseAnalytics", "GoogleAppMeasurement", "FIRAnalytics"]},
+
+    {"name": "Google Ads On-Device Conversion", "category": "Advertising/Attribution",
+     "url": "https://developers.google.com/ads",
+     "pods": ["GoogleAdsOnDeviceConversion"],
+     "domains": ["googleadservices.com", "app-ads-services.com"],
+     "markers": ["GoogleAdsOnDeviceConversion", "admob_app_id"]},
+
+    {"name": "Google Firebase Performance Monitoring", "category": "Performance/Telemetry",
+     "url": "https://firebase.google.com/products/performance",
+     "pods": ["FirebasePerformance"], "domains": ["firebaselogging.googleapis.com"],
+     "markers": ["FIRPerformance"]},
+
+    {"name": "Google Firebase Remote Config", "category": "Experimentation",
+     "url": "https://firebase.google.com/products/remote-config",
+     "pods": ["FirebaseRemoteConfig"],
+     "domains": ["firebaseremoteconfig.googleapis.com",
+                 "firebaseremoteconfigrealtime.googleapis.com"],
+     "markers": ["FIRRemoteConfig"]},
+
+    {"name": "Google Firebase A/B Testing", "category": "Experimentation",
+     "url": "https://firebase.google.com/products/ab-testing",
+     "pods": ["FirebaseABTesting"], "domains": [], "markers": ["FIRExperiment"]},
+
+    {"name": "Google Firebase Sessions", "category": "Analytics",
+     "url": "https://firebase.google.com",
+     "pods": ["FirebaseSessions"], "domains": [], "markers": ["FIRSessions"]},
+
+    {"name": "Google DataTransport", "category": "Telemetry Delivery",
+     "url": "https://github.com/google/GoogleDataTransport",
+     "pods": ["GoogleDataTransport"], "domains": ["firebaselogging.googleapis.com"],
+     "markers": ["GDTCORTransport"]},
+
+    {"name": "Apple AdServices (Attribution)", "category": "Advertising/Attribution",
+     "url": "https://developer.apple.com/documentation/adservices",
+     "pods": [], "domains": ["api-adservices.apple.com", "app-analytics-services-att.com"],
+     "markers": ["AAAttribution"]},
+
+    # Common third-party trackers, for apps other than this one.
+    {"name": "Facebook SDK", "category": "Advertising/Analytics", "url": "https://developers.facebook.com",
+     "pods": ["FBSDKCoreKit", "FacebookCore"], "domains": ["graph.facebook.com"],
+     "markers": ["FBSDKCoreKit"]},
+    {"name": "AppsFlyer", "category": "Attribution", "url": "https://appsflyer.com",
+     "pods": ["AppsFlyerLib"], "domains": ["appsflyer.com"], "markers": ["AppsFlyerLib"]},
+    {"name": "Adjust", "category": "Attribution", "url": "https://adjust.com",
+     "pods": ["Adjust"], "domains": ["adjust.com"], "markers": ["ADJAdjust"]},
+    {"name": "Sentry", "category": "Crash Reporting", "url": "https://sentry.io",
+     "pods": ["Sentry"], "domains": ["sentry.io"], "markers": ["SentrySDK"]},
+    {"name": "Mixpanel", "category": "Analytics", "url": "https://mixpanel.com",
+     "pods": ["Mixpanel"], "domains": ["api.mixpanel.com"], "markers": ["MixpanelInstance"]},
+    {"name": "Amplitude", "category": "Analytics", "url": "https://amplitude.com",
+     "pods": ["Amplitude"], "domains": ["api.amplitude.com"], "markers": ["AMPAmplitude"]},
+    {"name": "Google AdMob", "category": "Advertising", "url": "https://admob.google.com",
+     "pods": ["GoogleMobileAds"], "domains": ["googlesyndication.com", "doubleclick.net"],
+     "markers": ["GADMobileAds"]},
+]
+
+
+def detect_trackers_ios(sdk_names=None, endpoints=None, binary_markers=None) -> list:
+    """Detect iOS trackers from POD names, ENDPOINTS and STATICALLY-LINKED binary markers.
+
+    Each hit records WHICH evidence matched, so a tracker is never asserted without proof. A
+    tracker with no matching evidence is simply not reported — the same discipline as RUN 7's
+    "unknown stays reachable" and RUN 8.1's "a control with no evidence stays absent".
+    """
+    pods = {str(s).lower() for s in (sdk_names or []) if s}
+    eps = " ".join(str(e).lower() for e in (endpoints or []))
+    markers = {str(m) for m in (binary_markers or []) if m}
+
+    found = []
+    for sig in IOS_TRACKER_SIGNATURES:
+        evidence = []
+        hit_pods = [p for p in sig["pods"] if p.lower() in pods]
+        if hit_pods:
+            evidence.append({"type": "framework", "value": ", ".join(hit_pods)})
+        hit_domains = [d for d in sig["domains"] if d.lower() in eps]
+        if hit_domains:
+            evidence.append({"type": "endpoint", "value": ", ".join(sorted(set(hit_domains)))})
+        hit_markers = [m for m in sig["markers"] if m in markers]
+        if hit_markers:
+            evidence.append({"type": "binary_symbol", "value": ", ".join(hit_markers)})
+        if not evidence:
+            continue
+        found.append({
+            "name": sig["name"],
+            "category": sig["category"],
+            "url": sig["url"],
+            # `pkg` is what the existing UI/SBOM renders; on iOS the identifier is the pod (or
+            # the marker, when the SDK is statically linked and ships no framework).
+            "pkg": (hit_pods or hit_markers or hit_domains or [""])[0],
+            "evidence": evidence,
+            "statically_linked": bool(hit_markers and not hit_pods),
+        })
+    found.sort(key=lambda t: t["name"])
+    return found
+
+
+def ios_tracker_markers() -> set:
+    """Every marker string worth scanning a Mach-O for (fed by the binary string scan)."""
+    return {m for sig in IOS_TRACKER_SIGNATURES for m in sig["markers"]}

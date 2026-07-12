@@ -608,11 +608,53 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Commit-ready: Y
     Tests: 820 passed, 11 skipped.
 
-[ ] RUN 11 — iOS tracker detection wire-up (iOS-only)
-    Files changed:
-    Acceptance (AdMob + Crashlytics shown): 
-    Commit-ready:
-    Resume notes:
+[x] RUN 11 - iOS tracker detection  DONE  ("one-line wire-up" -> it was NOT one line)
+    THE PREMISE WAS FALSE. detect_trackers(package_names) matches TRACKER_SIGNATURES with
+      `p.startswith(pkg)`, and ALL 73 signatures are ANDROID PACKAGE PREFIXES
+      ("com.google.firebase.crashlytics"). An iOS app has no Java packages. Passing pod names to
+      it matches NOTHING - locked by test_android_detector_cannot_see_ios_pods. iOS needed its
+      own identifier path.
+    Files changed: backend/analyzers/tracker_db.py (IOS_TRACKER_SIGNATURES, detect_trackers_ios,
+      ios_tracker_markers - all ADDITIVE; Android's detect_trackers untouched);
+      backend/analyzers/ios_analyzer.py (marker capture in the existing binary string walk +
+      the call, placed AFTER _analyze_embedded_frameworks);
+      NEW backend/tests/test_ios_tracker_detection.py (10 tests).
+    THREE EVIDENCE SIGNALS, never an inference:
+      pods    - a framework physically in the bundle (RUN 7's real Frameworks/ walk)
+      domains - an endpoint the app actually contains (RUN 1)
+      markers - a string statically linked into a Mach-O (reuses RUN 8's string walk; no extra pass)
+      A tracker with NO matching evidence is not reported (test_tracker_with_no_evidence...).
+    THE MARKER SIGNAL IS NOT OPTIONAL: Firebase Analytics ships NO framework in this app - it is
+      linked straight into Runner (35 "FirebaseAnalytics" + 9 "GoogleAppMeasurement" strings). A
+      framework-only check reports it ABSENT. 3 of the 9 trackers are statically linked and
+      would have been missed by a pod-only check.
+    ORDERING BUG CAUGHT AND FIXED: the call was initially placed BEFORE
+      _analyze_embedded_frameworks (which is what populates results["sdks"]), so the pod list was
+      EMPTY and every tracker fell back to marker evidence - FirebaseCrashlytics, which plainly
+      ships FirebaseCrashlytics.framework, was reported as "statically linked, no framework".
+      Moved after it; regression test added. (Same class as the RUN 9 stub-hid-the-bug lesson:
+      the unit tests passed while the live report was wrong.)
+    Acceptance: PASS AND EXCEEDED. iOS trackers 0 -> 9 (MobSF found 2).
+      framework-backed (6): Crashlytics, Performance Monitoring, Remote Config, A/B Testing,
+        Sessions, DataTransport
+      statically linked (3): Firebase Analytics, Google Ads On-Device Conversion,
+        Apple AdServices (Attribution)
+      Crashlytics MATCHED (MobSF parity). 7 trackers MobSF MISSED.
+    AdMob - MobSF SAYS YES, BEETLE SAYS NO, AND BEETLE IS RIGHT: this app ships NO
+      GoogleMobileAds framework and NO GADMobileAds symbol in any binary. The only "admob" string
+      is an `admob_app_id` KEY inside GoogleAppMeasurement - attribution plumbing, not the
+      ad-serving SDK. Beetle reports what is ACTUALLY there instead: "Google Ads On-Device
+      Conversion" (GoogleAdsOnDeviceConversion symbol + googleadservices.com +
+      odm.app-ads-services.com endpoints). Two tests lock this: AdMob is NOT claimed from
+      Firebase evidence, and IS reported when the real GoogleMobileAds SDK is present.
+    findings 86 -> 86 (trackers are intelligence, not findings). severity unchanged.
+    Android diff: CONTENT-IDENTICAL. trackers 0 -> 0 identical, endpoints/ips/secrets identical,
+      severity identical, finding identities identical. detect_trackers() and its 73 signatures
+      were not touched; the iOS path is a separate additive function.
+    UI: no registry work needed - the existing panel already renders results["trackers"]
+      platform-neutrally, so populating it was enough.
+    Commit-ready: Y
+    Tests: 830 passed, 11 skipped.
 
 [ ] RUN 12 — Property Lists section (iOS-only)
     Files changed:

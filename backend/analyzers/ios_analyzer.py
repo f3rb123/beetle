@@ -372,6 +372,29 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         if app_bundle:
             _analyze_embedded_frameworks(app_bundle, results)
 
+            # ── Tracker detection ────────────────────────────────────────────
+            # MUST run AFTER _analyze_embedded_frameworks: it is what populates results["sdks"]
+            # from the real Frameworks/ directory. Running earlier left the pod list EMPTY, so
+            # every tracker fell back to marker evidence and FirebaseCrashlytics — which plainly
+            # ships a framework — was mislabelled "statically linked".
+            #
+            # NOT a wire-up of Android's detect_trackers(): all 73 of its signatures key on an
+            # ANDROID PACKAGE PREFIX, which an iOS app has none of. iOS trackers are proven by
+            # pod name (RUN 7), by an endpoint the app contains (RUN 1), or by a marker string
+            # statically linked into a Mach-O (RUN 8's string scan) — that third signal is what
+            # catches Firebase Analytics, which ships NO framework and is linked into Runner.
+            try:
+                from .tracker_db import detect_trackers_ios
+                results["trackers"] = detect_trackers_ios(
+                    sdk_names=[s.get("name") for s in results.get("sdks") or []
+                               if isinstance(s, dict)],
+                    endpoints=results.get("endpoints") or [],
+                    binary_markers=results.pop("_binary_tracker_markers", []),
+                )
+            except Exception:
+                log.exception("[trackers] iOS tracker detection failed")
+                results.setdefault("trackers", [])
+
         # ── Overlap the remaining independent scans ─────────────────────────
         from concurrent.futures import ThreadPoolExecutor as _TPE
         with _TPE(max_workers=5) as _pool:
@@ -1152,6 +1175,12 @@ def _scan_binary_strings(app_bundle: str, results: dict, base_dir: str = ""):
     seen_secrets = {f"{s['name']}:{s['value']}" for s in results.get("secrets") or []}
     urls: set[str] = set()
     ip_hits: dict[tuple, dict] = {}
+    # Tracker markers for SDKs that are STATICALLY LINKED into a binary rather than shipped as a
+    # framework — Firebase Analytics is linked straight into Runner in this app, so a
+    # framework-only check would miss it entirely. Reuses this walk; no extra pass.
+    from .tracker_db import ios_tracker_markers
+    _markers = ios_tracker_markers()
+    marker_hits: set[str] = set()
 
     for binary_path in _iter_macho_binaries(app_bundle):
         try:
@@ -1169,11 +1198,13 @@ def _scan_binary_strings(app_bundle: str, results: dict, base_dir: str = ""):
             urls.update(endpoint_intel.extract_urls_from_text(text))
             for hit in network_intel.extract_ips_from_text(text, rel_path):
                 ip_hits.setdefault((hit["ip"], hit["file_path"]), hit)
+            marker_hits.update(m for m in _markers if m in text)
         except Exception:
             log.exception("[ios] binary string scan failed for %s", binary_path)
 
     results["_binary_endpoints"] = sorted(urls)
     results["_binary_ip_hits"] = list(ip_hits.values())
+    results["_binary_tracker_markers"] = sorted(marker_hits)
 
 
 # ─── Endpoint extraction ──────────────────────────────────────────────────────
