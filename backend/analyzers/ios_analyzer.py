@@ -372,7 +372,11 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         if app_bundle:
             _analyze_embedded_frameworks(app_bundle, results)
 
-            # ── Property Lists (enumeration surface — emits NO findings) ─────
+            # ── Property Lists (enumeration surface) ─────────────────────────
+            # The enumeration itself emits no findings. The ONE finding that comes out of this
+            # area is the privacy-declaration DISCREPANCY, which exists only at the INTERSECTION
+            # of two independent evidence chains — trackers present (RUN 11) and declarations
+            # absent (RUN 12) — so it must run after both.
             try:
                 from . import ios_plists
                 ios_plists.analyze(app_bundle, results)
@@ -401,6 +405,19 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
             except Exception:
                 log.exception("[trackers] iOS tracker detection failed")
                 results.setdefault("trackers", [])
+
+            # ── Privacy-declaration discrepancy (the ONE finding from this area) ──
+            # MUST run after BOTH chains exist: the trackers (presence, above) and the property
+            # lists (absence). It is precisely their INTERSECTION. Running it inside the plist
+            # block put it BEFORE tracker detection, so results["trackers"] was empty and the
+            # finding never fired — the same ordering trap as RUN 11.
+            try:
+                from . import ios_plists as _plists
+                _priv = _plists.build_privacy_declaration_finding(results)
+                if _priv:
+                    results["findings"].append(_priv)
+            except Exception:
+                log.exception("[privacy] privacy-declaration check failed")
 
         # ── Overlap the remaining independent scans ─────────────────────────
         from concurrent.futures import ThreadPoolExecutor as _TPE

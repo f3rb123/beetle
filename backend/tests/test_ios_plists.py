@@ -145,3 +145,57 @@ def test_credential_values_are_masked_never_printed_in_the_clear(tmp_path):
     assert api["value"].startswith("AIza")          # recognisable shape survives
     # A non-credential key is still shown in full.
     assert keys["PROJECT_ID"]["value"] == "demo"
+
+
+# ── privacy-declaration discrepancy: the INTERSECTION of two evidence chains ──
+def _tracked(**over):
+    base = {
+        "trackers": [
+            {"name": "Google Firebase Analytics", "category": "Analytics",
+             "evidence": [{"type": "binary_symbol", "value": "FirebaseAnalytics"}]},
+            {"name": "Google Ads On-Device Conversion", "category": "Advertising/Attribution",
+             "evidence": [{"type": "endpoint", "value": "googleadservices.com"}]},
+        ],
+        "property_lists": {"count": 95, "plists": [],
+                           "privacy_manifests": {"count": 26, "declares_tracking": False,
+                                                 "tracking_domains": []}},
+    }
+    base.update(over)
+    return base
+
+
+def test_finding_emitted_when_trackers_present_and_declarations_absent():
+    f = ios_plists.build_privacy_declaration_finding(_tracked())
+    assert f is not None
+    assert f["severity"] == "medium", "MEDIUM: a discrepancy for review, not a confirmed violation"
+    assert f["owner_type"] == "Application"
+    # BOTH evidence chains must be cited in the finding itself.
+    assert "Google Firebase Analytics" in f["description"]          # RUN 11 presence
+    assert "NSPrivacyTracking" in f["description"]                  # RUN 12 absence
+    assert "NOT A CONFIRMED VIOLATION" in f["description"]
+
+
+def test_no_finding_when_there_are_no_tracking_sdks():
+    r = _tracked(trackers=[{"name": "flutter_secure_storage", "category": "Storage",
+                            "evidence": [{"type": "framework", "value": "x"}]}])
+    assert ios_plists.build_privacy_declaration_finding(r) is None
+
+
+def test_no_finding_when_the_privacy_manifest_declares_tracking():
+    r = _tracked()
+    r["property_lists"]["privacy_manifests"]["declares_tracking"] = True
+    assert ios_plists.build_privacy_declaration_finding(r) is None
+
+
+def test_no_finding_when_tracking_domains_are_declared():
+    r = _tracked()
+    r["property_lists"]["privacy_manifests"]["tracking_domains"] = ["app-measurement.com"]
+    assert ios_plists.build_privacy_declaration_finding(r) is None
+
+
+def test_no_finding_when_the_att_usage_string_is_declared():
+    r = _tracked()
+    r["property_lists"]["plists"] = [
+        {"path": "Info.plist",
+         "security_keys": [{"key": "NSUserTrackingUsageDescription", "value": "to show ads"}]}]
+    assert ios_plists.build_privacy_declaration_finding(r) is None

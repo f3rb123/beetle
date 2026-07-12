@@ -112,6 +112,90 @@ def _privacy_manifest(data: dict) -> dict:
     }
 
 
+# Tracker categories that plausibly constitute "tracking" under Apple's ATT definition (data
+# linked to a user/device and shared with a third party for advertising or measurement).
+_TRACKING_CATEGORIES = ("Analytics", "Advertising", "Attribution", "Advertising/Analytics",
+                        "Advertising/Attribution")
+
+
+def build_privacy_declaration_finding(results: dict) -> dict | None:
+    """The INTERSECTION of two independently-gathered evidence chains:
+
+      RUN 11 (presence) — analytics / ad-attribution trackers are demonstrably IN the app
+                          (framework, endpoint and statically-linked-symbol evidence), and
+      RUN 12 (absence)  — NOT ONE of the bundle's property lists declares NSPrivacyTracking,
+                          any NSPrivacyTrackingDomains entry, or NSUserTrackingUsageDescription.
+
+    Deliberately MEDIUM and worded as a DISCREPANCY FOR REVIEW, not a confirmed violation:
+    on-device conversion measurement and AdServices attribution are arguably NOT "tracking"
+    under Apple's definition, so an ATT prompt may not be strictly required. Asserting a
+    violation here would be the same overclaim Beetle refused to copy on AdMob (RUN 11) — the
+    honest output is "these two facts do not line up; check them against the developer's actual
+    data practices."
+
+    Returns None whenever either chain is missing — no trackers, or a declaration present.
+    """
+    pl = results.get("property_lists") or {}
+    pm = pl.get("privacy_manifests") or {}
+    trackers = [t for t in (results.get("trackers") or [])
+                if isinstance(t, dict) and str(t.get("category", "")).startswith(_TRACKING_CATEGORIES)]
+    if not trackers:
+        return None                     # no tracking SDKs → nothing to declare
+
+    # Any declaration at all defeats the discrepancy.
+    if pm.get("declares_tracking") or pm.get("tracking_domains"):
+        return None
+    declared_att = any(k["key"] == "NSUserTrackingUsageDescription"
+                       for p in (pl.get("plists") or []) for k in (p.get("security_keys") or []))
+    if declared_att:
+        return None
+
+    names = sorted({t["name"] for t in trackers})
+    evidence = []
+    for t in trackers:
+        kinds = ", ".join(sorted({e["type"] for e in (t.get("evidence") or [])}))
+        evidence.append(f"{t['name']} ({t['category']}; evidence: {kinds})")
+
+    return {
+        "rule_id": "ios_privacy_declaration_discrepancy",
+        "title": "Tracking SDKs Present but Not Declared in Privacy Manifest / ATT",
+        "severity": "medium",
+        "category": "Privacy",
+        "cwe": "CWE-359", "owasp": "M1", "masvs": "MASVS-PRIVACY-1",
+        "description": (
+            "The app ships analytics / advertising-attribution SDKs, but none of its property "
+            "lists declare them.\n\n"
+            f"PRESENT ({len(trackers)} tracking SDK(s), from framework / endpoint / "
+            f"statically-linked-symbol evidence):\n  - " + "\n  - ".join(evidence) + "\n\n"
+            f"NOT DECLARED (across all {pl.get('count', 0)} property lists, "
+            f"{pm.get('count', 0)} privacy manifests):\n"
+            "  - NSPrivacyTracking is not set true in any privacy manifest\n"
+            "  - no NSPrivacyTrackingDomains entries\n"
+            "  - no NSUserTrackingUsageDescription, so the app shows no ATT prompt\n\n"
+            "THIS IS A DISCREPANCY FOR REVIEW, NOT A CONFIRMED VIOLATION. On-device conversion "
+            "measurement and AdServices attribution are arguably not 'tracking' under Apple's "
+            "ATT definition, so a prompt may not be strictly required. Confirm against the "
+            "developer's actual data practices: if any of this data is linked to a user or "
+            "device and shared for advertising, the declaration and the ATT prompt are required."
+        ),
+        "recommendation": (
+            "Reconcile the app's privacy manifest (PrivacyInfo.xcprivacy) and Info.plist with "
+            "what these SDKs actually collect. If data is linked to the user/device for "
+            "advertising, set NSPrivacyTracking, list NSPrivacyTrackingDomains, and add "
+            "NSUserTrackingUsageDescription plus an ATT request. If it is not, record why."
+        ),
+        # The app's own configuration — not vendor code. Per RUN 9's ownership-based severity
+        # this is an app-owned finding, which is precisely what makes it actionable.
+        "file_path": "Info.plist",
+        "snippet": "NSPrivacyTracking / NSPrivacyTrackingDomains / NSUserTrackingUsageDescription: not declared",
+        "owner_type": "Application",
+        "confidence": 85,
+        "evidence_type": "privacy_declaration",
+        "provenance": "beetle_native",
+        "tracking_sdks": names,
+    }
+
+
 def analyze(app_bundle: str, results: dict) -> None:
     """Populate results["property_lists"]. Emits NO findings — this is a surface."""
     if not app_bundle or not os.path.isdir(app_bundle):

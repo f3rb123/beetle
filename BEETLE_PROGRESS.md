@@ -690,12 +690,30 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       CFBundleURLSchemes, LSApplicationQueriesSchemes, NSUserTrackingUsageDescription and
       UIFileSharingEnabled are ALL GENUINELY ABSENT from this bundle. The section says so rather
       than implying a gap. The ONLY plist with security keys is GoogleService-Info.plist.
-    >>> CANDIDATE FINDING - NOT EMITTED, FLAGGED FOR THE HUMAN (per instruction #4):
-      The app SHIPS analytics + ad-attribution trackers (RUN 11: Firebase Analytics, Google Ads
-      On-Device Conversion, Apple AdServices) but NO privacy manifest declares NSPrivacyTracking
-      or ANY tracking domain, AND there is no NSUserTrackingUsageDescription (so no ATT prompt).
-      That is a plausible privacy-compliance discrepancy (App Store requires the declaration).
-      I did NOT emit a finding - findings stay 86. Human to decide whether this warrants one.
+[x] RUN 12.1 - privacy-declaration discrepancy finding (HUMAN-APPROVED; findings 86 -> 87)
+    THE FINDING IS AN INTERSECTION OF TWO INDEPENDENT EVIDENCE CHAINS, and says so explicitly:
+      PRESENCE (RUN 11): 4 tracking SDKs proven in the app - Apple AdServices, Google Ads
+        On-Device Conversion, Firebase Analytics, Firebase Sessions - each with its evidence
+        kinds cited (binary_symbol / endpoint / framework).
+      ABSENCE (RUN 12): across all 95 property lists and 26 privacy manifests, NOT ONE declares
+        NSPrivacyTracking, any NSPrivacyTrackingDomains entry, or NSUserTrackingUsageDescription
+        (so the app shows no ATT prompt).
+    SEVERITY MEDIUM, WORDED AS A DISCREPANCY FOR REVIEW - NOT A VIOLATION. The text says so in
+      capitals: on-device conversion measurement and AdServices attribution are arguably NOT
+      "tracking" under Apple's ATT definition, so a prompt may not be strictly required.
+      Asserting HIGH/violation would be the SAME OVERCLAIM Beetle refused to copy on MobSF's
+      AdMob (RUN 11). Consistency matters more than a scary number.
+    owner_type = Application (the app's own config, not vendor code) -> per RUN 9's
+      ownership-based severity it is a real app-owned finding, and library_noise did NOT demote it.
+    Verified in the regenerated report: findings 86 -> 87, severity 0/0/4/36/47, the discrepancy
+      is the ONLY delta, and the report still carries 0 HIGH / 0 CRITICAL.
+    ORDERING TRAP HIT AGAIN (same class as RUN 11): the check first ran inside the plist block,
+      which executes BEFORE tracker detection - so results["trackers"] was empty and the finding
+      never fired, while all 14 unit tests stayed green. Caught by the regenerated report (5th
+      time). Moved to after BOTH chains exist.
+    Tests: 5 more, both directions - trackers-present + declarations-absent -> emitted;
+      no-tracking-SDKs / declares_tracking / tracking_domains / ATT-string-present -> NOT emitted.
+    Tests: 844 passed, 11 skipped.
     Android: registry-gated to platforms:['ios'] - verified against the real registry (visible on
       iOS = true, Android = false). property_lists key absent on Android; endpoints/ips/secrets/
       severity/finding-identities all identical.
