@@ -148,6 +148,23 @@ def _accept_deeplink(scheme: str, rest: str) -> bool:
     return bool(rest) and len(rest) >= 2 and bool(_DEEPLINK_HOST_RE.match(rest))
 
 
+def extract_urls_from_text(text: str) -> list[str]:
+    """Accept-filtered URLs from a raw strings blob that has NO source context.
+
+    For the compiled-binary path (iOS Mach-O strings), where there is no call site to
+    prove against — a URL in a stripped AOT blob is a bare literal by construction, so
+    the ``called`` weighting in :func:`extract_endpoints` can never fire and would drop
+    every one of them. Same accept/clean filters as the text path; no call weighting.
+    Android's text-only, called-only default never calls this.
+    """
+    out: set[str] = set()
+    for m in _URL_RE.finditer(text):
+        url = _clean(m.group(0))
+        if _accept(url):
+            out.add(url)
+    return sorted(out)
+
+
 def _owner_lookup(results: dict | None):
     """(classify_fn, is_library_fn) using the shared ownership engine — consumed, not
     re-derived. Returns no-op classifiers when ownership is unavailable."""

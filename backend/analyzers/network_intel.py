@@ -288,6 +288,53 @@ def extract_ips(base_dir: str, extra_dirs: list | None = None, *, corpus: Source
     return hits
 
 
+def _has_network_context(text: str, ip_str: str) -> bool:
+    """True when an IP literal appears as a URL host (``//1.2.3.4``) or with a port
+    (``1.2.3.4:8080``) somewhere in the blob.
+
+    A compiled binary's string table is dense with dotted-quad lookalikes — OIDs
+    (1.3.6.1…), version tuples, protocol constants — that are valid IPv4 syntactically and
+    so pass ``ipaddress``. A text file has surrounding code to judge by; a stripped binary
+    does not. Network context is how a real embedded backend appears and is never how an
+    OID or version number does.
+    """
+    esc = re.escape(ip_str)
+    return bool(re.search(rf"(?://{esc})|(?:{esc}:\d{{2,5}})", text))
+
+
+def extract_ips_from_text(text: str, rel_path: str) -> list[dict]:
+    """IP hits from a raw strings blob that has no line structure (iOS Mach-O strings).
+
+    Same regexes + ``ipaddress`` validation as :func:`extract_ips`, plus the
+    :func:`_has_network_context` gate — a binary offers no code context to judge by.
+    Emits the identical hit shape so :func:`annotate` enriches these exactly like
+    text-file hits. ``line`` is 0 — a stripped binary has no source line.
+    Android's text-only path never calls this.
+    """
+    hits: list[dict] = []
+    seen: set[str] = set()
+    for rx in (IP_PATTERN, _IPV6_PATTERN):
+        for m in rx.finditer(text):
+            ip_str = m.group(0)
+            try:
+                ipaddress.ip_address(ip_str)
+            except ValueError:
+                continue
+            if ip_str in seen:
+                continue
+            snippet = text[max(0, m.start() - 60):m.end() + 60].replace("\n", " ").strip()
+            if _VERSION_DECL_RE.search(snippet):
+                continue
+            if not _has_network_context(text, ip_str):
+                continue
+            seen.add(ip_str)
+            hits.append({
+                "ip": ip_str, "file_path": rel_path,
+                "line": 0, "snippet": snippet[:240],
+            })
+    return hits
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Enrichment: classification + ownership + suppression + merge + intelligence
 # ════════════════════════════════════════════════════════════════════════════

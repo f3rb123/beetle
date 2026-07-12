@@ -23,7 +23,8 @@ from . import scan_storage
 from . import finding_model
 from .code_analyzer import run_ios_sast
 from .string_analyzer import analyze_strings
-from .source_corpus import SourceCorpus
+from .source_corpus import SourceCorpus, printable_text
+from . import endpoint_intel
 from .scoring import calculate_score
 from .path_utils import relativize_path
 from .virustotal import run_virustotal
@@ -75,6 +76,7 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         "jwts":             [],
         "ips":              [],
         "endpoints":        [],
+        "domain_intel":     [],
         "sdks":             [],
         "framework":        {"type": "native", "details": []},
         "permissions":      {"dangerous": [], "all": []},
@@ -145,7 +147,11 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                 binary_path = os.path.join(app_bundle, binary_name)
                 if os.path.exists(binary_path):
                     _analyze_macho(binary_path, results)
-                    _scan_binary_strings(binary_path, results, tmpdir)
+            # String-scan EVERY Mach-O in the bundle, not just the main executable: a
+            # Flutter app's URLs/IPs live in the framework binaries (App.framework/App),
+            # which the Runner binary never contains. Fills _binary_endpoints /
+            # _binary_ip_hits, merged into endpoints/ips once the pool below returns.
+            _scan_binary_strings(app_bundle, results, tmpdir)
 
         # ── Parallelize heavy independent scans to speed up iOS analysis.
         # Each module is CPU-bound on file IO + regex — running them on a
@@ -208,6 +214,15 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
 
             results["jwts"] = _fut_jwts.result() or []
             results["ips"]  = _fut_ips.result() or []
+            # Merge Mach-O binary IP hits BEFORE annotate so they are classified,
+            # owned and de-duped by the same canonical model as the text-file hits.
+            _bin_ips = results.pop("_binary_ip_hits", []) or []
+            if _bin_ips:
+                _seen_ips = {(h.get("ip"), h.get("file_path")) for h in results["ips"]}
+                for _h in _bin_ips:
+                    if (_h["ip"], _h["file_path"]) not in _seen_ips:
+                        _seen_ips.add((_h["ip"], _h["file_path"]))
+                        results["ips"].append(_h)
             # Phase 1.99: enrich raw IP hits (classify / owner / suppress / merge /
             # intelligence) using the SAME canonical model as Android, BEFORE the
             # public-IP finding and UI consume them. Additive; URLs untouched.
@@ -216,6 +231,12 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
             except Exception:
                 log.exception("[network_intel] iOS IP enrichment failed; raw IPs left as-is")
             _fut_endpoints.result()
+            # Merge Mach-O binary URLs into the endpoint list, deduped against what the
+            # text scan already found. These have no call site (stripped AOT code), so
+            # they arrive here rather than through extract_endpoints' called-only default.
+            _bin_eps = results.pop("_binary_endpoints", []) or []
+            if _bin_eps:
+                results["endpoints"] = sorted(set(results.get("endpoints") or []) | set(_bin_eps))
             # Phase 2.5.5: Cloud Configuration discovery (parity with Android) —
             # classify Firebase/GCS buckets + endpoints and emit findings BEFORE
             # fusion so they traverse the same pipeline.
@@ -245,6 +266,18 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                 react_native_analyzer.analyze([app_bundle or tmpdir], results, platform="ios")
             except Exception:
                 log.exception("[react_native] iOS analysis failed; continuing without RN findings")
+
+        # ── Domain Geo/Intel Check ───────────────────────────────────────────
+        # Runs AFTER every endpoint contributor (binary strings, text scan, Flutter, RN)
+        # so it sees the final list. iOS never called this, so domain_intel was absent
+        # from every iOS report regardless of how many endpoints were found. Android's
+        # _add_domain_intel_summary finding is deliberately NOT mirrored here — this
+        # populates the section without adding a finding.
+        try:
+            from .domain_analyzer import check_domains
+            check_domains(results.get("endpoints", []), results)
+        except Exception:
+            log.exception("[domain_intel] iOS domain intelligence failed; section left empty")
 
         # ── Semgrep SAST (Phase 2.4) — external detection engine via the SAST
         # adapter. Gated on availability (no-op + zero cost when absent); runs only
@@ -890,29 +923,83 @@ def _analyze_macho(binary_path: str, results: dict):
 
 
 # ─── Binary strings scan ──────────────────────────────────────────────────────
-def _scan_binary_strings(binary_path: str, results: dict, base_dir: str = ""):
-    try:
-        with open(binary_path, "rb") as f:
-            raw = f.read()
-        text = printable_text(raw)
-        seen = {f"{s['name']}:{s['value']}" for s in results["secrets"]}
-        rel_path = relativize_path(binary_path, base_dir) if base_dir else binary_path
-        for s in scan_text_for_secrets(text, rel_path):
-            key = f"{s['name']}:{s['value']}"
-            if key not in seen:
-                seen.add(key)
-                results["secrets"].append(s)
-    except Exception:
-        pass
+_MACHO_MAGIC = (
+    b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",   # 32/64-bit big-endian
+    b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",   # 32/64-bit little-endian
+    b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",   # fat/universal
+)
+_MAX_BINARIES = 40                  # matches lief_analyzer.analyze_all_macho's cap
+_MAX_BINARY_BYTES = 64 * 1024 * 1024
+
+
+def _iter_macho_binaries(app_bundle: str):
+    """Yield every Mach-O in the .app bundle — main executable, Frameworks/*.framework/*,
+    and *.dylib. Identified by magic bytes (these files are extension-less), so this needs
+    no LIEF and no second full walk beyond this one."""
+    count = 0
+    for root, _dirs, files in os.walk(app_bundle):
+        for fn in sorted(files):
+            full = os.path.join(root, fn)
+            try:
+                if os.path.getsize(full) < 256:
+                    continue
+                with open(full, "rb") as f:
+                    if f.read(4) not in _MACHO_MAGIC:
+                        continue
+            except OSError:
+                continue
+            yield full
+            count += 1
+            if count >= _MAX_BINARIES:
+                return
+
+
+def _scan_binary_strings(app_bundle: str, results: dict, base_dir: str = ""):
+    """Dump printable strings from every Mach-O and harvest secrets + URLs + IPs.
+
+    URLs/IPs are stashed on results["_binary_endpoints"] / ["_binary_ip_hits"] rather than
+    merged here: results["endpoints"]/["ips"] are not populated until the thread pool in
+    analyze_ipa returns, and merging early would just be overwritten.
+    """
+    if not app_bundle or not os.path.isdir(app_bundle):
+        return
+    seen_secrets = {f"{s['name']}:{s['value']}" for s in results.get("secrets") or []}
+    urls: set[str] = set()
+    ip_hits: dict[tuple, dict] = {}
+
+    for binary_path in _iter_macho_binaries(app_bundle):
+        try:
+            with open(binary_path, "rb") as f:
+                raw = f.read(_MAX_BINARY_BYTES)
+            text = printable_text(raw)
+            rel_path = relativize_path(binary_path, base_dir) if base_dir else binary_path
+
+            for s in scan_text_for_secrets(text, rel_path):
+                key = f"{s['name']}:{s['value']}"
+                if key not in seen_secrets:
+                    seen_secrets.add(key)
+                    results.setdefault("secrets", []).append(s)
+
+            urls.update(endpoint_intel.extract_urls_from_text(text))
+            for hit in network_intel.extract_ips_from_text(text, rel_path):
+                ip_hits.setdefault((hit["ip"], hit["file_path"]), hit)
+        except Exception:
+            log.exception("[ios] binary string scan failed for %s", binary_path)
+
+    results["_binary_endpoints"] = sorted(urls)
+    results["_binary_ip_hits"] = list(ip_hits.values())
 
 
 # ─── Endpoint extraction ──────────────────────────────────────────────────────
 def _extract_endpoints(tmpdir: str, results: dict, *, corpus: SourceCorpus = None):
     # Phase 2.5.6: broad, multi-source extraction shared with Android via
     # endpoint_intel (Swift/ObjC/plist/json/js + ws/wss + custom-scheme deep links).
-    from . import endpoint_intel
+    # verbose=True: the iOS bundle is compiled — plists, flutter_assets and framework
+    # resources carry URLs as bare literals with no call site to prove, so the
+    # called-only default (right for Android's decompiled Java/Kotlin source) would
+    # drop nearly all of them. iOS-only; Android's extract_endpoints call is untouched.
     results["endpoints"] = endpoint_intel.extract_endpoints(
-        tmpdir, corpus=corpus or SourceCorpus(), results=results)
+        tmpdir, corpus=corpus or SourceCorpus(), results=results, verbose=True)
 
 
 # ─── Framework detection ──────────────────────────────────────────────────────
