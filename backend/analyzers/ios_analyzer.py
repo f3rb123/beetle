@@ -556,6 +556,15 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                     results["findings"].extend(merged["findings"])
                 results["components"] = merged.get("components", [])
                 results["cve_stats"]  = merged.get("stats", {})
+                # "0 CVEs" is only a real negative if the scanner COULD have found one. Canary-
+                # test each ecosystem against OSV; if it does not answer, say the components are
+                # UNASSESSABLE rather than letting a structural zero read as "no known vulns".
+                try:
+                    cov = cve_mapper.assess_coverage(results["components"])
+                    results["cve_stats"]["coverage"] = cov
+                    results["cve_stats"]["cves_assessable"] = cov["assessable"] > 0
+                except Exception:
+                    log.exception("[cve] coverage assessment failed")
         except Exception as _e:
             log.debug(f"cve mapping failed: {_e}")
 

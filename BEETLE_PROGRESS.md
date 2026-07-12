@@ -762,11 +762,56 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Commit-ready: Y
     Tests: 856 passed, 11 skipped.
 
-[ ] RUN 14 — Vulnerable components verify + optional App Store metadata
-    Files changed:
-    Acceptance (OSV coverage real): 
-    Commit-ready:
-    Resume notes:
+[x] RUN 14 - Vulnerable components VERIFY (SHARED: cve_mapper)  DONE
+    *** THE ANSWER IS NO: "39 detected / 0 CVEs" WAS AN EMPTY PASS. ***
+    PROVEN, not assumed, by a live experiment from inside the container:
+      1. THE SCANNER WORKS. OSV.dev is reachable and returns REAL advisories:
+           npm  lodash@4.17.15  -> 6 vulns
+           PyPI django@2.2.0    -> 65 vulns
+           Pub  http@0.13.0     -> 1 vuln
+         So the pipeline is not dead and the network is not blocked.
+      2. BUT OSV HAS NO CocoaPods ECOSYSTEM. Every CocoaPods query returns 0 - including
+         Alamofire@4.0.0. ALL 39 of this app's dependencies are CocoaPods, so all 39 queries
+         return empty BY CONSTRUCTION. The zero was structural, not a real negative.
+      3. AND 17 OF THE 39 VERSIONS ARE PLACEHOLDERS. A Flutter plugin's framework Info.plist
+         carries CFBundleShortVersionString "0.0.1" (not its real pub version), so even in a
+         SUPPORTED ecosystem those 17 could never match an advisory.
+    WHAT I BUILT (not a fix for OSV's ecosystem list - an honest instrument):
+      cve_mapper.assess_coverage() + ecosystem_answers() - a CANARY test. Rather than trust a
+      hardcoded ecosystem list (which drifts, and which I would be asserting from memory), it
+      queries a KNOWN-VULNERABLE canary per ecosystem AT SCAN TIME. If the canary comes back
+      empty, that ecosystem is not answering and its components are marked UNASSESSABLE. The
+      scanner now reports whether it COULD have found something, not just that it didn't.
+    IN THE REGENERATED iOS REPORT:
+      cve_stats.cves_assessable = FALSE
+      coverage.verdict = "no_coverage" | components_total 39 | assessable 0 | UNASSESSABLE 39
+        | placeholder_versions 17
+      ecosystem CocoaPods: osv_answers = False, reason = "OSV returned no advisories for a
+        known-vulnerable canary ... a zero result here is NOT a clean bill of health."
+    RUN 8.1's DEFERRED QUESTION, NOW ANSWERED: "Up-to-date Dependencies" STAYS UNCREDITED.
+      MASVS-CODE remains 0, controls_present []. Coverage is 'no_coverage', so crediting the
+      control would be exactly the "absence of evidence = evidence of absence" error RUN 8.1
+      forbade. VERIFIED in the live report, not just asserted.
+    POSITIVE CONTROL LOCKED BY TEST: inject a package@version with a known advisory and the
+      scanner MUST flag it (test_the_scanner_is_not_dead_it_flags_a_known_vulnerable_package).
+      So a future zero is a real zero, not a broken pipeline. Plus tests that an
+      ecosystem-that-answers makes real versions assessable, and that a placeholder version is
+      NEVER assessable even in a supported ecosystem.
+    HONEST STANDING vs MobSF: MobSF has NO dependency analysis at all, so Beetle's 39 detected
+      components (with real versions for 22 of them) is still a win. But the CVE result must be
+      read as "not assessable", NOT as "no known vulnerabilities" - and the report now says so.
+    FUTURE WORK (not done, out of scope): real coverage for iOS deps needs either (a) an OSV
+      ecosystem that covers CocoaPods/SwiftPM, or (b) resolving Flutter plugin pods to their PUB
+      package + real version (OSV's Pub ecosystem DOES answer - proven above), which needs a
+      version source better than the framework Info.plist.
+    (b) App Store metadata: SKIPPED - explicitly optional/low-priority, and it would add a
+      network dependency and scope for no security value.
+    Android diff (SHARED FILE): endpoints / ips / secrets / components / cve_stats / severity /
+      finding identities ALL IDENTICAL. Android's cve_mapper path (native .so libs) is untouched;
+      assess_coverage is called only from the iOS analyzer.
+    findings 87 -> 87. severity unchanged.
+    Commit-ready: Y
+    Tests: 861 passed, 11 skipped.
 
 ═══════════════ TIER 3 — SCORE CALIBRATION ═══════════════
 
