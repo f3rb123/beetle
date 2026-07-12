@@ -489,11 +489,66 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     -> RUN 15 (score calibration) now has a WORKING control signal to calibrate against, and a
        documented reason why MASVS-CODE legitimately reads 0 for this app.
 
-[ ] RUN 9 — Per-binary protection table (iOS-only) — FP GUARD on App.framework/App
+[x] RUN 9 - Per-binary protection table (iOS-only) - FP GUARD on App.framework/App  DONE
     Files changed:
-    Acceptance (full table; NO HIGH FP on App.framework/App): 
-    Commit-ready:
-    Resume notes:
+      NEW backend/analyzers/binary_protections.py - build_table() + build_findings() with the
+        two suppression classes; NEW backend/tests/test_binary_protections.py (8 tests).
+      backend/analyzers/lief_analyzer.py - _protection_flags(): per-binary canary / ARC /
+        objc_import_count / encrypted / symbols_stripped / is_dart_aot, from the FULL symbol
+        tables at parse time. Mach-O only (ELF untouched).
+      backend/analyzers/ios_analyzer.py - results["binary_protections"] (table) +
+        results["binary_protections_suppressed"] (what was suppressed AND WHY) + findings.
+    THE TABLE: 40 rows, main executable FIRST then frameworks alphabetically. Columns: kind, NX,
+      PIE (main only - a dylib is position-independent by definition, so "no PIE" on a framework
+      is noise), Stack Canary, ARC, Code Signature, Encrypted, Symbols Stripped, RPATH count,
+      and the RUN 8 insecure-API count.
+    THE FP GUARD - VERIFIED IN THE REGENERATED REPORT:
+      App.framework/App  kind="Dart AOT (app code)"  canary=N  arc=N  objc_imports=0
+      -> findings referencing App.framework/App: 0
+      -> report contains ZERO HIGH and ZERO CRITICAL findings
+      -> suppressed WITH A REASON (not silently dropped), recorded in the report itself.
+    DART-AOT DETECTED BY CONTENT, NOT BY FILENAME: keyed on the exported snapshot symbols
+      (_kDartVmSnapshotInstructions / _kDartIsolateSnapshotInstructions / ...Data). This matters:
+      Flutter.framework/Flutter exports ObjC classes named FlutterDartProject, so a naive "Dart"
+      SUBSTRING match would have suppressed a REAL native framework. Test locks this.
+    SECOND FP CLASS FOUND (not in the prompt): ARC is the Objective-C runtime, so a binary with
+      ZERO ObjC imports (nanopb, FirebaseCoreExtension) CANNOT have ARC - "missing ARC" is a
+      meaningless claim about a pure C/Swift library. Suppressed with reason. MobSF flags both
+      as HIGH; both are false positives.
+    MobSF CROSS-CHECK - MobSF's 8 missing-canary HIGHs and 3 missing-ARC HIGHs, adjudicated:
+      CANARY:
+        connectivity_plus            CONFIRMED missing (genuine native ObjC framework) -> flagged
+        battery_plus                 CONFIRMED missing -> flagged
+        FirebaseRemoteConfigInterop  CONFIRMED missing -> flagged
+        FirebaseCoreExtension        CONFIRMED missing -> flagged
+        flutter_timezone             CONFIRMED missing -> flagged
+        App                          MobSF FALSE POSITIVE - Dart AOT blob. SUPPRESSED.
+        nanopb                       MobSF FALSE POSITIVE - the canary IS present (it imports
+                                     ___stack_chk_fail). Beetle says present; MobSF is wrong.
+        ScreenProtectorKit           NOT IN THIS BUNDLE AT ALL - MobSF flagged a framework this
+                                     app does not ship (same error class as RUN 7's pod list).
+      ARC:
+        App                          MobSF FALSE POSITIVE - Dart AOT. SUPPRESSED.
+        FirebaseCoreExtension        MobSF FALSE POSITIVE - 0 ObjC imports, ARC N/A. SUPPRESSED.
+        nanopb                       MobSF FALSE POSITIVE - 0 ObjC imports, ARC N/A. SUPPRESSED.
+        => Beetle emits NO missing-ARC finding at all: not one binary in this app is a genuine
+           ObjC framework that lacks ARC. All 3 of MobSF's ARC HIGHs are FPs.
+      BEETLE FOUND 2 THAT MobSF MISSED: flutter_jailbreak_detection_plus, path_provider_foundation
+        (both genuinely lack a stack canary).
+    Acceptance: PASS. Table renders (40 rows); NO HIGH FP on App.framework/App (no finding at all).
+      findings 85 -> 86 (+1: ONE consolidated missing-canary finding naming 7 binaries - not one
+      finding per binary, per RUN 8's lesson). severity 0/0/3/36/47.
+    SEVERITY CALL (deliberate, flagged for RUN 15): missing-protection findings are MEDIUM, not
+      HIGH. A missing canary in a THIRD-PARTY framework is a real hardening gap in vendor code,
+      not a directly exploitable weakness in the app. MobSF calls it HIGH; that overstates it and
+      a defensible score is the whole point. So the report carries ZERO HIGHs - every one of
+      MobSF's 11 HIGHs here is either an FP (5) or an overstatement (6). Locked by test.
+    Android diff: CONTENT-IDENTICAL. endpoints/ips/secrets identical, severity identical
+      (C1/H11/M7/L4/I22), finding identities identical (45->45), permissions content-identical,
+      MASVS coverage identical, no binary_protections key and no macho_* findings on Android.
+    Commit-ready: Y
+    Tests: 808 passed, 11 skipped (incl. 8 new FP-guard tests, from the PROTECTION-FLAG angle -
+      complementing RUN 8's import-symbol angle on the same guard).
 
 [ ] RUN 10 — Dedicated ATS section (iOS-only)
     Files changed:

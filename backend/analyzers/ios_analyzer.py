@@ -430,6 +430,17 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                     # Imported-symbol API scan across the main binary AND every framework:
                     # ONE consolidated finding per class (insecure API / logging / malloc),
                     # each listing the symbols that are genuinely in the import table.
+                    # Per-binary protection table (main executable first, then frameworks).
+                    # The FP guard lives in binary_protections: missing canary/ARC on the
+                    # Dart-AOT blob, and missing ARC on a pure-C library, are NOT findings.
+                    from . import binary_protections
+                    _main = results["app_info"].get("bundle_executable") or ""
+                    prot_rows = binary_protections.build_table(lief_results, main_binary=_main)
+                    results["binary_protections"] = prot_rows
+                    prot_findings, prot_suppressed = binary_protections.build_findings(prot_rows)
+                    results["findings"].extend(prot_findings)
+                    results["binary_protections_suppressed"] = prot_suppressed
+
                     from . import binary_api_scan
                     _bundle_rel = relativize_path(app_bundle, tmpdir) if app_bundle else ""
                     api_findings = binary_api_scan.build_findings(

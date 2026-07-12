@@ -72,6 +72,56 @@ def available() -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # Mach-O
 # ─────────────────────────────────────────────────────────────────────────────
+# The Dart AOT snapshot's exported symbols. App.framework/App is the app's OWN compiled Dart
+# code — the iOS twin of Android's libapp.so. It is produced by the Dart compiler, not clang,
+# so it legitimately has no stack canary and no ARC: those are clang/ObjC features, and a
+# snapshot blob has neither. Flagging it is the exact false positive MobSF emits.
+#
+# Detected by CONTENT, not by filename: keyed on the snapshot symbols themselves. A substring
+# match on "Dart" would wrongly catch Flutter.framework/Flutter, which exports ObjC classes
+# named FlutterDartProject but IS a real native framework with a canary and ARC.
+_DART_AOT_SYMBOLS = frozenset({
+    "_kDartVmSnapshotInstructions", "_kDartIsolateSnapshotInstructions",
+    "_kDartVmSnapshotData", "_kDartIsolateSnapshotData",
+})
+_CANARY_SYMS = ("___stack_chk_fail", "___stack_chk_guard", "__stack_chk_fail", "__stack_chk_guard")
+_ARC_SYMS = frozenset({"_objc_release", "_objc_retain", "_objc_autoreleaseReturnValue",
+                       "_objc_retainAutoreleasedReturnValue", "_objc_storeStrong"})
+
+
+def _protection_flags(m, imports: list, exports: list) -> dict:
+    """Per-binary hardening facts, derived from the symbol tables (structural, not guessed).
+
+    ``objc_import_count`` matters as much as the flags: ARC is an Objective-C runtime feature,
+    so a binary with NO ObjC imports (a pure C library like nanopb) cannot have ARC and
+    "missing ARC" is a meaningless claim about it — a second false-positive class alongside
+    the Dart-AOT one.
+    """
+    imp = set(imports)
+    sym_names = set()
+    try:
+        sym_names = {s.name for s in m.symbols}
+    except Exception:
+        pass
+    is_dart_aot = bool(_DART_AOT_SYMBOLS & (set(exports) | sym_names))
+    try:
+        encrypted = bool(getattr(m, "has_encryption_info", False))
+    except Exception:
+        encrypted = False
+    # "Stripped" = the symbol table carries essentially nothing beyond the dynamic imports and
+    # exports (no retained local/debug symbols). A heuristic, and labelled as one.
+    total_syms = len(sym_names) if sym_names else 0
+    stripped = total_syms <= (len(imp) + len(set(exports)) + 8)
+    return {
+        "is_dart_aot": is_dart_aot,
+        "has_stack_canary": any(c in imp for c in _CANARY_SYMS),
+        "has_arc": bool(_ARC_SYMS & imp),
+        "objc_import_count": sum(1 for s in imp if s.startswith("_objc_")),
+        "is_encrypted": encrypted,
+        "symbols_stripped": stripped,
+    }
+
+
 def analyze_macho(binary_path: str) -> dict:
     """Deep Mach-O inspection. Returns {} if lief not available or parse fails."""
     if not _LIEF_OK or not os.path.isfile(binary_path):
@@ -132,6 +182,8 @@ def analyze_macho(binary_path: str) -> dict:
 
     try:
         _all_imports = [s.name for s in m.imported_symbols]
+        _all_exports = [s.name for s in m.exported_symbols]
+        out.update(_protection_flags(m, _all_imports, _all_exports))
         out["imported_syms"] = _all_imports[:2000]
         # The 2000 cap is for DISPLAY and really does truncate (webview_flutter_wkwebview
         # imports 2432). Record it so a truncated list is never mistaken for a complete one.
