@@ -105,9 +105,15 @@ function normalizeView(v, finding) {
       // Prefer a backend-supplied language label (e.g. "Signing Metadata" for a
       // certificate artifact, "Android Manifest" for the manifest); else infer.
       language: v.primary.language || languageOf(v.primary.file),
-      artifact: !!v.primary.artifact } : null,
+      artifact: !!v.primary.artifact,
+      // Mach-O evidence: the backend moved the strings-listing index out of `line`
+      // (which it zeroes) into string_index, so nothing renders it as a source line.
+      binary: !!v.primary.binary,
+      symbol: v.primary.symbol || '',
+      stringIndex: num(v.primary.string_index) } : null,
     frameworkOnly: !!v.framework_only,
     artifact: !!v.artifact,
+    binary: !!v.binary,
     supporting: (v.supporting || []).filter(Boolean).map(p => ({ ...p, language: languageOf(p.file) })),
     additional: v.additional_references || [],
     hidden: v.hidden_library_evidence || emptyHidden(),

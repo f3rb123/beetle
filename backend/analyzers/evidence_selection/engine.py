@@ -339,6 +339,10 @@ def annotate(results: dict, *, platform: str | None = None) -> dict:
                                bundle_ids=ctx.bundle_ids, app_modules=ctx.app_modules,
                                app_name=ctx.app_name)
     bb = bug_bounty_enabled(results)
+    # Content-detected binary-format files (Mach-O / bplist) recorded during the iOS scan.
+    # Their "line" is a strings index or a parse artifact, never a source line.
+    _binary_files = {str(p).replace("\\", "/").lower()
+                     for p in (results.get("binary_evidence_files") or [])}
     already: set = set()
     # Resource-ID constant classes (recorded during the secret walk) are never a
     # valid proof location — exclude them so no secret/chain evidence points at an
@@ -365,7 +369,8 @@ def annotate(results: dict, *, platform: str | None = None) -> dict:
         # is preserved under f["detected_location"].
         if _promote_primary(f, sel):
             corrected += 1
-        f["evidence_view"] = build_evidence_view(f)
+        f["evidence_view"] = build_evidence_view(f, platform=ctx.platform,
+                                                 binary_files=_binary_files)
         annotated += 1
         if sel.get("candidate_count", 0) > 1:
             multi += 1

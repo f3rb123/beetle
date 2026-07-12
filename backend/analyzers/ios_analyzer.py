@@ -152,6 +152,9 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
             # which the Runner binary never contains. Fills _binary_endpoints /
             # _binary_ip_hits, merged into endpoints/ips once the pool below returns.
             _scan_binary_strings(app_bundle, results, tmpdir)
+            # Which bundle files are binary-format (Mach-O / bplist) — consumed by the
+            # evidence view so their "line" is never rendered as a source line.
+            _record_binary_format_files(app_bundle, results, tmpdir)
 
         # ── Parallelize heavy independent scans to speed up iOS analysis.
         # Each module is CPU-bound on file IO + regex — running them on a
@@ -952,6 +955,34 @@ def _iter_macho_binaries(app_bundle: str):
             count += 1
             if count >= _MAX_BINARIES:
                 return
+
+
+def _record_binary_format_files(app_bundle: str, results: dict, base_dir: str = "") -> None:
+    """Record every file in the bundle that is BINARY-FORMAT, by magic bytes.
+
+    Mach-O binaries and BINARY plists (bplist00) both carry "line numbers" that are not
+    source lines: a Mach-O match indexes the extracted-strings listing, and a binary plist
+    has no text lines at all (GoogleService-Info.plist reports line 3 with an empty
+    snippet). The evidence view consumes this set so neither is ever rendered as file:line.
+    Detected by content, not by extension — an IPA's Info.plist may be XML or binary.
+    """
+    if not app_bundle or not os.path.isdir(app_bundle):
+        return
+    found: list[str] = []
+    for root, _dirs, files in os.walk(app_bundle):
+        for fn in files:
+            full = os.path.join(root, fn)
+            try:
+                if os.path.getsize(full) < 8:
+                    continue
+                with open(full, "rb") as f:
+                    head = f.read(8)
+            except OSError:
+                continue
+            if head[:4] in _MACHO_MAGIC or head == b"bplist0" + b"0":
+                found.append(relativize_path(full, base_dir) if base_dir else full)
+    if found:
+        results["binary_evidence_files"] = sorted(set(found))
 
 
 def _scan_binary_strings(app_bundle: str, results: dict, base_dir: str = ""):

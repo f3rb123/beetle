@@ -628,6 +628,17 @@
   background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 7px 10px;
 }
 
+/* Binary (Mach-O) evidence — a compiled binary has no source line, so the proof is
+   the matched symbol plus its index in the extracted strings listing. */
+.ws-primary__binary { margin-top: 10px; }
+.ws-primary__binary-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.ws-primary__binary-row code {
+  background: var(--ws-code-bg, #f3f4f6); border: 1px solid var(--ws-line, #e5e7eb);
+  border-radius: 6px; padding: 3px 7px; font-size: 12px;
+}
+
 /* ── Source / Security Explorer (Phase 2.3) ──────────────────────────────────
    Uses the existing --ws-* tokens (no new colors). Two-pane investigation view. */
 .ws-ex-layout {

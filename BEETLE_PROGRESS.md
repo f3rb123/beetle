@@ -158,12 +158,59 @@ Baseline before start: iOS grade A 97/100 (0/0/0); MobSF 50/100 grade B. Target:
       dropped_no_evidence 3 -> 0. findings 82 -> 82 (unchanged).
     Commit-ready: Y
     Tests: 780 passed, 11 skipped.
+    EVIDENCE CONFIRMED (all 3, not just the API key — none rides through on a relaxed rule):
+      each carries path + line + snippet and passes the real secret_intel.py:747 gate —
+      Google API Key ("API_KEY = AIzaSy…"), OAuth Client ID ("CLIENT_ID = 872846…"),
+      Firebase App ID ("GOOGLE_APP_ID = 1:8728…"), all at Runner.app/GoogleService-Info.plist.
+      NUANCE: line=1 is NOMINAL — a binary plist has no "line 1". The snippet is genuine
+      (key-derived), but the line number is a placeholder. Same class as RUN 4's
+      "offset must not render as a source line" problem — carried into RUN 4.
 
-[ ] RUN 4 — View-Code correct evidence location (iOS-only)
+[x] RUN 4 — View-Code correct evidence location (iOS-only)  DONE
     Files changed:
-    Acceptance: 
-    Commit-ready:
-    Resume notes:
+      backend/analyzers/ios_analyzer.py            — _record_binary_format_files(): records
+        every bundle file that is binary-format BY MAGIC BYTES (Mach-O magic / bplist00)
+        into results["binary_evidence_files"]. Content-detected, not extension-guessed —
+        an IPA's Info.plist may be XML or binary.
+      backend/analyzers/evidence_selection/view.py — _is_binary_evidence() + _as_binary_evidence():
+        a binary primary is re-rendered as BINARY evidence — line is ZEROED, the bogus number
+        moves to string_index, artifact=True (the UI already hides View Source/View Smali for
+        artifacts), language = "Mach-O Binary" | "Binary Property List".
+      backend/analyzers/evidence_selection/engine.py — threads platform + binary_files into
+        build_evidence_view. Both new params default to None => Android behaviour byte-identical
+        by construction (gated on platform == "ios").
+      frontend/.../evidence-model.js, panels.jsx, styles/workspace.css — binary-evidence panel:
+        shows the matched symbol + "string #N", and an explicit note that a compiled binary has
+        no source line. Source snippet <pre> is suppressed for binary primaries.
+    WHAT THE "LINE" ACTUALLY WAS (verified, not assumed): code_analyzer._collect_ios_files:552-557
+      does NOT read a Mach-O as source — it replaces the content with _extract_strings(raw)
+      (printable runs joined by newlines). So "Runner:8731" is the INDEX OF A STRING in that
+      synthetic listing. It is neither a source line NOR a byte address. The prompt asked for an
+      "address"; there is no address to show without re-parsing the Mach-O, so the panel names the
+      artifact honestly (symbol + string index) rather than inventing a plausible-looking offset.
+      -> Candidate follow-up (NOT done): compute true __cstring byte offsets. Same root cause as
+         RUN 1.1's residual path truncation. Would need Mach-O section parsing.
+    Acceptance: PASS (iOS report regenerated; iOS-only run, no Android diff required).
+      - 7 findings previously rendered a strings index AS A SOURCE LINE (Runner:8731 MD5,
+        Runner:8620 Keychain, Runner:8732 SHA-1, FirebaseCrashlytics:7184, …). Now all
+        line=0, string_index preserved, "Mach-O Binary" + binary panel, no View Source.
+      - THE BINARY-PLIST CLASS (the one the human flagged): the ONLY file-resolved finding was
+        "Firebase Storage Bucket Reference" at GoogleService-Info.plist:3 WITH AN EMPTY SNIPPET —
+        a BINARY plist, so line 3 was a parse artifact, not a source line. Now rendered as
+        "Binary Property List", line=0. This is the same class as RUN 3's nominal line=1.
+      - 0 binary findings render a source line (asserted).
+      - 0 findings lost a real source line without being marked binary (asserted).
+      - Every binary-marked path is in the content-detected binary set (no path-heuristic
+        over-reach). 81 findings marked binary = 7 strings-index + ~74 binary-hardening
+        findings on framework executables (which already had line=0).
+      - findings 82 -> 82, severity unchanged.
+    HONEST GAP: the acceptance clause "the file-resolved finding highlights the correct line"
+      has NO positive case in this app — a Flutter release IPA ships no text source, so there is
+      no genuine source-line finding to highlight. The only file-resolved finding WAS the binary
+      plist, now correctly binary. No line-remapping bug was found or fixed; the wrong line was
+      the binary-plist artifact. Re-test this clause on an app with real Swift/ObjC source.
+    Commit-ready: Y
+    Tests: backend 780 passed / 11 skipped; frontend build OK; evidence-model test passed.
 
 [ ] RUN 5 — iOS app icon fallback (iOS-only)
     Files changed:

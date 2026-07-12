@@ -552,7 +552,22 @@ function PrimaryEvidenceCard({ view, finding, onOpenCode }) {
           {p.owner_type ? <span className="ws-badge ws-badge--own" title={ownershipLabel({ ownership: p.owner_type }) || p.owner_type}>{ownershipLabel({ ownership: p.owner_type }) || p.owner_type}</span> : null}
           {p.source ? <span className="ws-badge ws-badge--engine">{p.source}</span> : null}
         </div>
-        {p.snippet ? <pre className="ws-code">{p.snippet}</pre> : null}
+        {/* Mach-O evidence: a compiled binary has no source line. Show the matched
+            symbol and where it sits in the binary's strings listing — never file:line. */}
+        {p.binary ? (
+          <div className="ws-primary__binary">
+            <div className="ws-primary__binary-row">
+              <span className="ws-badge">Binary evidence</span>
+              {p.symbol ? <code className="ws-mono">{p.symbol}</code> : null}
+              {p.stringIndex ? <span className="ws-muted ws-mono">string #{p.stringIndex}</span> : null}
+            </div>
+            <div className="ws-primary__note">
+              Compiled binary — no source line exists. The proof is the symbol/string above,
+              recovered from the binary's extracted strings.
+            </div>
+          </div>
+        ) : null}
+        {p.snippet && !p.binary ? <pre className="ws-code">{p.snippet}</pre> : null}
         {(p.reasons || []).length ? (
           <ul className="ws-primary__reasons">
             {p.reasons.slice(0, 5).map((r, i) => <li key={i}>✓ {r}</li>)}
