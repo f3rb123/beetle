@@ -1058,6 +1058,37 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       no analyzer code touched).
     Commit-ready: N/A (report only; nothing to commit but this note). Human to pick follow-up rules.
 
+[x] RUN 20 — iOS view-code regression: decodable binary plists shown as binary card  DONE
+    VERIFIED FIRST (not assumed): swept ALL 330 bundle files through the file server — ZERO
+    viewable-text files wrongly carded; inspect_file/_maybe_decode_plist was already correct
+    (plists->XML text, Mach-O->card). The bug was in the FINDING evidence path.
+    ROOT CAUSE (hypothesis 1 — content-detection too aggressive): RUN 4's
+      _record_binary_format_files flagged EVERY bplist (magic bytes) as binary_evidence, so a
+      finding on a DECODABLE plist showed the "Binary Property List" card and hid View Source.
+      Reproduced: cloud_firebase_storage_bucket on GoogleService-Info.plist had evidence
+      binary=True/artifact=True — but that plist decodes to viewable XML.
+    LINE DRAWN (matches human guidance): decodable bplist -> source; non-decodable blob
+      (embedded.mobileprovision CMS/PKCS#7) and Mach-O -> card. Same "viewable" definition the
+      file server uses, so card and viewer never disagree.
+    FIX (ios_analyzer.py only, iOS-scoped):
+      1. _record_binary_format_files adds a bplist ONLY if plistlib CANNOT decode it (Mach-O
+         always). binary_evidence_files 107 -> 40 (67 decodable plists removed).
+      2. NEW _remap_decodable_plist_finding_lines: a plist finding's raw-bplist line is a parse
+         artifact meaningless for the decoded XML; remap to the decoded-XML line of the finding's
+         value. cloud_firebase line 3 -> 32 (the STORAGE_BUCKET value line).
+    BEFORE->AFTER (cloud_firebase): binary True->None, artifact True->None (shows SOURCE); line
+      3->32; snippet now the real XML key line. Still correctly carded: Runner / webview Mach-O /
+      embedded.mobileprovision (proved via the new scan's file server). ios_md5_hash on Runner
+      keeps binary=True.
+    INVARIANTS: iOS 14->14, score 92/B held. ONE finding reclassified (cloud_firebase binary
+      -> source) — a legitimate evidence-type correction, flagged; no severity/owner/count change.
+    ANDROID UNAFFECTED (iOS-only fns; view.py untouched): 46->46, 35/F, endpoints/ips/secrets/
+      severity/permissions/components/finding-identities all identical.
+    L1 CROSS-CHECK: iOS side of L1's binary-evidence edge cases (decodable-plist edge). Android
+      L1 (.dex/.arsc string-index) remains open.
+    Files: backend/analyzers/ios_analyzer.py; NEW backend/tests/test_ios_decodable_plist_viewable.py.
+    Commit 176ce7b. Tests: 897 passed, 11 skipped.
+
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
 - 2026-07-12  Plan created. Nothing run yet. Next: RUN 1.
