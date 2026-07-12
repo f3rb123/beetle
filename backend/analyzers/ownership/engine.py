@@ -175,11 +175,19 @@ def derive_signals(finding: CanonicalFinding) -> dict:
 
 
 # Evidence that is AUTHORITATIVE inside a compiled binary, so the compiled-binary demotion
-# below must not apply to it. A dynamic-import-table entry proves the binary links that
-# function — it is a structural fact, not the offset-only string-table coincidence the
-# demotion exists to suppress. Deliberately a one-member set: this is NOT "any
-# high-confidence binary finding", and widening it would re-open the Dart-AOT FP class.
-_AUTHORITATIVE_BINARY_EVIDENCE = frozenset({"imported_symbol"})
+# below must not apply to it. Both members are STRUCTURAL FACTS read out of the Mach-O itself
+# — a dynamic-import-table entry proves the binary links that function; a protection flag is
+# read from the load commands / symbol table — not the offset-only string-table coincidence the
+# demotion exists to suppress.
+#
+# Deliberately keyed on the evidence KIND and nothing else. This is NOT "any high-confidence
+# binary finding": a code_pattern hit inside a Mach-O (the RUN 4 string-index class) is still
+# demoted, and test_exemption_is_narrow_not_confidence_based locks that.
+#
+# Safe for the Dart-AOT FP class because that class is suppressed BY CONTENT one layer earlier
+# (binary_protections keys on the _kDart*Snapshot* symbols), so no missing-canary/ARC finding is
+# ever emitted for App.framework/App to be re-promoted here.
+_AUTHORITATIVE_BINARY_EVIDENCE = frozenset({"imported_symbol", "binary_protection"})
 
 
 # ════════════════════════════════════════════════════════════════════════════

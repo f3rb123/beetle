@@ -435,7 +435,24 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                     # Dart-AOT blob, and missing ARC on a pure-C library, are NOT findings.
                     from . import binary_protections
                     _main = results["app_info"].get("bundle_executable") or ""
-                    prot_rows = binary_protections.build_table(lief_results, main_binary=_main)
+                    _bundle_rel0 = relativize_path(app_bundle, tmpdir) if app_bundle else ""
+
+                    def _owner_of(rel_binary: str) -> str:
+                        """Ownership Engine verdict for a bundle binary, via its FULL
+                        bundle-relative path — the same fix RUN 8 made (a bare name is
+                        mistaken for a CocoaPod). Drives HIGH-vs-MEDIUM severity below."""
+                        from .ownership import get_engine as _own_engine
+                        from .ownership.types import OwnershipContext as _Ctx
+                        from .canonical_finding import CanonicalFinding as _CF
+                        path = f"{_bundle_rel0}/{rel_binary}" if _bundle_rel0 else rel_binary
+                        res = _own_engine().classify(
+                            _CF(title="_bin", file_path=path, platform="ios",
+                                evidence_type="binary_protection"),
+                            _Ctx(platform="ios"))
+                        return res.owner_type
+
+                    prot_rows = binary_protections.build_table(
+                        lief_results, main_binary=_main, owner_of=_owner_of)
                     results["binary_protections"] = prot_rows
                     prot_findings, prot_suppressed = binary_protections.build_findings(prot_rows)
                     results["findings"].extend(prot_findings)

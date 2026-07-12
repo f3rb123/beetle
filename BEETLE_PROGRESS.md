@@ -538,11 +538,37 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Acceptance: PASS. Table renders (40 rows); NO HIGH FP on App.framework/App (no finding at all).
       findings 85 -> 86 (+1: ONE consolidated missing-canary finding naming 7 binaries - not one
       finding per binary, per RUN 8's lesson). severity 0/0/3/36/47.
-    SEVERITY CALL (deliberate, flagged for RUN 15): missing-protection findings are MEDIUM, not
-      HIGH. A missing canary in a THIRD-PARTY framework is a real hardening gap in vendor code,
-      not a directly exploitable weakness in the app. MobSF calls it HIGH; that overstates it and
-      a defensible score is the whole point. So the report carries ZERO HIGHs - every one of
-      MobSF's 11 HIGHs here is either an FP (5) or an overstatement (6). Locked by test.
+    SEVERITY IS OWNERSHIP-BASED (refined on human review; keyed off the Ownership Engine field
+      RUN 8 fixed, NOT a new heuristic):
+        MEDIUM - missing protection in a VENDOR/third-party framework (someone else's code; a
+                 real hardening gap but not a directly exploitable app weakness). MobSF calls
+                 these HIGH, which overstates them.
+        HIGH   - missing protection in the APP'S OWN native code (owner == APPLICATION and NOT
+                 the Dart-AOT blob): the app shipped unhardened native code and owns the fix.
+      NO OUTPUT CHANGE FOR THIS APP (verified): every flagged binary is a vendor framework, and
+      Runner has both canary and ARC, so there is nothing app-owned to flag. findings 86 -> 86,
+      severity identical (0 crit / 0 HIGH / 3 med / 36 low / 47 info), same consolidated
+      missing-canary finding naming the same 7 vendor binaries. The report still carries ZERO
+      HIGHs - every one of MobSF's 11 HIGHs here is either an FP (5) or an overstatement (6).
+    A DEAD-CODE BUG CAUGHT WHILE DOING THIS (would have silently broken rule (b)): in the LIVE
+      pipeline the main binary Runner classified as OpenSourceLibrary, not APPLICATION, because
+      RUN 8's exemption only covered evidence_type == "imported_symbol" - so a protection-flag
+      finding on a compiled Mach-O was still demoted, and the HIGH branch could NEVER have fired.
+      The unit test passed only because it stubbed the owner lookup. FIX: added
+      "binary_protection" to _AUTHORITATIVE_BINARY_EVIDENCE - both members are STRUCTURAL FACTS
+      read out of the Mach-O (import table / load commands + symbol table), not the offset-only
+      string-table coincidence the demotion suppresses. Still keyed on evidence KIND, never on
+      confidence: the RUN 4 string-index class (code_pattern in a Mach-O) is STILL demoted, and
+      test_exemption_is_narrow_not_confidence_based still locks that. Safe for the Dart-AOT class
+      because that is suppressed BY CONTENT one layer earlier, so no App.framework/App finding
+      exists to be re-promoted. Two new tests assert Runner -> APPLICATION and
+      connectivity_plus -> library through the REAL engine (not a stub).
+    Tests locking severity from BOTH sides (as with the RUN 8 exemption):
+      (a) vendor-framework missing protection is MEDIUM and never HIGH;
+      (b) an app-own NATIVE binary (owner==APPLICATION, non-Dart-AOT) missing a canary IS HIGH
+          (synthetic fixture - this app ships no such binary);
+      plus: Dart-AOT is never promoted to HIGH even though it IS the app's own code, because it
+      is a Dart snapshot, not clang-compiled native code.
     Android diff: CONTENT-IDENTICAL. endpoints/ips/secrets identical, severity identical
       (C1/H11/M7/L4/I22), finding identities identical (45->45), permissions content-identical,
       MASVS coverage identical, no binary_protections key and no macho_* findings on Android.

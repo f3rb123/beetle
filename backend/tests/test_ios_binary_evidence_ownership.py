@@ -91,3 +91,30 @@ def test_exemption_is_narrow_not_confidence_based():
     )
     assert is_library_owner(res.owner_type)
     assert res.matched_rule == "ios_compiled_binary"
+
+
+# ── RUN 9: protection-flag evidence is authoritative too ─────────────────────
+def test_protection_flag_on_the_main_binary_resolves_to_application():
+    # RUN 9 keys HIGH-vs-MEDIUM off THIS verdict. If the app's own main executable classified as
+    # a library here, an app-owned missing canary could never be HIGH -- the rule would be dead
+    # code. A protection flag is read from the Mach-O's load commands / symbol table: a
+    # structural fact, exactly like an import-table entry.
+    res = _classify(
+        title="Framework Binaries Without Stack Canary",
+        file_path="Payload/Runner.app/Runner",
+        evidence_type="binary_protection",
+        severity="high",
+    )
+    assert res.owner_type == OwnerType.APPLICATION
+    assert not is_library_owner(res.owner_type)
+
+
+def test_protection_flag_on_a_vendor_framework_stays_library_owned():
+    # The other side: a bundled vendor framework is still the vendor's code -> MEDIUM, not HIGH.
+    res = _classify(
+        title="Framework Binaries Without Stack Canary",
+        file_path="Payload/Runner.app/Frameworks/connectivity_plus.framework/connectivity_plus",
+        evidence_type="binary_protection",
+        severity="medium",
+    )
+    assert is_library_owner(res.owner_type)

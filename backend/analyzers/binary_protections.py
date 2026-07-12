@@ -38,15 +38,27 @@ def _kind(b: dict, is_main: bool) -> str:
     return KIND_FRAMEWORK
 
 
-def build_table(binaries: list, main_binary: str = "") -> list[dict]:
-    """One row per Mach-O — the main executable FIRST, then frameworks alphabetically."""
+def build_table(binaries: list, main_binary: str = "", owner_of=None) -> list[dict]:
+    """One row per Mach-O — the main executable FIRST, then frameworks alphabetically.
+
+    ``owner_of(relative_path) -> owner_type`` is the shared Ownership Engine (the same one RUN 8
+    fixed so the app's main executable resolves to APPLICATION instead of being mistaken for a
+    CocoaPod). Severity below keys off THAT decision rather than inventing a second heuristic.
+    """
     rows = []
     for b in binaries or []:
         if not isinstance(b, dict):
             continue
         rel = b.get("binary") or ""
         is_main = bool(main_binary) and rel.replace("\\", "/") == main_binary
+        owner = ""
+        if owner_of:
+            try:
+                owner = str(owner_of(rel) or "")
+            except Exception:
+                owner = ""
         rows.append({
+            "owner_type": owner,
             "binary": rel,
             "kind": _kind(b, is_main),
             "nx": bool(b.get("has_nx_stack", True)),
@@ -79,16 +91,40 @@ def _suppression_reason(row: dict, protection: str) -> str:
     return ""
 
 
+APPLICATION_OWNER = "Application"
+
+
+def _is_app_owned_native(row: dict) -> bool:
+    """The missing protection is in code the APP ITSELF ships as native code.
+
+    Keyed on the Ownership Engine's verdict (the field RUN 8 fixed), not a new heuristic. The
+    Dart-AOT blob is excluded even though it is the app's own code: it is a Dart snapshot, not
+    clang-compiled native code, so a canary was never applicable to it — that is the whole point
+    of the guard.
+    """
+    if row.get("is_dart_aot"):
+        return False
+    return str(row.get("owner_type") or "") == APPLICATION_OWNER
+
+
 def build_findings(rows: list) -> tuple[list, dict]:
-    """(findings, suppressed) — one consolidated finding per missing protection.
+    """(findings, suppressed) — consolidated findings, split by OWNERSHIP.
 
     Consolidated, not one-per-binary: a per-binary explosion would swamp the report (RUN 8's
-    lesson). Severity is MEDIUM, not HIGH: a missing canary in a THIRD-PARTY framework is a real
-    hardening gap in vendor code, not a directly exploitable weakness in the app — HIGH would
-    overstate it, and a defensible score is the point (RUN 15).
+    lesson).
+
+    SEVERITY IS OWNERSHIP-BASED:
+      * MEDIUM for a THIRD-PARTY/vendor framework — a real hardening gap in someone else's code,
+        not a directly exploitable weakness in the app. MobSF calls these HIGH; that overstates
+        them, and a defensible score is the point (RUN 15).
+      * HIGH only when the missing protection is in the APP'S OWN native code (owner ==
+        APPLICATION, and not the Dart-AOT blob) — there the app itself shipped unhardened
+        native code and owns the fix.
     """
     findings, suppressed = [], {"stack_canary": [], "arc": []}
-    missing = {"stack_canary": [], "arc": []}
+    # protection -> {"app": [...], "vendor": [...]}
+    missing = {"stack_canary": {"app": [], "vendor": []},
+               "arc": {"app": [], "vendor": []}}
 
     for row in rows:
         for protection in ("stack_canary", "arc"):
@@ -98,7 +134,8 @@ def build_findings(rows: list) -> tuple[list, dict]:
             if reason:
                 suppressed[protection].append({"binary": row["binary"], "reason": reason})
             else:
-                missing[protection].append(row["binary"])
+                bucket = "app" if _is_app_owned_native(row) else "vendor"
+                missing[protection][bucket].append(row["binary"])
 
     specs = {
         "stack_canary": {
@@ -121,23 +158,27 @@ def build_findings(rows: list) -> tuple[list, dict]:
     }
 
     for protection, spec in specs.items():
-        bins = sorted(missing[protection])
-        if not bins:
-            continue
-        findings.append({
-            "rule_id": spec["rule_id"],
-            "title": spec["title"],
-            "severity": "medium",
-            "category": "Binary Hardening",
-            "cwe": spec["cwe"], "owasp": spec["owasp"], "masvs": spec["masvs"],
-            "description": (f"{spec['text']}\n\nAffected binaries ({len(bins)}): "
-                            f"{', '.join(bins)}"),
-            "recommendation": spec["fix"],
-            "file_path": bins[0],
-            "snippet": ", ".join(bins),
-            "affected_binaries": bins,
-            "confidence": 95,             # structural fact from the symbol table, not a guess
-            "evidence_type": "binary_protection",
-            "provenance": "beetle_native",
-        })
+        for bucket, severity in (("app", "high"), ("vendor", "medium")):
+            bins = sorted(missing[protection][bucket])
+            if not bins:
+                continue
+            owned = (" in the application's own native code" if bucket == "app"
+                     else " in bundled third-party frameworks")
+            findings.append({
+                "rule_id": spec["rule_id"] + ("_app" if bucket == "app" else ""),
+                "title": spec["title"] + (" (Application Code)" if bucket == "app" else ""),
+                "severity": severity,
+                "category": "Binary Hardening",
+                "cwe": spec["cwe"], "owasp": spec["owasp"], "masvs": spec["masvs"],
+                "description": (f"{spec['text']}{owned}\n\nAffected binaries ({len(bins)}): "
+                                f"{', '.join(bins)}"),
+                "recommendation": spec["fix"],
+                "file_path": bins[0],
+                "snippet": ", ".join(bins),
+                "affected_binaries": bins,
+                "owner_class": bucket,
+                "confidence": 95,         # structural fact from the symbol table, not a guess
+                "evidence_type": "binary_protection",
+                "provenance": "beetle_native",
+            })
     return findings, suppressed
