@@ -1308,10 +1308,17 @@ _FIREBASE_PLIST_KEYS = (
 )
 
 
+def _secret_has_evidence(s: dict) -> bool:
+    """Mirror of the evidence gate in secret_intel._build_canonical (secret_intel.py:747):
+    a secret without path AND line AND snippet is dropped there ("no evidence, no finding").
+    """
+    path = s.get("full_path") or s.get("file_path") or s.get("source")
+    return bool(path and s.get("line") and s.get("snippet"))
+
+
 def _extract_firebase_plist_config(app_bundle: str, results: dict) -> None:
     if not app_bundle or not os.path.isdir(app_bundle):
         return
-    existing_values = {str(s.get("value") or "") for s in results.get("secrets") or []}
     added = 0
     for root, _dirs, files in os.walk(app_bundle):
         for fname in files:
@@ -1329,9 +1336,20 @@ def _extract_firebase_plist_config(app_bundle: str, results: dict) -> None:
                 if not isinstance(val, str) or not val.strip():
                     continue
                 val = val.strip()
-                if val in existing_values:
-                    continue  # already surfaced by the generic scanner — do not duplicate
-                existing_values.add(val)
+                # GoogleService-Info.plist is a BINARY plist, so the generic scanners
+                # extract the value but cannot quote a source line — they emit it with an
+                # empty snippet, and the shared evidence gate then drops it silently. A
+                # blind "already seen -> skip" therefore SUPPRESSED the key entirely: the
+                # only copy with real evidence (this one) was never added. So: keep a
+                # generic hit that HAS evidence, but replace evidence-less duplicates,
+                # which would not survive the gate anyway.
+                prior = [s for s in results.get("secrets") or []
+                         if str(s.get("value") or "").strip() == val]
+                if any(_secret_has_evidence(s) for s in prior):
+                    continue  # already surfaced WITH evidence — do not duplicate
+                if prior:
+                    results["secrets"] = [s for s in results["secrets"]
+                                          if str(s.get("value") or "").strip() != val]
                 results.setdefault("secrets", []).append({
                     "title": title, "name": title,
                     "severity": "info", "category": "API Key",

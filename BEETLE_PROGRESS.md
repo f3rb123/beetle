@@ -118,13 +118,46 @@ Baseline before start: iOS grade A 97/100 (0/0/0); MobSF 50/100 grade B. Target:
     Commit-ready: Y
     Tests: 780 passed, 11 skipped.
 
-[ ] RUN 3 — Google API key surfaces as INFO (SHARED: secret pipeline)
-    Files changed:
-    Drop point found (file:line): 
-    Android diff: 
-    Acceptance: 
-    Commit-ready:
-    Resume notes:
+[x] RUN 3 — Google API key surfaces as INFO (SHARED: secret pipeline)  DONE
+    Files changed: backend/analyzers/ios_analyzer.py ONLY (_extract_firebase_plist_config
+      dedupe + new _secret_has_evidence helper). The shared secret pipeline (secret_intel.py,
+      secret_intelligence/engine.py) was NOT modified — see below.
+    Drop point found (file:line): backend/analyzers/secret_intel.py:747-748
+        path, line, snippet = _evidence(secret)
+        if not (path and line and snippet):
+            return None   # Task 4 — no evidence, no finding.
+    THE PROMPT'S PREMISE WAS WRONG. It said the key is "extracted then removed downstream"
+      by visibility/status masking in process_secrets:846 / engine.annotate:510. It is not.
+      Proven chain (each step verified live, not assumed):
+        1. GoogleService-Info.plist is a BINARY plist. The generic scanners DO find the AIza
+           value but cannot quote a source line, so they emit it with an EMPTY snippet
+           (evidence_scanner: path + line=3, snippet ''; legacy common.py: no path/line/snippet).
+        2. Those evidence-less copies land in results["secrets"] BEFORE the iOS Firebase
+           extractor runs.
+        3. _extract_firebase_plist_config then saw the value already present and SKIPPED it as
+           a duplicate — so the ONE copy with real evidence (its own, with a snippet) was never
+           added. Confirmed by results["scan_metrics"]["firebase_plist_secrets"] being ABSENT.
+        4. process_secrets -> _build_canonical -> the evidence gate at secret_intel.py:747
+           dropped all 3 evidence-less copies silently (secrets_summary.dropped_no_evidence = 3).
+           They never reach suppressed_secrets, which is why the iOS report showed
+           0 visible AND 0 suppressed secrets.
+      FIX: the evidence gate is CORRECT ("no evidence, no finding") and was left alone. Instead
+      the iOS extractor's dedupe now keeps a generic hit that HAS evidence, but REPLACES
+      evidence-less duplicates that could not survive the gate anyway. iOS-only file, so the
+      shared pipeline and Android are untouched by construction.
+    Android diff: BYTE-IDENTICAL. InsecureShop.apk secrets 1->1 identical, suppressed_secrets
+      11->11 identical, secrets_summary identical, endpoints 1->1, ips 0->0, findings 45->45,
+      severity identical.
+      HONEST CAVEAT: InsecureShop contains NO Firebase/AIza key, so the prompt's claim that
+      "Android already shows the same AIza key as INFO" could NOT be demonstrated on this
+      corpus. What IS proven is that Android's secrets output did not change at all.
+    Acceptance: PASS. iOS Hardcoded Secrets table, visible secrets 0 -> 3, all INFO:
+        Google API Key         AIza*******************************88rI   (= MobSF's AIzaSy…88rI)
+        Google OAuth Client ID 8728****…apps.googleusercontent.com
+        Firebase App ID        1:87*********************************a129
+      dropped_no_evidence 3 -> 0. findings 82 -> 82 (unchanged).
+    Commit-ready: Y
+    Tests: 780 passed, 11 skipped.
 
 [ ] RUN 4 — View-Code correct evidence location (iOS-only)
     Files changed:
