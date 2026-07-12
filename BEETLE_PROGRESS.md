@@ -6,6 +6,20 @@ Status key:  [ ] TODO   [~] IN-PROGRESS   [x] DONE   [!] BLOCKED (needs human)
 Baseline before start: iOS grade A 97/100 (0/0/0); MobSF 50/100 grade B. Target: correct + beats MobSF, Android unchanged.
 
 ═══════════════ METHODOLOGY — READ BEFORE ANY SHARED-FILE RUN ═══════════════
+
+*** SECRET-MASKING RULE (durable — 3 confirmed bypasses: RUN 12, 13, 21) ***
+ANY new output surface that renders bundle-derived strings — PDF (pdf_generator.py), a UI
+panel, a JSON/API export, SARIF, anything — MUST route every rendered value through
+secret_intel.mask_value (or strings_section.redact, which wraps it). The masking pipeline only
+protects the fields explicitly passed to it: a NEW surface that reads results[...] and prints
+raw values bypasses it silently and leaks credentials. History:
+  RUN 12 — Property Lists printed the Firebase API key in plaintext.
+  RUN 13 — the Strings section printed base64 "Potential Secret" blobs raw.
+  RUN 21 — the PDF's _string_analysis_section printed those same base64 values raw.
+Each was a DIFFERENT output path with its own read of the raw data. When adding or reviewing
+any surface: grep it for direct results[...] value rendering and confirm each credential-class
+value is masked. A green test does not prove this — only reading the rendered artifact does.
+
 (applies to RUN 13, 15, 16, 17 and every future shared-file change)
 
 THE ANDROID GUARD IS ORDER-INSENSITIVE ON SET-DERIVED FIELDS.
