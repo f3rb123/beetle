@@ -131,7 +131,19 @@ def analyze_macho(binary_path: str) -> dict:
         pass
 
     try:
-        out["imported_syms"] = [s.name for s in m.imported_symbols][:2000]
+        _all_imports = [s.name for s in m.imported_symbols]
+        out["imported_syms"] = _all_imports[:2000]
+        # The 2000 cap is for DISPLAY and really does truncate (webview_flutter_wkwebview
+        # imports 2432). Record it so a truncated list is never mistaken for a complete one.
+        out["imported_syms_total"] = len(_all_imports)
+        out["imported_syms_truncated"] = len(_all_imports) > 2000
+        # Scan the FULL, UNCAPPED list: _fopen/_malloc/_sscanf/_strlen appear ONLY past index
+        # 2000 in that framework, so scanning out["imported_syms"] would silently miss them.
+        # Mach-O only — the ELF path below is untouched, so Android output cannot change.
+        from . import binary_api_scan
+        hits = binary_api_scan.match_symbols(_all_imports)
+        if hits:
+            out["api_scan"] = hits
     except Exception:
         pass
 

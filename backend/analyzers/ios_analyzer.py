@@ -422,7 +422,24 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                         "binaries_scanned": len(lief_results),
                         "objc_class_total": objc_class_count,
                         "instrumentation_hits": inst_hits,
+                        "truncated_symbol_lists": [
+                            r.get("binary") for r in lief_results
+                            if r.get("imported_syms_truncated")
+                        ],
                     }
+                    # Imported-symbol API scan across the main binary AND every framework:
+                    # ONE consolidated finding per class (insecure API / logging / malloc),
+                    # each listing the symbols that are genuinely in the import table.
+                    from . import binary_api_scan
+                    api_findings = binary_api_scan.build_findings(lief_results, platform="ios")
+                    if api_findings:
+                        results["findings"].extend(api_findings)
+                        results["binary_api_scan"] = {
+                            f["rule_id"]: {
+                                "symbols": f["matched_symbols"],
+                                "binaries": f["matched_binaries"],
+                            } for f in api_findings
+                        }
         except Exception as _e:
             log.debug(f"lief macho scan failed: {_e}")
 

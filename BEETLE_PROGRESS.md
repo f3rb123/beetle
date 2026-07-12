@@ -17,6 +17,13 @@ apk.get_permissions() at android_analyzer.py:1353). Compare these as SETS / mult
     permissions (all / classified / dangerous), and any other set-derived collection.
 Concretely:  sorted(json.dumps(x, sort_keys=True) for x in lst)  on both sides, then compare.
 
+ALSO MASK VOLATILE FIELDS before any byte-compare: timestamp / scan_time / generated_at /
+created_at / updated_at. evidence_bundle carries a scan-time timestamp, so two scans of the
+SAME apk on the SAME build are never byte-equal.
+AND: Android findings still contain residual run-to-run nondeterminism even after masking
+(see L4) - a rejected evidence candidate's line number moves between runs. Prove any findings
+delta with a SAME-BUILD DOUBLE SCAN before attributing it to your change.
+
 WHY THIS RULE EXISTS: RUN 6's Android diff reported "permissions identical: False" and it was
 a PHANTOM failure — same 5 permissions, different order, cause proven pre-existing (3 container
 restarts, no rebuild, 3 different orders). Without this rule RUN 13/15/16 will chase the same
@@ -367,11 +374,55 @@ NO code change and show the order moves on its own). Only then is it safe to pas
 
 ═══════════════ TIER 2 — PARITY + DIFFERENTIATORS ═══════════════
 
-[ ] RUN 8 — Binary insecure-API + logging + malloc scan (iOS-only)
+[~] RUN 8 - Binary insecure-API + logging + malloc scan (iOS-only)  CODE DONE - 2 DECISIONS PENDING
     Files changed:
-    Acceptance (findings shown, MASVS-CODE off 0/100): 
-    Commit-ready:
-    Resume notes:
+      NEW backend/analyzers/binary_api_scan.py - symbol sets + match_symbols() + build_findings()
+        (ONE consolidated finding per class listing matched symbols; MobSF's format).
+      backend/analyzers/lief_analyzer.py - scans the FULL uncapped import list at parse time;
+        records imported_syms_total / imported_syms_truncated. Mach-O ONLY (ELF path untouched).
+      backend/analyzers/ios_analyzer.py - emits the 3 findings + results["binary_api_scan"];
+        records lief_macho.truncated_symbol_lists.
+    THE 2000 CAP *WAS* TRUNCATING - AND IT MATTERED (why the prompt's "use imported_syms" fails):
+      webview_flutter_wkwebview imports 2432 symbols; only 2000 were kept. _fopen, _malloc,
+      _sscanf, _strlen appear ONLY PAST INDEX 2000 in that framework - scanning the capped field
+      would have MISSED ALL FOUR. The scan runs against the full uncapped list at parse time; the
+      cap is kept for display and truncation is now recorded, never silent.
+    Acceptance part 1 - FINDINGS SHOWN: PASS. findings 82 -> 85 (+3, all real; each traced to a
+      symbol genuinely in the import table; confidence 95, evidence_type "imported_symbol").
+        Binary Imports Insecure C APIs         10 symbols, 29 binaries  CWE-676/M7/MASVS-CODE-8
+          _fopen _memcpy _printf _sprintf _sscanf _strcat _strcpy _strlen _strncpy _vsnprintf
+        Binary Imports Uncontrolled Allocation  _malloc, 27 binaries    CWE-789/M7/MASVS-CODE-8
+        Binary Imports Logging API (NSLog)      _NSLog,   6 binaries    CWE-532/M9/MASVS-STORAGE-3
+    MobSF CROSS-CHECK: MATCHED AND EXCEEDED. Every MobSF symbol found (_fopen _memcpy _printf
+      _sscanf _strlen _strncpy _vsnprintf / _NSLog / _malloc), NOTHING missed, plus 3 that MobSF
+      MISSED: _sprintf, _strcat, _strcpy.
+    Acceptance part 2 - "MASVS-CODE moves off 0/100": NOT ACHIEVED, AND THE CLAUSE IS BACKWARDS.
+      masvs_intel.build_coverage:159-163 => score = (controls_present/expected)*60 + (40 - penalty).
+      FINDINGS ARE PENALTIES, NOT CONTROLS. MASVS-CODE was ALREADY 0 before RUN 8 (0 controls
+      detected, 74 category findings, penalty already capped at 40). Adding 3 more findings can
+      only hold it at 0 - it can never raise it. Moving MASVS-CODE off 0 requires DETECTING
+      CONTROLS ("Safe Input Handling", "Up-to-date Dependencies") in _detect_controls - a
+      different feature. NOT hand-tuned: CLAUDE.md forbids tuning to hit a number, and score
+      realism is RUN 15's job.
+    Android diff: CONTENT-IDENTICAL (guard applied per METHODOLOGY). endpoints 1->1, ips 0->0,
+      secrets identical, severity identical (C1/H11/M7/L4/I22), permissions content-identical,
+      finding identities identical, NO binary_api_scan key and NO api_scan on any ELF binary.
+      Residual byte deltas = a scan timestamp + the L4 rejected-candidate jitter, PROVEN
+      pre-existing by scanning the same APK twice on the same build.
+    DECISION 1 PENDING - SEVERITY: insecure-API and malloc are DECLARED medium (MobSF: WARNING)
+      but land as INFO. Cause: ownership/engine.py:324 _match_ios_binary demotes ANY finding whose
+      file_path is a compiled Mach-O to OPEN_SOURCE_LIBRARY - the DELIBERATE Dart-AOT FP guard
+      (CLAUDE.md hard rule; RUN 9/15 depend on it). I DID fix a real attribution bug: the finding
+      was landing on the alphabetically-first Firebase framework, so an app-wide issue was being
+      blamed on GoogleSDK; it now attributes to the app's OWN main binary (Runner). But Runner is
+      still a compiled binary, so the guard demotes it anyway. Exempting
+      evidence_type == "imported_symbol" from that demotion would restore medium - an import-table
+      entry is AUTHORITATIVE, not the offset-only string-table noise the guard exists to suppress.
+      I did NOT weaken the guard unilaterally. HUMAN TO DECIDE.
+    DECISION 2 PENDING - accept that the MASVS-CODE clause is unachievable as written, or open a
+      separate run to implement control DETECTION.
+    Commit-ready: Y (code is correct and additive; the 2 decisions do not block the commit)
+    Tests: 788 passed, 11 skipped.
 
 [ ] RUN 9 — Per-binary protection table (iOS-only) — FP GUARD on App.framework/App
     Files changed:
@@ -460,6 +511,23 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     _collect_ios_files does (code_analyzer.py:552-557). If so, reuse _is_binary_evidence /
     _as_binary_evidence (already written, platform-gated) and pass the Android binary set.
     NOT a regression introduced by RUN 4 — pre-existing, merely unmasked by it.
+
+[ ] L4 - Android FINDINGS are nondeterministic run-to-run (PRE-EXISTING, deeper than L3).
+    FOUND during RUN 8's Android guard. Two scans of the SAME InsecureShop.apk on the SAME
+    build, code byte-identical, produce different findings JSON:
+        evidence_selection.rejected[...] for "Exported Intent to JS-Enabled WebView"
+        -> androidx/viewpager2/widget/ViewPager2.java  line 428  (run X)
+        -> androidx/viewpager2/widget/ViewPager2.java  line 429  (run Y)
+    A REJECTED candidate (file_score -89), not the primary - so no user-visible severity or
+    primary-evidence change. Content that matters (severity_summary, endpoints, ips, secrets,
+    permissions, finding identities) is identical.
+    Separately, evidence_bundle.timestamp differs every scan by construction (scan time).
+    WHY IT MATTERS: same reason as L3, one level deeper - literal "byte-identical Android
+    output" is NOT achievable, so a naive byte-diff always fails and can be misread as a
+    regression. The guard must mask timestamps AND tolerate this rejected-candidate jitter.
+    LIKELY CAUSE: candidate collection walks a dict/set or races the parallel scan pool, so two
+    equal-scoring match lines in the same file swap order. NOT yet root-caused.
+    OWNER: RUN 16/17. Fix = sort candidates by (file_path, line) before selection.
 
 [ ] L3 — Android permission ORDER is nondeterministic across processes (PRE-EXISTING).
     FOUND during RUN 6's Android diff. results["permissions"]["all"/"classified"/"dangerous"]
