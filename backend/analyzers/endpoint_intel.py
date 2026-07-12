@@ -148,19 +148,41 @@ def _accept_deeplink(scheme: str, rest: str) -> bool:
     return bool(rest) and len(rest) >= 2 and bool(_DEEPLINK_HOST_RE.match(rest))
 
 
+# A binary's string table has no delimiters, so adjacent literals abut and the URL regex
+# swallows them as one token ("…/batch" + "https://crashlytics…" -> one 200-char blob).
+# Split before every embedded scheme to recover the individual URLs.
+_ABUTTED_SPLIT_RE = re.compile(r"(?=(?:https?|wss?|ftps?)://)", re.I)
+
+# printf/NSString format placeholders (%@, %s, %1$s) and templating braces. In a HOST
+# these mark a runtime-assembled template, not a reachable endpoint
+# ("https://%@.app-analytics-services.com"). In a PATH they are fine — the host is still
+# a real, reportable domain — so this is checked against the host only.
+_FMT_PLACEHOLDER_RE = re.compile(r"%[@sdiuf]|%\d+\$[@sdiuf]|\{[^}]*\}|\$\{")
+
+
+def _host_of(url: str) -> str:
+    m = re.match(r"(?:https?|wss?|ftps?)://([^/\s:]+)", url, re.I)
+    return m.group(1) if m else ""
+
+
 def extract_urls_from_text(text: str) -> list[str]:
     """Accept-filtered URLs from a raw strings blob that has NO source context.
 
     For the compiled-binary path (iOS Mach-O strings), where there is no call site to
     prove against — a URL in a stripped AOT blob is a bare literal by construction, so
     the ``called`` weighting in :func:`extract_endpoints` can never fire and would drop
-    every one of them. Same accept/clean filters as the text path; no call weighting.
-    Android's text-only, called-only default never calls this.
+    every one of them. Same accept/clean filters as the text path, plus two defects that
+    only a delimiter-less string table produces: abutted literals (split) and
+    format-string hosts (dropped). Android's text-only path never calls this.
     """
     out: set[str] = set()
     for m in _URL_RE.finditer(text):
-        url = _clean(m.group(0))
-        if _accept(url):
+        for part in _ABUTTED_SPLIT_RE.split(m.group(0)):
+            url = _clean(part)
+            if not _accept(url):
+                continue
+            if _FMT_PLACEHOLDER_RE.search(_host_of(url)):
+                continue    # runtime-assembled host template, not a real endpoint
             out.add(url)
     return sorted(out)
 
