@@ -1760,7 +1760,81 @@ _KNOWN_FRAMEWORKS = {
     "SquareReaderSDK":  ("payments",   "high",   "Square Reader SDK — PCI scope, handles card data"),
     "TwilioVoice":      ("comms",      "medium", "Twilio Voice SDK"),
     "XCTest":           ("debug",      "high",   "XCTest framework — should not ship in release build"),
+
+    # ── Flutter runtime — NOT third-party SDKs ────────────────────────────────
+    # "App" is the app's OWN compiled Dart code (the AOT blob) and "Flutter" is the
+    # engine. Listing them as unknown third-party dependencies misattributes the app's
+    # own code to a vendor, so they are categorised as runtime and never flagged.
+    "App":     ("runtime", "info", "Dart AOT blob — the app's OWN compiled code, not a third-party SDK"),
+    "Flutter": ("runtime", "info", "Flutter engine runtime"),
+
+    # ── Firebase / Google (this app ships 13 Firebase modules) ────────────────
+    "FirebaseCore":               ("backend",   "info", "Firebase core SDK"),
+    "FirebaseCoreExtension":      ("backend",   "info", "Firebase core extension"),
+    "FirebaseCoreInternal":       ("backend",   "info", "Firebase core internals"),
+    "FirebaseSharedSwift":        ("backend",   "info", "Firebase shared Swift support"),
+    "FirebaseInstallations":      ("backend",   "info", "Firebase Installations — per-install identifier"),
+    "FirebaseRemoteConfig":       ("backend",   "info", "Firebase Remote Config — server-driven config"),
+    "FirebaseRemoteConfigInterop":("backend",   "info", "Firebase Remote Config interop"),
+    "FirebaseABTesting":          ("analytics", "info", "Firebase A/B Testing"),
+    "FirebaseSessions":           ("analytics", "info", "Firebase Sessions — session telemetry"),
+    "FirebasePerformance":        ("analytics", "info", "Firebase Performance Monitoring"),
+    "FirebaseCrashlytics":        ("analytics", "info", "Crashlytics crash reporting"),
+    "GoogleDataTransport":        ("utility",   "info", "Google data transport — telemetry delivery"),
+    "GoogleUtilities":            ("utility",   "info", "Google shared utilities"),
+    "FBLPromises":                ("utility",   "info", "Google FBLPromises — async primitives"),
+    "Promises":                   ("utility",   "info", "PromisesSwift — async primitives"),
+    "nanopb":                     ("utility",   "info", "nanopb — embedded protobuf codec"),
+
+    # ── Security / anti-tamper ────────────────────────────────────────────────
+    "IOSSecuritySuite":                 ("security", "info", "iOS Security Suite — jailbreak / debugger / hook detection"),
+    "flutter_jailbreak_detection_plus": ("security", "info", "Flutter jailbreak-detection plugin"),
+
+    # ── Flutter plugins present in this bundle ────────────────────────────────
+    "webview_flutter_wkwebview":     ("webview",  "info", "Flutter WKWebView plugin — renders web content in-app"),
+    "flutter_secure_storage":        ("storage",  "info", "Flutter secure storage — Keychain-backed"),
+    "shared_preferences_foundation": ("storage",  "info", "Flutter shared preferences — NSUserDefaults-backed"),
+    "path_provider_foundation":      ("storage",  "info", "Flutter path provider — filesystem locations"),
+    "connectivity_plus":             ("network",  "info", "Flutter connectivity state plugin"),
+    "network_speed":                 ("network",  "info", "Network speed measurement plugin"),
+    "camera_avfoundation":           ("media",    "info", "Flutter camera plugin (AVFoundation)"),
+    "image_picker_ios":              ("media",    "info", "Flutter image picker — photo library / camera"),
+    "just_audio":                    ("media",    "info", "Flutter audio playback plugin"),
+    "audio_session":                 ("media",    "info", "Flutter audio session management"),
+    "nfc_manager":                   ("nfc",      "info", "Flutter NFC plugin"),
+    "qr_code_scanner_plus":          ("scanning", "info", "Flutter QR / barcode scanner"),
+    "snowfinch_logger":              ("logging",  "info", "Snowfinch logger (vendor plugin)"),
+    "snowfinch_app_logger":          ("logging",  "info", "Snowfinch app logger (vendor plugin)"),
+    "package_info_plus":             ("platform", "info", "Flutter package info plugin"),
+    "device_info_plus":              ("platform", "info", "Flutter device info plugin"),
+    "battery_plus":                  ("platform", "info", "Flutter battery state plugin"),
+    "flutter_timezone":              ("platform", "info", "Flutter timezone plugin"),
+    "fluttertoast":                  ("platform", "info", "Flutter toast/UI plugin"),
 }
+
+# Family fallbacks — so a Firebase/Google module NOT named above is still categorised
+# instead of landing in "unknown". Checked only after an exact-name miss; a genuinely
+# unrecognised pod still reports "unknown", which is the honest answer.
+_FRAMEWORK_PREFIXES = (
+    ("Firebase", ("backend",   "info", "Firebase module")),
+    ("Google",   ("utility",   "info", "Google SDK module")),
+    ("GTM",      ("utility",   "info", "Google Tag Manager module")),
+)
+
+
+def _classify_framework(name: str):
+    """(category, severity, description, known) for an embedded framework.
+
+    Exact name first, then family prefix. Anything still unmatched stays "unknown" —
+    RUN 7 is about categorising what this bundle ACTUALLY ships, not about guessing.
+    """
+    info = _KNOWN_FRAMEWORKS.get(name)
+    if info:
+        return info[0], info[1], info[2], True
+    for prefix, fallback in _FRAMEWORK_PREFIXES:
+        if name.startswith(prefix):
+            return fallback[0], fallback[1], f"{fallback[2]} ({name})", True
+    return "unknown", "info", "", False
 
 def _analyze_embedded_frameworks(app_bundle: str, results: dict):
     frameworks_dir = os.path.join(app_bundle, "Frameworks")
@@ -1773,15 +1847,16 @@ def _analyze_embedded_frameworks(app_bundle: str, results: dict):
         try:
             for item in os.listdir(search_dir):
                 name = item.replace(".framework", "").replace(".appex", "")
-                info = _KNOWN_FRAMEWORKS.get(name)
+                category, severity, description, known = _classify_framework(name)
                 entry = {"name": name, "path": f"{os.path.basename(search_dir)}/{item}"}
-                if info:
-                    entry.update({"category": info[0], "severity": info[1], "description": info[2], "known": True})
-                else:
-                    entry.update({"category": "unknown", "severity": "info", "description": "", "known": False})
+                entry.update({"category": category, "severity": severity,
+                              "description": description, "known": known})
                 found.append(entry)
 
-                # Flag high-severity known frameworks as findings
+                # Flag high-severity known frameworks as findings. Every framework added in
+                # RUN 7 is severity "info" by design: categorising a dependency must not
+                # invent a finding about it.
+                info = _KNOWN_FRAMEWORKS.get(name)
                 if info and info[1] in ("high", "medium"):
                     results["findings"].append({
                         "rule_id":        "ios_third_party_framework",

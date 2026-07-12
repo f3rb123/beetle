@@ -5,6 +5,27 @@ Status key:  [ ] TODO   [~] IN-PROGRESS   [x] DONE   [!] BLOCKED (needs human)
 
 Baseline before start: iOS grade A 97/100 (0/0/0); MobSF 50/100 grade B. Target: correct + beats MobSF, Android unchanged.
 
+═══════════════ METHODOLOGY — READ BEFORE ANY SHARED-FILE RUN ═══════════════
+(applies to RUN 13, 15, 16, 17 and every future shared-file change)
+
+THE ANDROID GUARD IS ORDER-INSENSITIVE ON SET-DERIVED FIELDS.
+Byte-equality is the right test ONLY for fields that are already deterministically ordered:
+    endpoints, ips, findings, severity_summary, secrets   -> compare byte-for-byte.
+Fields backed by a Python set are NOT stably ordered across processes — their order changes
+on every backend restart even with byte-identical code (see L3: androguard's
+apk.get_permissions() at android_analyzer.py:1353). Compare these as SETS / multisets:
+    permissions (all / classified / dangerous), and any other set-derived collection.
+Concretely:  sorted(json.dumps(x, sort_keys=True) for x in lst)  on both sides, then compare.
+
+WHY THIS RULE EXISTS: RUN 6's Android diff reported "permissions identical: False" and it was
+a PHANTOM failure — same 5 permissions, different order, cause proven pre-existing (3 container
+restarts, no rebuild, 3 different orders). Without this rule RUN 13/15/16 will chase the same
+ghost, or worse, "fix" a regression that was never there.
+
+DO NOT paper over a real diff with this rule: first prove the difference is order-only
+(content equal as a multiset), THEN prove the cause is pre-existing (restart the container with
+NO code change and show the order moves on its own). Only then is it safe to pass.
+
 ═══════════════ TIER 1 — CORRECTNESS ═══════════════
 
 [x] RUN 1 — iOS URLs & IPs reach Discovered Endpoints (SHARED: endpoints/ips)  DONE
@@ -313,11 +334,36 @@ Baseline before start: iOS grade A 97/100 (0/0/0); MobSF 50/100 grade B. Target:
     Commit-ready: Y
     Tests: 784 passed, 11 skipped; frontend build OK.
 
-[ ] RUN 7 — SDK categories, no more 39×unknown (iOS-only)
-    Files changed:
-    Acceptance: 
-    Commit-ready:
-    Resume notes:
+[x] RUN 7 — SDK categories, no more 39×unknown (iOS-only)  DONE
+    Files changed: backend/analyzers/ios_analyzer.py (_KNOWN_FRAMEWORKS extended,
+      new _FRAMEWORK_PREFIXES family fallback + _classify_framework(); call site uses it).
+      NEW backend/tests/test_ios_framework_categories.py (4 tests).
+    Acceptance: PASS. iOS sdks/embedded_frameworks categories: unknown 39 -> 0.
+      backend 7 | platform 5 | utility 5 | media 4 | analytics 4 | storage 3 | security 2 |
+      network 2 | runtime 2 | logging 2 | nfc 1 | scanning 1 | webview 1
+      findings 82 -> 82 (unchanged), severity unchanged.
+    READ THE BUNDLE, NOT THE PROMPT (the prompt's pod list was partly wrong for this app):
+      Named in the prompt but NOT PRESENT in this IPA: screen_protector, ScreenProtectorKit,
+        ScreenPreventerKit, snowfinch_security_ios. Not mapped — mapping a pod that is not
+        there would be inventing coverage.
+      PRESENT but NOT named in the prompt: flutter_jailbreak_detection_plus,
+        path_provider_foundation, shared_preferences_foundation, IOSSecuritySuite, and 8 more
+        Firebase modules (Core/CoreInternal/CoreExtension/SharedSwift/Installations/
+        RemoteConfig/RemoteConfigInterop/ABTesting/Sessions). All mapped from the real list.
+    TWO JUDGEMENT CALLS:
+      1. "App" and "Flutter" are NOT third-party SDKs — "App" is the app's OWN Dart AOT blob
+         and "Flutter" is the engine. Listing them as unknown third-party dependencies
+         misattributes the app's own code to a vendor. Categorised as "runtime".
+      2. EVERY framework added here is severity "info" ON PURPOSE. _analyze_embedded_frameworks
+         emits a FINDING for any known framework at medium/high, so assigning severities while
+         categorising would have INVENTED findings about dependencies that were previously
+         silent. Categorising a dependency must not create a claim about it. findings 82 -> 82
+         proves it.
+    "unknown" IS STILL REACHABLE (verified by test): an unrecognised pod returns "unknown" with
+      known=False. A Firebase/Google module we never enumerated falls to the family prefix
+      rather than "unknown", but a novel vendor pod stays honestly unknown.
+    Commit-ready: Y
+    Tests: 788 passed, 11 skipped.
 
 ═══════════════ TIER 2 — PARITY + DIFFERENTIATORS ═══════════════
 
