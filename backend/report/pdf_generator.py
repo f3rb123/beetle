@@ -721,10 +721,16 @@ def _permissions_section(story, results, T, styles):
     rows = [["Permission", "Risk", "Description"]]
     for p in sorted(dangerous, key=lambda x: ["high", "medium", "low"].index(x.get("severity", "low")) if x.get("severity") in ["high", "medium", "low"] else 3):
         color = SEVERITY_COLORS.get(p.get("severity", "info"), HexColor("#64748B"))
+        desc = _safe(p.get("description", ""))
+        # iOS: append the developer's own Info.plist purpose string (MobSF shows this).
+        # Android permission entries carry no usage_description, so their output is unchanged.
+        reason = p.get("usage_description")
+        if reason:
+            desc = f'{desc}<br/><i>&#8220;{_safe(reason)}&#8221;</i>'
         rows.append([
             Paragraph(_safe(p.get("short_name", p.get("permission", "")[:40])), styles["table_cell_mono"]),
             Paragraph(f'<font color="{color.hexval()}"><b>{p.get("severity", "").upper()}</b></font>', styles["table_cell"]),
-            Paragraph(_safe(p.get("description", "")), styles["table_cell"]),
+            Paragraph(desc, styles["table_cell"]),
         ])
 
     t = Table(rows, colWidths=[55 * mm, 20 * mm, 80 * mm])

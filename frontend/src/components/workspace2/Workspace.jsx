@@ -45,12 +45,12 @@ const iconFor = name => ICON_MAP[name] || ShieldAlert
 // Build the sidebar groups straight from the registry (single source of truth —
 // Phase 2.5.8 folded the old hardcoded Deep Analysis list into the registry, so the
 // whole workflow hierarchy lives in workspace-registry.js).
-function useNavGroups() {
-  return useMemo(() => navGroups({ includePlanned: true }).map(g => ({
+function useNavGroups(platform) {
+  return useMemo(() => navGroups({ includePlanned: true, platform }).map(g => ({
     label: g.label,
     items: g.items.map(p => ({ id: p.id, label: p.label, icon: iconFor(p.icon),
       count: p.count, planned: p.status === 'planned' })),
-  })), [])
+  })), [platform])
 }
 
 // Roadmap placeholder for a planned panel — proves routing reaches it before the
@@ -127,7 +127,7 @@ function WorkspaceShell({ results, scanId, actions, deepLink }) {
   const [searchOpen, setSearchOpen] = useState(false)
   const scrollRef = useRef(null)
   const collab = useCollab(scanId)
-  const groups = useNavGroups()
+  const groups = useNavGroups(results.platform)
 
   useEffect(() => {
     const h = e => {

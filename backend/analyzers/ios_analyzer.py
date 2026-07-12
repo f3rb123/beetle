@@ -761,13 +761,27 @@ def _analyze_info_plist(plist_path: str, results: dict):
     })
 
     # ── Permissions ───────────────────────────────────────────────────────────
+    # Read the keys ACTUALLY present in this plist — the usage-description VALUE is the
+    # developer's own justification ("…uses your camera for taking photos."), which is what
+    # MobSF shows and what an analyst reviews. It was being discarded in favour of Beetle's
+    # static label, so the report said "Camera access" and never showed the app's reason.
     dangerous = []
     all_perms = []
     for key, (sev, desc) in IOS_PERMISSIONS.items():
         if key in plist:
             all_perms.append(key)
-            dangerous.append({"permission": key, "short_name": key.replace("NS", "").replace("UsageDescription", ""),
-                               "severity": sev, "description": desc})
+            reason = plist.get(key)
+            reason = reason.strip() if isinstance(reason, str) else ""
+            dangerous.append({
+                "permission": key,
+                "short_name": key.replace("NS", "").replace("UsageDescription", ""),
+                "severity": sev,
+                "description": desc,              # Beetle's classification of the capability
+                "usage_description": reason,      # the developer's declared reason (MobSF parity)
+                # An empty usage string is itself a finding-worthy smell: iOS requires a
+                # non-empty purpose string, and a blank one means the user sees no reason.
+                "reason_declared": bool(reason),
+            })
 
     results["permissions"]["all"]       = all_perms
     results["permissions"]["dangerous"] = dangerous
@@ -799,6 +813,25 @@ def _analyze_info_plist(plist_path: str, results: dict):
     # ── ATS Configuration ─────────────────────────────────────────────────────
     ats = plist.get("NSAppTransportSecurity", {})
     results["app_info"]["ats"] = ats
+    # Distinguish "ATS not declared" (iOS enforces it by default — the SECURE state) from
+    # "declared and weakened". An absent key is not the same as a false value, and the
+    # report must not imply the app configured something it never configured.
+    declared = "NSAppTransportSecurity" in plist
+    if not declared:
+        state, summary = "default", "Not declared — ATS enforced by default (HTTPS required)."
+    elif ats.get("NSAllowsArbitraryLoads"):
+        state, summary = "disabled", "NSAllowsArbitraryLoads = true — ATS fully disabled; cleartext HTTP allowed to any host."
+    elif ats.get("NSExceptionDomains"):
+        doms = list(ats.get("NSExceptionDomains") or {})
+        state = "exceptions"
+        summary = f"ATS enforced with {len(doms)} per-domain exception(s): {', '.join(doms[:5])}."
+    else:
+        state, summary = "enforced", "ATS declared and enforced; no arbitrary loads, no exception domains."
+    results["app_info"]["ats_state"] = {
+        "declared": declared, "state": state, "summary": summary,
+        "allows_arbitrary_loads": bool(ats.get("NSAllowsArbitraryLoads")),
+        "exception_domains": list(ats.get("NSExceptionDomains") or {}),
+    }
 
     if ats.get("NSAllowsArbitraryLoads"):
         results["findings"].append({

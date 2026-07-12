@@ -212,7 +212,8 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCod
         <div className="ws-launcher">
           {[
             ['ciso', 'CISO Summary', Briefcase], ['developer', 'Developer Report', Wrench],
-            ['manifest', 'Manifest', ScrollText], ['network', 'Network', Network],
+            ['manifest', results.platform === 'ios' ? 'Info.plist & Entitlements' : 'Manifest', ScrollText],
+            ['network', 'Network', Network],
             ['certificate', 'Certificates', Fingerprint], ['components', 'Application Components', Boxes],
             ['androidapis', 'Android APIs', Cpu], ['malware', 'Malware', Bug],
             ['ai', 'AI Actions', Sparkles], ['compare', 'Scan Compare', GitCompare],

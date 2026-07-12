@@ -271,11 +271,47 @@ Baseline before start: iOS grade A 97/100 (0/0/0); MobSF 50/100 grade B. Target:
       decoded pixel is still TEAL (0,179,179) — a missed BGRA swap decodes fine but renders
       orange, so only a pixel assertion actually proves correctness.
 
-[ ] RUN 6 — Info.plist section label + render (iOS-only)
+[x] RUN 6 — Info.plist section label + render (iOS-only)  DONE
     Files changed:
-    Acceptance (3 permissions + ATS render, Android still "AndroidManifest"): 
-    Commit-ready:
-    Resume notes:
+      backend/analyzers/ios_analyzer.py    — permissions now keep the developer's OWN purpose
+        string from Info.plist (usage_description + reason_declared); new app_info.ats_state.
+      backend/report/pdf_generator.py      — permissions table appends the declared reason when
+        present. Android entries have no usage_description key => Android PDF unchanged.
+      frontend workspace-registry.js       — labelByPlatform + panelLabel(); navGroups(platform).
+      frontend Workspace.jsx / panels.jsx  — nav + launcher label resolve per platform.
+      frontend panels2.jsx                 — iOS panel title "Info.plist & Entitlements"; usage
+        descriptions rendered with the declared reason; ATS shows the true state.
+    WHAT WAS ALREADY THERE (prompt partly stale): an IosApplicationConfig panel already existed,
+      platform-guarded, rendering ATS + entitlements + URL schemes + permissions. The section
+      BODY was never "Android-only". What was NOT platform-aware was the LABEL (registry +
+      launcher) and the panel <h1> ("Application Configuration").
+    ANDROID LABEL — DISCREPANCY, LEFT UNTOUCHED ON PURPOSE: the prompt/human said Android
+      "stays" AndroidManifest. It does NOT say that today — Android's label is "Manifest"
+      (workspace-registry.js) and its panel <h1> is "Manifest". Renaming it would be an
+      unrequested Android-visible change, so Android's wording is left EXACTLY as-is (zero
+      delta) and only iOS gets an override. If "AndroidManifest" is genuinely wanted, that is a
+      separate one-line registry change — ask first.
+    TWO CONTENT-NOT-GUESS FINDINGS (read the real Info.plist, did not assume the standard set):
+      1. The 3 usage-description KEYS were already parsed, but their VALUES were thrown away:
+         the report showed Beetle's static label ("Camera access") and never the developer's
+         actual reason. MobSF shows the reason. Now captured verbatim.
+      2. This app has NO NSAppTransportSecurity KEY AT ALL — so ats == {} was CORRECT, not a
+         parsing bug. An absent key is NOT the same as false: iOS enforces ATS by default, so
+         "not declared" is the SECURE state. ats_state now says which of
+         default / enforced / exceptions / disabled applies, instead of implying the app
+         configured something it never configured.
+    Acceptance: PASS (iOS report regenerated).
+      NSMicrophoneUsageDescription  HIGH   "iLogistics Check-in App dependant library use microphone"
+      NSCameraUsageDescription      MEDIUM "iLogistics Check-in App uses your camera for taking photos."
+      NSPhotoLibraryUsageDescription LOW   "iLogistics Check-in App uses your library for choosing photos."
+      ATS state: "Not declared — ATS enforced by default (HTTPS required)."  (declared=false)
+      iOS section label + panel title: "Info.plist & Entitlements". findings 82 -> 82.
+    Android diff: CONTENT-IDENTICAL. endpoints 1->1, ips 0->0, findings 45->45, secrets identical,
+      severity identical, NO ats_state key on Android, NO usage_description leaked into Android
+      permissions. Permissions differ in ORDER ONLY — and that is PRE-EXISTING nondeterminism,
+      NOT caused by RUN 6. See L3.
+    Commit-ready: Y
+    Tests: 784 passed, 11 skipped; frontend build OK.
 
 [ ] RUN 7 — SDK categories, no more 39×unknown (iOS-only)
     Files changed:
@@ -378,6 +414,25 @@ Baseline before start: iOS grade A 97/100 (0/0/0); MobSF 50/100 grade B. Target:
     _collect_ios_files does (code_analyzer.py:552-557). If so, reuse _is_binary_evidence /
     _as_binary_evidence (already written, platform-gated) and pass the Android binary set.
     NOT a regression introduced by RUN 4 — pre-existing, merely unmasked by it.
+
+[ ] L3 — Android permission ORDER is nondeterministic across processes (PRE-EXISTING).
+    FOUND during RUN 6's Android diff. results["permissions"]["all"/"classified"/"dangerous"]
+    come back in a DIFFERENT ORDER on every backend restart, with byte-identical code and the
+    same APK. PROVEN, not assumed: restarted the container 3x with no rebuild and got 3
+    different orders (INTERNET-first, WAKE_LOCK-first, INTERNET-first-but-different-tail).
+    Two scans inside ONE process always agree — classic PYTHONHASHSEED-dependent set iteration.
+    ROOT CAUSE: android_analyzer.py:1353 `perms = apk.get_permissions()` — androguard returns
+    set-derived, unsorted output, and it is stored as-is.
+    WHY IT MATTERS: (a) it makes any report diff / scan-compare feature show phantom changes;
+    (b) it partially undermines the "byte-identical Android output" methodology this whole plan
+    relies on — content is stable, ORDER is not. Every Android diff so far compared endpoints /
+    ips / findings / severity / secrets, which ARE stable; permissions were first compared in
+    RUN 6 and is where this surfaced.
+    FIX (one line, but it CHANGES Android output ordering, so it is out of RUN 6's no-delta
+    scope): sort deterministically at android_analyzer.py:1354, e.g.
+        results["permissions"]["all"] = sorted(perms)
+    and keep `classified` derived in that same sorted order.
+    OWNER: RUN 16/17 (Android correctness), where an intentional Android delta is in scope.
 
 [ ] L2 — RUN 4 acceptance clause "file-resolved finding highlights the correct line" is
     DEFERRED-UNTESTABLE, *not* passed. A Flutter release IPA ships no text source, so no

@@ -38,7 +38,10 @@ export const PANELS = [
   { id: 'certificate', label: 'Certificates', group: 'Investigation', icon: 'Fingerprint', status: STATUS_READY },
   { id: 'components', label: 'Application Components', group: 'Investigation', icon: 'Boxes', status: STATUS_READY },
   { id: 'androidapis', label: 'Android APIs', group: 'Investigation', icon: 'Cpu', status: STATUS_READY },
-  { id: 'manifest', label: 'Manifest', group: 'Investigation', icon: 'ScrollText', status: STATUS_READY },
+  // iOS has no manifest: the equivalent surface is Info.plist + entitlements. Android's
+  // label is deliberately left as-is so its UI does not change.
+  { id: 'manifest', label: 'Manifest', labelByPlatform: { ios: 'Info.plist & Entitlements' },
+    group: 'Investigation', icon: 'ScrollText', status: STATUS_READY },
   { id: 'malware', label: 'Malware Analysis', group: 'Investigation', icon: 'Bug', status: STATUS_READY },
 
   // ── Static Analysis — derived posture & coverage ────────────────────────────
@@ -80,10 +83,18 @@ export function isPlanned(id) { return _byId[id]?.status === STATUS_PLANNED }
 
 // Nav groups in GROUP_ORDER. `includePlanned` controls whether roadmap panels show
 // (as disabled "soon" items). Empty groups are dropped.
-export function navGroups({ includePlanned = true } = {}) {
+// A panel's label for the platform under analysis. Falls back to the default label, so
+// any platform without an override (i.e. Android) renders exactly as before.
+export function panelLabel(panel, platform) {
+  if (!panel) return ''
+  return (panel.labelByPlatform && panel.labelByPlatform[platform]) || panel.label
+}
+
+export function navGroups({ includePlanned = true, platform = '' } = {}) {
   const groups = GROUP_ORDER.map(label => ({
     label,
-    items: PANELS.filter(p => p.group === label && (includePlanned || p.status === STATUS_READY)),
+    items: PANELS.filter(p => p.group === label && (includePlanned || p.status === STATUS_READY))
+      .map(p => ({ ...p, label: panelLabel(p, platform) })),
   })).filter(g => g.items.length)
   return groups
 }

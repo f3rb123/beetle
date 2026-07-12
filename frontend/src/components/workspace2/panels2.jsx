@@ -752,6 +752,7 @@ function IosApplicationConfig({ results }) {
   const info = results.app_info || {}
   const surface = results.attack_surface || {}
   const ats = info.ats || {}
+  const atsState = info.ats_state || {}
   const ents = results.entitlements || {}
   const entKeys = Object.keys(ents)
   const urlSchemes = surface.url_schemes || []
@@ -767,7 +768,7 @@ function IosApplicationConfig({ results }) {
 
   return (
     <div>
-      <div className="ws-section__head"><h1>Application Configuration</h1><span className="ws-muted">Info.plist · entitlements · URL schemes</span></div>
+      <div className="ws-section__head"><h1>Info.plist &amp; Entitlements</h1><span className="ws-muted">Info.plist · entitlements · URL schemes</span></div>
       <div className="ws-metrics ws-section">
         <Metric label="Bundle ID" value={info.bundle_id || '—'} />
         <Metric label="Version" value={info.version || '—'} sub={info.build ? `build ${info.build}` : ''} />
@@ -778,14 +779,17 @@ function IosApplicationConfig({ results }) {
 
       <div className="ws-card ws-card--pad ws-section">
         <h2>App Transport Security</h2>
+        {/* An ABSENT NSAppTransportSecurity key is not the same as one set to false: iOS
+            enforces ATS by default, so "not declared" is the secure state. Say which it is
+            rather than implying the app configured something it never configured. */}
         <div className="ws-assess">
           <FlagRow label="NSAllowsArbitraryLoads (cleartext)" {...resolveFlag(arbitraryLoads, false)} danger />
         </div>
-        {exceptionDomains.length ? (
-          <p className="ws-muted" style={{ fontSize: 12.5, marginTop: 8 }}>
-            ATS exception domains: {exceptionDomains.join(', ')}
-          </p>
-        ) : <p className="ws-muted" style={{ fontSize: 12.5, marginTop: 8 }}>No per-domain ATS exceptions declared.</p>}
+        <p className="ws-muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+          {atsState.summary || (exceptionDomains.length
+            ? `ATS exception domains: ${exceptionDomains.join(', ')}`
+            : 'No per-domain ATS exceptions declared.')}
+        </p>
       </div>
 
       {urlSchemes.length || universalLinks.length ? (
@@ -827,8 +831,23 @@ function IosApplicationConfig({ results }) {
       {perms.length ? (
         <div className="ws-card ws-card--pad ws-section">
           <h2>Privacy Usage Descriptions <span className="ws-muted">· {perms.length}</span></h2>
-          <div className="ws-scroll">
-            {perms.map((p, i) => <div key={i} className="ws-mcontrol" title={p.description || p.permission}>{p.short_name || p.permission}</div>)}
+          {/* Show the developer's OWN purpose string from Info.plist, not just Beetle's
+              capability label — that reason is what an analyst (and MobSF) reviews. */}
+          <div className="ios-usage-list">
+            {perms.map((p, i) => (
+              <div key={i} className="ios-usage" style={{ padding: '8px 0', borderBottom: '1px solid var(--ws-border, #2a2a2a)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <SeverityTag severity={normSev(p.severity)} compact />
+                  <span className="ws-mono" style={{ fontSize: 12.5 }}>{p.permission}</span>
+                  <span className="ws-muted" style={{ fontSize: 12.5 }}>· {p.description}</span>
+                </div>
+                <div style={{ fontSize: 12.5, marginTop: 4 }}>
+                  {p.usage_description
+                    ? <>“{p.usage_description}”</>
+                    : <span className="ws-muted">No purpose string declared — the user is shown no reason for {p.short_name || 'this'} access.</span>}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       ) : null}
