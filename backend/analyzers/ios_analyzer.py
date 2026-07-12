@@ -468,6 +468,14 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     # detected secret. MUST run BEFORE secret_intel masking so it sees raw values;
     # it stores only derived, non-sensitive signals. Additive only; never
     # suppresses or re-severities. Deterministic, network-free. ──
+    # Deterministically surface Firebase GoogleService-Info.plist config (API_KEY /
+    # CLIENT_ID) as INFO before the intelligence + processing stages. Dedup-safe
+    # (skips values already in results["secrets"]); iOS-only. Runs BEFORE the two
+    # stages below so these config keys traverse the same masking/status pipeline.
+    try:
+        _extract_firebase_plist_config(app_bundle, results)
+    except Exception:
+        log.exception("[firebase_plist] Firebase config extraction failed")
     try:
         from . import secret_intelligence
         secret_intelligence.annotate(results)
@@ -1038,7 +1046,7 @@ def _extract_ios_app_icon(app_bundle: str, plist_path: str, results: dict):
         return
 
     def _emit(raw: bytes, src_path: str) -> bool:
-        if not raw or len(raw) > 1_500_000:
+        if not raw or len(raw) > 4_000_000:  # app icons can be ~1-3 MB at 1024²
             return False
         # Quick PNG / JPEG magic sniff
         is_png = raw[:8] == b"\x89PNG\r\n\x1a\n"
@@ -1124,14 +1132,139 @@ def _extract_ios_app_icon(app_bundle: str, plist_path: str, results: dict):
         except Exception:
             continue
 
-    # (5) Record why icon couldn't be extracted — e.g. icon lives in Assets.car
+    # (5) Assets.car fallback — modern Xcode/Flutter builds compile the AppIcon
+    # asset-catalog into Assets.car and ship NO loose PNGs, so steps (2)-(4) find
+    # nothing. The catalog embeds each rendition as a raw PNG stream, so carve the
+    # PNGs directly (no actool/macOS needed) and emit the best icon-sized one.
     assets_car = os.path.join(app_bundle, "Assets.car")
     if os.path.isfile(assets_car):
+        try:
+            best = _best_icon_png_from_assets_car(Path(assets_car).read_bytes())
+        except Exception:
+            best = None
+        if best and _emit(best, assets_car):
+            results["app_info"]["icon_source"] = "assets_car"
+            return
+        # Carve failed — record WHY the icon is missing instead of failing silently.
         results["app_info"]["icon_source"] = "assets_car_unsupported"
         results["app_info"]["icon_note"] = (
-            "App icon is embedded in compiled Assets.car. "
+            "App icon is embedded in compiled Assets.car and could not be carved. "
             "Install `assetutil` (macOS) or `acextract` to extract PNGs."
         )
+
+
+# PNG magic + IEND terminator, for carving embedded renditions out of a compiled
+# Assets.car asset catalog (Apple BOM/CAR format) without actool.
+_PNG_SIG = b"\x89PNG\r\n\x1a\n"
+_PNG_END = b"IEND\xaeB\x60\x82"
+
+
+def _iter_carved_pngs(blob: bytes):
+    """Yield each complete embedded PNG byte-stream found in ``blob``."""
+    start = blob.find(_PNG_SIG)
+    while start != -1:
+        end = blob.find(_PNG_END, start)
+        if end == -1:
+            break
+        png = blob[start:end + len(_PNG_END)]
+        yield png
+        start = blob.find(_PNG_SIG, end + len(_PNG_END))
+
+
+def _png_dimensions(png: bytes):
+    """(width, height) from a PNG's IHDR, or None."""
+    i = png.find(b"IHDR")
+    if i == -1 or i + 12 > len(png):
+        return None
+    try:
+        w, h = struct.unpack(">II", png[i + 4:i + 12])
+        return w, h
+    except struct.error:
+        return None
+
+
+def _best_icon_png_from_assets_car(blob: bytes) -> bytes | None:
+    """Pick the largest SQUARE PNG (an app icon is square) carved from Assets.car,
+    preferring a plausible icon size and capping at the emit ceiling."""
+    best = None
+    best_area = 0
+    for png in _iter_carved_pngs(blob):
+        if len(png) > 4_000_000:
+            continue
+        dims = _png_dimensions(png)
+        if not dims:
+            continue
+        w, h = dims
+        # App icons are square; ignore non-square renditions (launch images, etc.).
+        if w != h or w < 20 or w > 1024:
+            continue
+        area = w * h
+        if area > best_area:
+            best_area = area
+            best = png
+    return best
+
+
+# ─── Firebase GoogleService-Info.plist config extraction ─────────────────────
+# Deterministically surface the Firebase client config (API_KEY / CLIENT_ID) as
+# INFO application-config secrets. The generic AIza pattern already catches API_KEY,
+# but CLIENT_ID (an OAuth client id, not an AIza key) is matched by NO pattern, so it
+# was invisible. A dedicated structured parse guarantees both keys render (INFO, like
+# the Android Firebase key) regardless of how the plist is stored (XML or binary) and
+# is dedup-safe (a value already present in results["secrets"] is not re-emitted).
+# iOS-only call site; Android is untouched.
+_FIREBASE_PLIST_KEYS = (
+    # plist key,       secret title,               rule_id / type,          confidence
+    ("API_KEY",        "Google API Key",           "secret_google_api_key",  90),
+    ("CLIENT_ID",      "Google OAuth Client ID",   "secret_google_client_id", 80),
+    ("GOOGLE_APP_ID",  "Firebase App ID",          "secret_firebase_app_id",  75),
+)
+
+
+def _extract_firebase_plist_config(app_bundle: str, results: dict) -> None:
+    if not app_bundle or not os.path.isdir(app_bundle):
+        return
+    existing_values = {str(s.get("value") or "") for s in results.get("secrets") or []}
+    added = 0
+    for root, _dirs, files in os.walk(app_bundle):
+        for fname in files:
+            if fname != "GoogleService-Info.plist":
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, "rb") as f:
+                    plist = plistlib.load(f)
+            except Exception:
+                continue
+            rel = os.path.relpath(fpath, os.path.dirname(app_bundle)).replace("\\", "/")
+            for key, title, rule_id, conf in _FIREBASE_PLIST_KEYS:
+                val = plist.get(key)
+                if not isinstance(val, str) or not val.strip():
+                    continue
+                val = val.strip()
+                if val in existing_values:
+                    continue  # already surfaced by the generic scanner — do not duplicate
+                existing_values.add(val)
+                results.setdefault("secrets", []).append({
+                    "title": title, "name": title,
+                    "severity": "info", "category": "API Key",
+                    "description": (f"{title} from GoogleService-Info.plist ({key}). Firebase "
+                                    "client-side identifiers are shipped in every app and are not "
+                                    "confidential; surfaced for inventory."),
+                    "recommendation": ("Restrict the key in the Google Cloud console (API + app "
+                                       "restrictions). No action if already restricted."),
+                    "file_path": rel, "line": 1,
+                    "snippet": f"{key} = {val[:6]}…",
+                    "confidence": conf, "exploitability": 20,
+                    "validation_status": "detected",
+                    "rule_id": rule_id, "evidence_type": "plist_key",
+                    "value": val, "source": "firebase_plist",
+                    "cwe": "CWE-200", "masvs": "MASVS-STORAGE-1", "owasp": "M1",
+                    "provenance": "beetle_native", "kind": "client_key",
+                })
+                added += 1
+    if added:
+        results.setdefault("scan_metrics", {})["firebase_plist_secrets"] = added
 
 
 # ─── embedded.mobileprovision certificate parsing ────────────────────────────

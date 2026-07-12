@@ -743,7 +743,101 @@ export function NetworkPanel({ results }) {
 }
 
 // ───────────────────────────── Manifest ──────────────────────────────────
+// iOS "manifest" equivalent — the Info.plist / entitlements / URL-schemes view.
+// Data is parsed by ios_analyzer (_analyze_info_plist + _analyze_entitlements) into
+// results.app_info / results.entitlements / results.attack_surface; the workspace2
+// ManifestPanel previously rendered only the Android manifest, so on iOS this section
+// showed Android-only rows. Platform-guarded: Android rendering is untouched.
+function IosApplicationConfig({ results }) {
+  const info = results.app_info || {}
+  const surface = results.attack_surface || {}
+  const ats = info.ats || {}
+  const ents = results.entitlements || {}
+  const entKeys = Object.keys(ents)
+  const urlSchemes = surface.url_schemes || []
+  const universalLinks = surface.universal_links || []
+  const perms = (results.permissions || {}).dangerous || []
+
+  // ATS posture: NSAllowsArbitraryLoads=true disables ATS globally (cleartext allowed).
+  const arbitraryLoads = ats.NSAllowsArbitraryLoads === true
+  const exceptionDomains = Object.keys(ats.NSExceptionDomains || {})
+
+  const fmtVal = (v) => Array.isArray(v) ? (v.length ? v.join(', ') : '—')
+    : (v && typeof v === 'object' ? JSON.stringify(v) : (v === true ? 'Yes' : v === false ? 'No' : String(v ?? '—')))
+
+  return (
+    <div>
+      <div className="ws-section__head"><h1>Application Configuration</h1><span className="ws-muted">Info.plist · entitlements · URL schemes</span></div>
+      <div className="ws-metrics ws-section">
+        <Metric label="Bundle ID" value={info.bundle_id || '—'} />
+        <Metric label="Version" value={info.version || '—'} sub={info.build ? `build ${info.build}` : ''} />
+        <Metric label="Min iOS" value={info.min_ios || '—'} />
+        <Metric label="URL Schemes" value={urlSchemes.length} />
+        <Metric label="Entitlements" value={entKeys.length} />
+      </div>
+
+      <div className="ws-card ws-card--pad ws-section">
+        <h2>App Transport Security</h2>
+        <div className="ws-assess">
+          <FlagRow label="NSAllowsArbitraryLoads (cleartext)" {...resolveFlag(arbitraryLoads, false)} danger />
+        </div>
+        {exceptionDomains.length ? (
+          <p className="ws-muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+            ATS exception domains: {exceptionDomains.join(', ')}
+          </p>
+        ) : <p className="ws-muted" style={{ fontSize: 12.5, marginTop: 8 }}>No per-domain ATS exceptions declared.</p>}
+      </div>
+
+      {urlSchemes.length || universalLinks.length ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>URL Handling</h2>
+          {urlSchemes.length ? (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontWeight: 620, marginBottom: 6 }}>Custom URL Schemes <span className="ws-muted">· {urlSchemes.length}</span></div>
+              <div className="ws-scroll">
+                {urlSchemes.map((s, i) => <div key={i} className="ws-mcontrol" title={`${s}://`}>{s}://</div>)}
+              </div>
+            </div>
+          ) : null}
+          {universalLinks.length ? (
+            <div>
+              <div style={{ fontWeight: 620, marginBottom: 6 }}>Associated Domains (Universal Links) <span className="ws-muted">· {universalLinks.length}</span></div>
+              <div className="ws-scroll">
+                {universalLinks.map((d, i) => <div key={i} className="ws-mcontrol" title={d}>{d}</div>)}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="ws-card ws-card--pad ws-section">
+        <h2>Entitlements <span className="ws-muted">· {entKeys.length}</span></h2>
+        {entKeys.length ? (
+          <div className="ios-entitlements-list">
+            {entKeys.map((k) => (
+              <div key={k} className="ws-kv" style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '4px 0', borderBottom: '1px solid var(--ws-border, #2a2a2a)' }}>
+                <span className="ws-mono" style={{ fontSize: 12.5, wordBreak: 'break-all' }}>{k}</span>
+                <span className="ws-muted ws-mono" style={{ fontSize: 12.5, textAlign: 'right', wordBreak: 'break-all' }}>{fmtVal(ents[k])}</span>
+              </div>
+            ))}
+          </div>
+        ) : <p className="ws-muted" style={{ fontSize: 12.5 }}>No entitlements parsed (embedded.mobileprovision / .xcent absent).</p>}
+      </div>
+
+      {perms.length ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>Privacy Usage Descriptions <span className="ws-muted">· {perms.length}</span></h2>
+          <div className="ws-scroll">
+            {perms.map((p, i) => <div key={i} className="ws-mcontrol" title={p.description || p.permission}>{p.short_name || p.permission}</div>)}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export function ManifestPanel({ results }) {
+  if (results.platform === 'ios') return <IosApplicationConfig results={results} />
   const info = results.app_info || {}
   const ms = results.manifest_security || {}
   const surface = results.attack_surface || {}

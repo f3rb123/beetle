@@ -82,7 +82,7 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCod
         <Metric label="Security Score" value={<>{score.score ?? '—'}<small>/100</small></>} sub={score.grade ? `Grade ${score.grade}` : ''} />
         <Metric label="Source Resolution" value={`${res.source_resolution_pct ?? '—'}%`} sub="findings located" />
         <Metric label="View Code" value={`${res.view_code_coverage_pct ?? '—'}%`} sub="renderable evidence" />
-        <Metric label="Attack Chains" value={chains.length} sub="cloud exposure paths" />
+        <Metric label="Attack Chains" value={allChains.length} sub="correlated exploit paths" />
         <Metric label="Secrets" value={secretsSum.total_application_secrets ?? (results.secrets || []).length} sub={`${secretsSum.suppressed_sdk_secrets ?? 0} SDK suppressed`} />
       </div>
 
