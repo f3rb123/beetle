@@ -130,6 +130,7 @@ def generate_pdf(results: dict, output_path: str, theme: str = "light", prepared
     story.append(PageBreak())
     _app_info_section(story, results, T, styles)
     _permissions_section_pdf(story, results, T, styles)
+    _ios_config_section(story, results, T, styles)          # RUN 6 + 10 (iOS-only, self-gates)
     _findings_section(story, results, T, styles)
     _developer_summary_section(story, results, T, styles)
     _masvs_posture_section(story, results, T, styles)
@@ -140,11 +141,14 @@ def generate_pdf(results: dict, output_path: str, theme: str = "light", prepared
     _domain_intel_section(story, results, T, styles)
     _attack_surface_section(story, results, T, styles)
     _sdks_section(story, results, T, styles)
+    _trackers_section(story, results, T, styles)            # RUN 11 (self-gates on trackers)
     _components_section(story, results, T, styles)
     _taint_section(story, results, T, styles)
     _score_section(story, results, T, styles)
     _certificate_section(story, results, T, styles)
     _binary_section(story, results, T, styles)
+    _binary_protections_section(story, results, T, styles)  # RUN 9 (self-gates on binary_protections)
+    _property_lists_section(story, results, T, styles)      # RUN 12 (self-gates on property_lists)
     _string_analysis_section(story, results, T, styles)
     _browsable_section_pdf(story, results, T, styles)
 
@@ -983,11 +987,19 @@ def _format_finding_evidence(finding: dict) -> str:
     """Render evidence from the unified Evidence Selection view: the application-
     relevant Primary proof first, then Supporting proofs, then a collapsed
     Hidden-library count — instead of a flat list that can lead with an SDK file."""
-    try:
-        from analyzers.evidence_selection import build_evidence_view
-        view = build_evidence_view(finding)
-    except Exception:  # noqa: BLE001
-        view = None
+    # Prefer the evidence_view already stamped on the finding by evidence_selection.annotate:
+    # it was built WITH the platform, so it carries the RUN 4/20 binary treatment (a Mach-O
+    # finding shows binary evidence, not a fake source line; a DECODABLE plist shows its decoded
+    # line, not the raw-bplist artifact). Recomputing here without platform would drop all of
+    # that and regress the PDF to raw lines. Fall back to a platform-less recompute only if the
+    # stamp is missing.
+    view = finding.get("evidence_view")
+    if not (isinstance(view, dict) and view.get("primary")):
+        try:
+            from analyzers.evidence_selection import build_evidence_view
+            view = build_evidence_view(finding, platform=finding.get("platform"))
+        except Exception:  # noqa: BLE001
+            view = None
 
     blocks: list[str] = []
     if view and view.get("primary", {}).get("file"):
@@ -1139,6 +1151,25 @@ def _endpoints_section(story, results, T, styles):
     story.append(t)
     if len(endpoints) > 100:
         story.append(Paragraph(f"... and {len(endpoints) - 100} more endpoints.", styles["caption"]))
+    story.append(Spacer(1, 4 * mm))
+
+    # RUN 1: hardcoded IPs (e.g. 192.168.161.138) — surfaced with their classification. MobSF
+    # missed the IP entirely; the PDF must carry it.
+    ips = [i for i in (results.get("ips") or []) if isinstance(i, dict) and i.get("ip")]
+    if ips:
+        story.append(Paragraph(f"Hardcoded IP Addresses ({len(ips)})", styles["subsection_title"]))
+        iprows = [["IP", "Classification", "Location"]]
+        for i in ips[:60]:
+            cls = i.get("classification") or i.get("ip_class") or i.get("type") or ""
+            loc = str(i.get("file_path") or "").split("/")[-1]
+            iprows.append([
+                Paragraph(f'<font face="Courier" size="8">{escape(str(i["ip"]))}</font>', styles["table_cell"]),
+                Paragraph(_safe(str(cls)), styles["table_cell"]),
+                Paragraph(_safe(loc), styles["table_cell"]),
+            ])
+        ipt = Table(iprows, colWidths=[45 * mm, 40 * mm, 70 * mm])
+        ipt.setStyle(_table_style(T))
+        story.append(ipt)
     story.append(Spacer(1, 6 * mm))
 
 
@@ -1329,6 +1360,25 @@ def _components_section(story, results, T, styles):
     ))
     story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
     story.append(Spacer(1, 4 * mm))
+
+    # RUN 14: state the OSV coverage VERDICT so "0 CVEs" is never read as a clean bill of
+    # health when it is actually "not assessable" (no ecosystem coverage / placeholder versions).
+    cov = stats.get("coverage") or {}
+    verdict = cov.get("verdict")
+    if verdict and verdict != "full":
+        msg = {
+            "no_coverage": ("Not assessable — OSV has no advisory coverage for this app's "
+                            f"ecosystem(s), so all {cov.get('components_total', 0)} components "
+                            "returned empty by construction. \"0 CVEs\" is NOT a clean bill."),
+            "partial": (f"Partially assessable — {cov.get('assessable', 0)} of "
+                        f"{cov.get('components_total', 0)} components are in a covered ecosystem "
+                        f"with a real version; {cov.get('placeholder_versions', 0)} carry a "
+                        "placeholder version that cannot match an advisory."),
+            "no_components": "No components detected.",
+        }.get(verdict, f"Coverage: {verdict}.")
+        story.append(Paragraph(f'<font color="{SEVERITY_COLORS.get("medium").hexval()}">'
+                               f'<b>OSV coverage:</b></font> {escape(msg)}', styles["body"]))
+        story.append(Spacer(1, 3 * mm))
 
     # Group CVEs by (product, version)
     by_comp = {}
@@ -1611,6 +1661,13 @@ def _score_section(story, results, T, styles):
     story.append(t)
     story.append(Spacer(1, 4*mm))
 
+    # RUN 15.2: the semantic grade ceiling explanation — why the letter is what it is (e.g. a
+    # 92 capped to B because the app ships real MEDIUM findings, so it is not a clean bill).
+    grade_reason = score.get("grade_reason")
+    if grade_reason:
+        story.append(Paragraph(f"<b>Grade:</b> {escape(str(grade_reason))}", styles["body"]))
+        story.append(Spacer(1, 3*mm))
+
     # Complete, reconciling deduction table: every component that moves the score
     # (per-severity findings, secrets, attack-chain penalty, good-practice bonuses)
     # so Σ(rows) == 100 − final score. Nothing that affects the score is invisible.
@@ -1748,6 +1805,177 @@ def _certificate_section(story, results, T, styles):
 
 
 # ─── Binary Analysis Section ──────────────────────────────────────────────────
+def _binary_protections_section(story, results, T, styles):
+    """RUN 9: the per-binary protection table (main executable + every framework). This is
+    MobSF's single biggest section; Beetle's version is consolidated, content-detected, and
+    FP-guarded (App.framework/App Dart-AOT is never a HIGH missing-canary/ARC)."""
+    rows_data = results.get("binary_protections") or []
+    if not rows_data:
+        return
+
+    story.append(PageBreak())
+    story.append(Paragraph(f"Binary Protections ({len(rows_data)} binaries)", styles["section_title"]))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
+    story.append(Spacer(1, 4 * mm))
+
+    def _yn(v):
+        color = SEVERITY_COLORS["low"] if v else SEVERITY_COLORS["high"]
+        return Paragraph(f'<font color="{color.hexval()}">{"✓" if v else "✗"}</font>', styles["table_cell"])
+
+    rows = [["Binary", "Kind", "NX", "PIE", "Canary", "ARC", "Signed", "Enc", "Strip", "Insec-API"]]
+    for r in rows_data:
+        pie = r.get("pie")
+        pie_cell = Paragraph("—", styles["table_cell"]) if pie is None else _yn(pie)
+        rows.append([
+            Paragraph(f'<font face="Courier" size="7">{escape(str(r.get("binary","")).split("/")[-1])}</font>', styles["table_cell"]),
+            Paragraph(f'<font size="7">{escape(str(r.get("kind","")))}</font>', styles["table_cell"]),
+            _yn(r.get("nx")), pie_cell, _yn(r.get("stack_canary")), _yn(r.get("arc")),
+            _yn(r.get("code_signature")), _yn(r.get("encrypted")), _yn(r.get("symbols_stripped")),
+            Paragraph(str(len(r.get("insecure_apis") or [])), styles["table_cell"]),
+        ])
+    t = Table(rows, colWidths=[38*mm, 30*mm, 9*mm, 9*mm, 12*mm, 9*mm, 12*mm, 9*mm, 11*mm, 14*mm])
+    t.setStyle(_table_style(T))
+    story.append(t)
+
+    # The FP guard, made explicit: what was suppressed and WHY (the Beetle-beats-MobSF point).
+    sup = results.get("binary_protections_suppressed") or {}
+    supp_items = [(k, s) for k, lst in sup.items() for s in (lst or [])]
+    if supp_items:
+        story.append(Spacer(1, 3 * mm))
+        story.append(Paragraph("Suppressed false positives (not counted as findings)", styles["subsection_title"]))
+        for k, s in supp_items[:12]:
+            story.append(Paragraph(
+                f'<font face="Courier" size="7">{escape(str(s.get("binary","")).split("/")[-1])}</font> '
+                f'({escape(k)}): {escape(str(s.get("reason","")))[:150]}', styles["caption"]))
+    story.append(Spacer(1, 6 * mm))
+
+
+def _trackers_section(story, results, T, styles):
+    """RUN 11: detected trackers, each with the evidence that proves it (framework / endpoint /
+    statically-linked binary symbol) — 9 here vs MobSF's 2."""
+    trackers = results.get("trackers") or []
+    if not trackers:
+        return
+
+    story.append(Paragraph(f"Trackers ({len(trackers)})", styles["section_title"]))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
+    story.append(Spacer(1, 4 * mm))
+
+    rows = [["Tracker", "Category", "Evidence", "Linkage"]]
+    for t in trackers:
+        ev = ", ".join(sorted({e.get("type", "") for e in (t.get("evidence") or [])}))
+        linkage = "statically linked" if t.get("statically_linked") else "framework in bundle"
+        rows.append([
+            Paragraph(_safe(t.get("name", "")), styles["table_cell"]),
+            Paragraph(_safe(t.get("category", "")), styles["table_cell"]),
+            Paragraph(_safe(ev), styles["table_cell"]),
+            Paragraph(_safe(linkage), styles["table_cell"]),
+        ])
+    tbl = Table(rows, colWidths=[52 * mm, 42 * mm, 40 * mm, 21 * mm])
+    tbl.setStyle(_table_style(T))
+    story.append(tbl)
+    story.append(Spacer(1, 6 * mm))
+
+
+def _property_lists_section(story, results, T, styles):
+    """RUN 12: every property list enumerated (binary + XML, decoded via plistlib), the
+    security-relevant keys, and the Apple privacy-manifest rollup MobSF does not show."""
+    pl = results.get("property_lists") or {}
+    plists = pl.get("plists") or []
+    if not plists:
+        return
+
+    story.append(Paragraph(
+        f"Property Lists ({pl.get('count', len(plists))} · {pl.get('binary_count', 0)} binary / "
+        f"{pl.get('xml_count', 0)} XML)", styles["section_title"]))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
+    story.append(Spacer(1, 4 * mm))
+
+    with_keys = [p for p in plists if p.get("security_keys")]
+    if with_keys:
+        story.append(Paragraph("Security-relevant keys", styles["subsection_title"]))
+        rows = [["Plist", "Key", "Value", "Note"]]
+        for p in with_keys:
+            for k in p.get("security_keys") or []:
+                rows.append([
+                    Paragraph(f'<font size="7">{escape(str(p.get("path","")).split("/")[-1])}</font>', styles["table_cell"]),
+                    Paragraph(f'<font face="Courier" size="7">{escape(str(k.get("key","")))}</font>', styles["table_cell"]),
+                    Paragraph(f'<font face="Courier" size="7">{_safe(str(k.get("value",""))[:40])}</font>', styles["table_cell"]),
+                    Paragraph(f'<font size="7">{_safe(str(k.get("note",""))[:60])}</font>', styles["table_cell"]),
+                ])
+        t = Table(rows, colWidths=[35 * mm, 34 * mm, 45 * mm, 41 * mm])
+        t.setStyle(_table_style(T))
+        story.append(t)
+        story.append(Spacer(1, 3 * mm))
+
+    pm = pl.get("privacy_manifests") or {}
+    if pm.get("count"):
+        story.append(Paragraph(f"Privacy Manifests ({pm['count']} .xcprivacy)", styles["subsection_title"]))
+        api_cats = ", ".join(
+            f"{n}× {str(k).replace('NSPrivacyAccessedAPICategory', '')}"
+            for k, n in (pm.get("accessed_api_types") or [])[:6])
+        story.append(Paragraph(
+            f"Declares tracking: <b>{'yes' if pm.get('declares_tracking') else 'no'}</b> · "
+            f"tracking domains: <b>{len(pm.get('tracking_domains') or []) or 'none'}</b> · "
+            f"accessed API categories: {_safe(api_cats)}",
+            styles["body"]))
+    story.append(Spacer(1, 6 * mm))
+
+
+def _ios_config_section(story, results, T, styles):
+    """RUN 6 + RUN 10: Info.plist & Entitlements — ATS posture, entitlements, and the dangerous
+    usage-description permissions with the developer's DECLARED reason (MobSF parity)."""
+    info = results.get("app_info") or {}
+    ats = info.get("ats_state") or {}
+    ents = results.get("entitlements") or {}
+    dangerous = (results.get("permissions") or {}).get("dangerous") or []
+    # iOS-only surface — Android has no ATS/entitlements/usage-descriptions.
+    if not (ats or ents or any(p.get("usage_description") for p in dangerous)):
+        return
+
+    story.append(Paragraph("Info.plist & Entitlements", styles["section_title"]))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
+    story.append(Spacer(1, 4 * mm))
+
+    if ats:
+        story.append(Paragraph("App Transport Security", styles["subsection_title"]))
+        posture = ats.get("posture") or ("ATS enforced" if ats.get("enforced") else "ATS weakened")
+        pc = SEVERITY_COLORS["low"] if ats.get("enforced") else SEVERITY_COLORS["high"]
+        story.append(Paragraph(f'<font color="{pc.hexval()}"><b>{escape(str(posture))}</b></font> — '
+                               f'{escape(str(ats.get("summary","")))}', styles["body"]))
+        story.append(Spacer(1, 2 * mm))
+
+    usage = [p for p in dangerous if p.get("usage_description") is not None]
+    if usage:
+        story.append(Paragraph("Privacy Usage Descriptions", styles["subsection_title"]))
+        rows = [["Permission", "Severity", "Declared reason"]]
+        for p in usage:
+            color = SEVERITY_COLORS.get(p.get("severity", "info"), HexColor("#64748B"))
+            reason = p.get("usage_description") or "— no purpose string declared —"
+            rows.append([
+                Paragraph(f'<font face="Courier" size="7">{escape(str(p.get("permission","")))}</font>', styles["table_cell"]),
+                Paragraph(f'<font color="{color.hexval()}"><b>{str(p.get("severity","")).upper()}</b></font>', styles["table_cell"]),
+                Paragraph(_safe(str(reason)[:90]), styles["table_cell"]),
+            ])
+        t = Table(rows, colWidths=[62 * mm, 20 * mm, 73 * mm])
+        t.setStyle(_table_style(T))
+        story.append(t)
+        story.append(Spacer(1, 2 * mm))
+
+    if ents:
+        story.append(Paragraph(f"Entitlements ({len(ents)})", styles["subsection_title"]))
+        rows = [["Key", "Value"]]
+        for k, v in list(ents.items())[:20]:
+            rows.append([
+                Paragraph(f'<font face="Courier" size="7">{escape(str(k))}</font>', styles["table_cell"]),
+                Paragraph(f'<font face="Courier" size="7">{_safe(str(v)[:60])}</font>', styles["table_cell"]),
+            ])
+        t = Table(rows, colWidths=[75 * mm, 80 * mm])
+        t.setStyle(_table_style(T))
+        story.append(t)
+    story.append(Spacer(1, 6 * mm))
+
+
 def _binary_section(story, results, T, styles):
     binaries = results.get("binaries", [])
     if not binaries:
@@ -1792,38 +2020,50 @@ def _binary_section(story, results, T, styles):
 
 # ─── String Analysis Section ──────────────────────────────────────────────────
 def _string_analysis_section(story, results, T, styles):
-    string_data = results.get("string_analysis", {})
-    if not string_data:
+    # RUN 13: render the MASKED strings surface (results["strings"]), NOT the raw
+    # string_analysis. The raw categories include "Base64 Encoded String (Potential Secret)"
+    # with UNMASKED values — rendering those verbatim leaked candidate secrets into the PDF (the
+    # RUN 12 leak class). results["strings"] already masks credential-class values and applies
+    # the email FP filter, so it is the single safe source for this section.
+    strings = results.get("strings") or {}
+    categories = strings.get("categories") or []
+    if not categories and not (strings.get("emails")):
         return
 
-    story.append(Paragraph(f"String Analysis ({len(string_data)} categories)", styles["section_title"]))
+    story.append(Paragraph(f"Strings ({strings.get('category_count', len(categories))} categories · "
+                           f"{strings.get('masked_count', 0)} masked)", styles["section_title"]))
     story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
-    story.append(Spacer(1, 4*mm))
+    story.append(Spacer(1, 4 * mm))
 
-    rows = [["Category", "Severity", "Count", "Sample Values"]]
-    sev_order = ["critical","high","medium","low","info"]
-    for cat, info in sorted(string_data.items(), key=lambda x: sev_order.index(x[1]["severity"]) if x[1]["severity"] in sev_order else 5):
-        color = SEVERITY_COLORS.get(info["severity"], HexColor("#64748B"))
-        # Handle both old (string list) and new ({value, files} list) formats
-        raw_matches = info.get("matches", [])
-        if raw_matches and isinstance(raw_matches[0], dict):
-            sample_vals = [m.get("value", "") for m in raw_matches[:3]]
-        else:
-            sample_vals = raw_matches[:3]
+    rows = [["Category", "Severity", "Count", "Sample Values (secrets masked)"]]
+    sev_order = ["critical", "high", "medium", "low", "info"]
+    for info in sorted(categories, key=lambda c: sev_order.index(c.get("severity")) if c.get("severity") in sev_order else 5):
+        color = SEVERITY_COLORS.get(info.get("severity"), HexColor("#64748B"))
+        # Values here are ALREADY masked by strings_section.redact() — safe to print as-is.
+        sample_vals = [m.get("value", "") for m in (info.get("matches") or [])[:3]]
         samples = ", ".join(str(v) for v in sample_vals)
         if len(samples) > 60:
             samples = samples[:60] + "…"
         rows.append([
-            Paragraph(cat, styles["table_cell"]),
-            Paragraph(f'<font color="{color.hexval()}"><b>{info["severity"].upper()}</b></font>', styles["table_cell"]),
-            Paragraph(str(info["count"]), styles["table_cell"]),
+            Paragraph(_safe(info.get("name", "")), styles["table_cell"]),
+            Paragraph(f'<font color="{color.hexval()}"><b>{str(info.get("severity", "info")).upper()}</b></font>', styles["table_cell"]),
+            Paragraph(str(info.get("count", 0)), styles["table_cell"]),
             Paragraph(f'<font face="Courier" size="7">{_safe(samples)}</font>', styles["table_cell"]),
         ])
-
-    t = Table(rows, colWidths=[55*mm, 22*mm, 15*mm, 63*mm])
+    t = Table(rows, colWidths=[55 * mm, 22 * mm, 15 * mm, 63 * mm])
     t.setStyle(_table_style(T))
     story.append(t)
-    story.append(Spacer(1, 6*mm))
+
+    emails = strings.get("emails") or []
+    if emails or strings.get("emails_rejected"):
+        story.append(Spacer(1, 3 * mm))
+        story.append(Paragraph("Emails", styles["subsection_title"]))
+        if emails:
+            story.append(Paragraph(", ".join(_safe(e) for e in emails[:20]), styles["body"]))
+        note = f"{strings.get('emails_rejected', 0)} false positive(s) dropped " \
+               "(Dart runtime symbols, format-string hosts, library-internal addresses)."
+        story.append(Paragraph(note, styles["caption"]))
+    story.append(Spacer(1, 6 * mm))
 
 
 def _permissions_section_pdf(story, results, T, styles):

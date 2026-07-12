@@ -1089,6 +1089,41 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Files: backend/analyzers/ios_analyzer.py; NEW backend/tests/test_ios_decodable_plist_viewable.py.
     Commit 176ce7b. Tests: 897 passed, 11 skipped.
 
+[x] RUN 21 — PDF export completeness audit + fill real gaps (PDF-only)  DONE
+    ANSWER TO THE QUESTION: the PDF was shorter than MobSF NOT because MobSF's length is
+    legitimate padding-only — it was because MANY RUN 1-20 sections landed UI-ONLY and the
+    reportlab PDF generator (which predates most of the RUN work) never got renderers for them.
+    MEASURED FIRST (grep each RUN-feature results-key in pdf_generator.py): missing keys were
+    trackers, property_lists, binary_protections, ats_state, cve_stats.coverage, grade_reason,
+    results["strings"]; and _binary_section rendered the empty Android "binaries" list, not the
+    iOS binary_protections.
+    GAPS FILLED (new PDF sections, each self-gating so Android is unaffected):
+      RUN 9  Binary Protections — the per-binary Mach-O table (40 rows) + the suppressed-FP note
+             (App.framework/App Dart-AOT never a HIGH). MobSF's single biggest section; now in PDF.
+      RUN 11 Trackers — 9, each with evidence type + linkage.
+      RUN 12 Property Lists — security keys + privacy-manifest rollup.
+      RUN 6+10 Info.plist & Entitlements — ATS posture, usage-description reasons, entitlements.
+      RUN 1  Hardcoded IPs added to the Endpoints section (192.168.161.138).
+      RUN 14 OSV coverage VERDICT ("Not assessable — 0 CVEs is NOT a clean bill").
+      RUN 15.2 grade_reason (why 92 is capped to B).
+    TWO CORRECTNESS FIXES:
+      RUN 13 — _string_analysis_section rendered the RAW string_analysis, printing the
+        "Base64 (Potential Secret)" values UNMASKED — a real secret leak in the PDF (RUN 12 class).
+        Now renders the MASKED results["strings"] + the FP-filtered emails. Verified: raw base64
+        candidate and raw Firebase key are NOT in the PDF; masked AIza**** marker is.
+      RUN 20 follow-through — _findings_section recomputed build_evidence_view WITHOUT platform,
+        dropping the iOS binary treatment. Now prefers the stored platform-aware finding
+        ["evidence_view"]. Verified: cloud_firebase shows the DECODED bucket line
+        (ilogistics-check-in.appspot.com), not the raw-bplist artifact line 3.
+    DID NOT PAD: no 41x-repeated table, no FP emails. Density over length.
+    RESULT: iOS PDF 19 pages, ALL 14 audited sections present (verified via pypdf text
+      extraction). Shorter than MobSF's padded 57 = CORRECT (completeness, not length).
+      Android PDF 29 pages, iOS-only sections correctly ABSENT, strings section present.
+    DISCIPLINE: pdf_generator.py only (no analyzer change) — iOS 14/92/B, Android 46/35/F
+      unchanged (verified). 897 tests pass. No pdf skill at /mnt/skills (reportlab, code-based).
+    Files: backend/report/pdf_generator.py.
+    Commit-ready: Y
+
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
 - 2026-07-12  Plan created. Nothing run yet. Next: RUN 1.
