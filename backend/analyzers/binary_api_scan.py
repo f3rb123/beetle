@@ -111,7 +111,7 @@ def _primary_binary(bins: list) -> str:
     return bins[0]
 
 
-def build_findings(binaries: list, platform: str = "ios") -> list:
+def build_findings(binaries: list, platform: str = "ios", bundle_prefix: str = "") -> list:
     """Consolidate every binary's symbol matches into ONE finding per class.
 
     ``binaries`` are the per-binary dicts from lief_analyzer.analyze_all_macho, each carrying
@@ -149,7 +149,10 @@ def build_findings(binaries: list, platform: str = "ios") -> list:
             "matched_symbols": symbols,
             "matched_binaries": bins,
             "symbol_evidence": {s: by_sym[s] for s in symbols},
-            "file_path": primary,
+            # Full bundle-relative path, not the bare name: ownership's iOS path stage treats a
+            # bare extension-less name as a CocoaPod (it synthesises "/Pods/<name>/"), so
+            # "Runner" alone would classify the app's OWN main executable as a third-party SDK.
+            "file_path": f"{bundle_prefix}/{primary}" if bundle_prefix else primary,
             "snippet": ", ".join(symbols),
             "confidence": 95,           # the symbol IS in the import table — not a guess
             "evidence_type": "imported_symbol",

@@ -374,7 +374,7 @@ NO code change and show the order moves on its own). Only then is it safe to pas
 
 ═══════════════ TIER 2 — PARITY + DIFFERENTIATORS ═══════════════
 
-[~] RUN 8 - Binary insecure-API + logging + malloc scan (iOS-only)  CODE DONE - 2 DECISIONS PENDING
+[x] RUN 8 - Binary insecure-API + logging + malloc scan (iOS-only)  DONE
     Files changed:
       NEW backend/analyzers/binary_api_scan.py - symbol sets + match_symbols() + build_findings()
         (ONE consolidated finding per class listing matched symbols; MobSF's format).
@@ -409,20 +409,58 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       finding identities identical, NO binary_api_scan key and NO api_scan on any ELF binary.
       Residual byte deltas = a scan timestamp + the L4 rejected-candidate jitter, PROVEN
       pre-existing by scanning the same APK twice on the same build.
-    DECISION 1 PENDING - SEVERITY: insecure-API and malloc are DECLARED medium (MobSF: WARNING)
-      but land as INFO. Cause: ownership/engine.py:324 _match_ios_binary demotes ANY finding whose
-      file_path is a compiled Mach-O to OPEN_SOURCE_LIBRARY - the DELIBERATE Dart-AOT FP guard
-      (CLAUDE.md hard rule; RUN 9/15 depend on it). I DID fix a real attribution bug: the finding
-      was landing on the alphabetically-first Firebase framework, so an app-wide issue was being
-      blamed on GoogleSDK; it now attributes to the app's OWN main binary (Runner). But Runner is
-      still a compiled binary, so the guard demotes it anyway. Exempting
-      evidence_type == "imported_symbol" from that demotion would restore medium - an import-table
-      entry is AUTHORITATIVE, not the offset-only string-table noise the guard exists to suppress.
-      I did NOT weaken the guard unilaterally. HUMAN TO DECIDE.
-    DECISION 2 PENDING - accept that the MASVS-CODE clause is unachievable as written, or open a
-      separate run to implement control DETECTION.
-    Commit-ready: Y (code is correct and additive; the 2 decisions do not block the commit)
-    Tests: 788 passed, 11 skipped.
+    DECISION 1 - RESOLVED (human approved): import-table evidence exempted from the
+      compiled-binary demotion, narrowly and with a locking test.
+      TWO REAL BUGS were behind the INFO severity, and the first one was NOT where I first
+      looked (_match_ios_binary was never even reached):
+        BUG A - ownership/engine.py:296 synthesises "/Pods/<stem>/" for ANY bare, extension-less
+          iOS filename. So file_path "Runner" - the app's OWN main executable - matched the
+          embedded_framework rule and was classified ThirdPartySDK. FIX: attribute with the full
+          bundle-relative path ("Payload/Runner.app/Runner"), which the iOS app-bundle stage then
+          correctly classifies as APPLICATION.
+        BUG B - the demotion is NOT in the ownership engine at all: finding_model.
+          demote_library_noise:936-963 demotes any library-owned finding whose rule_id starts with
+          "ios_" to INFO. With ownership fixed to APPLICATION, it no longer fires for these.
+      THE EXEMPTION (ownership/engine.py): sig now carries evidence_type, and _match_ios_binary
+      returns None for evidence_type == "imported_symbol" only - a one-member frozenset
+      (_AUTHORITATIVE_BINARY_EVIDENCE), NOT "any high-confidence binary finding". An import-table
+      entry proves the binary LINKS that function; it is a structural fact, not the offset-only
+      string-table coincidence the guard exists to suppress.
+      LOCKING TEST: backend/tests/test_ios_binary_evidence_ownership.py (6 tests), BOTH directions:
+        (a) imported_symbol on a compiled Mach-O stays app-owned / not demoted;
+        (b) the Dart-AOT FP class is STILL demoted - missing canary + ARC on App.framework/App,
+            libapp.so, AND the RUN 4 string-index class (code_pattern on a Mach-O) - plus an
+            explicit test that the exemption is keyed on evidence KIND, never on confidence.
+            If anyone widens the exemption, direction (b) fails. RUN 9/15 guard is protected.
+    VERIFIED ON THE REGENERATED iOS REPORT:
+      Binary Imports Insecure C APIs         MEDIUM  owner=Application  library_noise=False
+      Binary Imports Uncontrolled Allocation MEDIUM  owner=Application  library_noise=False
+      Binary Imports Logging API (NSLog)     INFO    owner=Application  (correctly stays INFO)
+      findings still 85; severity 0/0/2/36/47. FP GUARD INTACT: 0 HIGH and 0 CRITICAL findings
+      in the whole report - the Dart-AOT class is not inflated.
+    Android: CONTENT-IDENTICAL (timestamps masked, set-derived fields order-insensitive).
+      endpoints/ips/secrets identical, severity identical, finding identities identical,
+      permissions content-identical, and library_noise demotions unchanged at 13 = 13 (proving
+      the ownership change did not leak into Android's demotion behaviour).
+    DECISION 2 - RESOLVED: the MASVS-CODE clause is unachievable as written and was NOT faked.
+      Findings are PENALTIES, not controls (build_coverage:159-163). Superseded by RUN 8.1, which
+      implements real control DETECTION. Must land before RUN 15.
+    Commit-ready: Y
+    Tests: 794 passed, 11 skipped (incl. the 6 new ownership FP-guard tests).
+
+[ ] RUN 8.1 - MASVS control DETECTION (iOS-only) - MUST LAND BEFORE RUN 15
+    WHY: RUN 8 proved MASVS-CODE cannot move off 0 by adding findings - score =
+      (controls_present/expected)*60 + (40 - penalty), so findings only ever subtract. The score
+      is floored until Beetle can DETECT CONTROLS the app actually implements.
+    Do: implement control detection in masvs_intel._detect_controls for iOS, driven by REAL
+      evidence already in the report (RUN 7 categorised the frameworks, so the signal exists):
+        IOSSecuritySuite / flutter_jailbreak_detection_plus  -> anti-tampering / RESILIENCE
+        flutter_secure_storage (Keychain-backed)             -> secure storage / STORAGE
+        (only controls with genuine evidence - see guard)
+    GUARD (same discipline as RUN 7's "unknown stays reachable"): a control is marked PRESENT
+      ONLY with real evidence that it is implemented. NEVER assume a control present to lift the
+      score. Add a test that a control with no evidence stays ABSENT.
+    Android: unchanged (iOS-scoped). Regenerate both; Android content-identical.
 
 [ ] RUN 9 — Per-binary protection table (iOS-only) — FP GUARD on App.framework/App
     Files changed:

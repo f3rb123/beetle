@@ -431,7 +431,9 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                     # ONE consolidated finding per class (insecure API / logging / malloc),
                     # each listing the symbols that are genuinely in the import table.
                     from . import binary_api_scan
-                    api_findings = binary_api_scan.build_findings(lief_results, platform="ios")
+                    _bundle_rel = relativize_path(app_bundle, tmpdir) if app_bundle else ""
+                    api_findings = binary_api_scan.build_findings(
+                        lief_results, platform="ios", bundle_prefix=_bundle_rel)
                     if api_findings:
                         results["findings"].extend(api_findings)
                         results["binary_api_scan"] = {

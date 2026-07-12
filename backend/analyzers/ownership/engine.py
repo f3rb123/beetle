@@ -170,7 +170,16 @@ def derive_signals(finding: CanonicalFinding) -> dict:
         "class_simple": class_simple,
         "file_path": fpath,
         "platform": (finding.platform or "unknown").lower(),
+        "evidence_type": str(finding.evidence_type or "").lower(),
     }
+
+
+# Evidence that is AUTHORITATIVE inside a compiled binary, so the compiled-binary demotion
+# below must not apply to it. A dynamic-import-table entry proves the binary links that
+# function — it is a structural fact, not the offset-only string-table coincidence the
+# demotion exists to suppress. Deliberately a one-member set: this is NOT "any
+# high-confidence binary finding", and widening it would re-open the Dart-AOT FP class.
+_AUTHORITATIVE_BINARY_EVIDENCE = frozenset({"imported_symbol"})
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -333,6 +342,14 @@ class OwnershipEngine:
         iOS-only; runs before the app-bundle heuristic. Android is never reached.
         """
         if sig["platform"] != "ios":
+            return None
+        # An imported-symbol hit is AUTHORITATIVE: the symbol is in the binary's dynamic
+        # import table, so the binary demonstrably links that function. That is not the
+        # offset-only string-table match this demotion targets, so it keeps its declared
+        # severity and app ownership. Everything else about a compiled binary — including
+        # the Dart-AOT protection-flag and string-index classes — still falls through and is
+        # demoted below. Narrow by design (see _AUTHORITATIVE_BINARY_EVIDENCE).
+        if sig.get("evidence_type") in _AUTHORITATIVE_BINARY_EVIDENCE:
             return None
         raw = sig["file_path"] or ""
         if not raw:
