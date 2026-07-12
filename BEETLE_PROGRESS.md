@@ -1138,6 +1138,34 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Files: backend/report/pdf_generator.py.
     Commit-ready: Y
 
+[x] RUN 22 — fix the two regex_sast MISLABELS from the RUN 19 audit  DONE
+    Both were id/pattern mismatches: the rule asserted something the pattern never checks. Per the
+    audit (proposals 4 & 7) the honest fix for BOTH is RELABEL, not narrow — the patterns detect
+    real things, they were just named for the wrong thing.
+    FIX 1 — android_process_death -> android_insecure_deserialization.
+      The pattern (ObjectInputStream|readObject()|Serializable|Parcelable...) is deserialization;
+      the title "Object Deserialization", CWE-502 and description were ALREADY correct — only the id
+      lied ("process death"). id-only rename; pattern/title/severity unchanged.
+    FIX 2 — android_content_provider_no_permission -> android_content_provider_query.
+      Pattern is getContentResolver().query() — a USAGE detector, not a missing-permission check.
+      Old title "ContentProvider Query Without Permission Check" claimed a gap the rule never
+      verifies. Relabeled id + title ("ContentProvider Query") + description (now: usage detected,
+      review that the provider is permission-guarded — not itself a finding of a missing permission).
+      Pattern/severity unchanged.
+    Chose RELABEL over NARROW for both: narrowing changes match breadth/coverage (a separate
+    signal-quality concern, deferred with the rest of the RUN 19 breadth proposals); the mislabel
+    is purely a correctness/honesty defect, and relabel fixes exactly that with zero coverage change.
+    ITEMIZED EXPECTED DELTA (stated before regenerating): only the 2 rule_ids change (+1 title);
+    count 46 unchanged; severity_summary unchanged; score 35/F unchanged; iOS untouched.
+    PROVED (android_R21 vs android_R22, neutralizing ONLY the 2 intended relabels):
+      exactly 2 old ids removed / 2 new ids added; ALL other finding identities byte-identical;
+      count 46->46; severity_summary {crit1,high11,med7,low5,info22} unchanged; score 35/F unchanged;
+      both findings stay INFO (library-owned, RUN 15 demotion). iOS 14/92/B unchanged.
+    No external refs to the old ids (only code_rules.py + the RUN 19 doc, which is a historical
+    record and left as-is). 897 tests pass. Analyzer change only.
+    Files: backend/analyzers/code_rules.py.
+    Commit-ready: Y
+
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
 - 2026-07-12  Plan created. Nothing run yet. Next: RUN 1.

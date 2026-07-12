@@ -508,7 +508,10 @@ CODE_RULES = [
         "recommendation": "Minimize reflection usage. Document legitimate uses. Avoid using reflection to invoke untrusted code.",
     },
     {
-        "id":          "android_process_death",
+        # RUN 22: id relabeled from the mislabeled "android_process_death" — the pattern,
+        # title, CWE-502 and description all describe INSECURE DESERIALIZATION, which the id
+        # now matches. The pattern is unchanged, so this only corrects the rule's identity.
+        "id":          "android_insecure_deserialization",
         "title":       "Object Deserialization",
         "pattern":     r"ObjectInputStream|readObject\(\)|Serializable|Parcelable.*readFromParcel",
         "severity":    "medium",
@@ -634,16 +637,21 @@ CODE_RULES = [
         "recommendation": "Use explicit intents (specifying the target component) for sensitive IPC. Use LocalBroadcastManager for local broadcasts.",
     },
     {
-        "id":          "android_content_provider_no_permission",
-        "title":       "ContentProvider Query Without Permission Check",
+        # RUN 22: id + title relabeled from the mislabeled
+        # "android_content_provider_no_permission" / "...Without Permission Check". The pattern
+        # detects a ContentResolver QUERY (usage) — it does NOT verify whether a permission is
+        # missing, so the old name/title asserted a gap the rule never checks. Now named for what
+        # it detects: a content-provider query the reviewer should confirm is permission-guarded.
+        "id":          "android_content_provider_query",
+        "title":       "ContentProvider Query",
         "pattern":     r"getContentResolver\(\)\.query\(|contentResolver\.query\(",
         "severity":    "low",
         "category":    "Platform Interaction",
         "cwe":         "CWE-284",
         "masvs":       "MASVS-PLATFORM-1",
         "owasp":       "M1",
-        "description": "ContentProvider queries detected. Ensure the target provider is protected with appropriate permissions.",
-        "recommendation": "Verify target ContentProvider has proper read/write permissions. Sanitize URI inputs to prevent path traversal.",
+        "description": "The app queries a ContentProvider (usage detected — this is not itself a finding of a missing permission). Review that the target provider enforces read/write permissions and that URI inputs are validated.",
+        "recommendation": "Confirm the target ContentProvider is permission-guarded (android:permission / exported=false as appropriate) and sanitize URI inputs to prevent path traversal.",
     },
 
     # ── Data Transmission ──────────────────────────────────────────────────────
