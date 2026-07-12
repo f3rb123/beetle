@@ -479,6 +479,11 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                         "binaries_scanned": len(lief_results),
                         "objc_class_total": objc_class_count,
                         "instrumentation_hits": inst_hits,
+                        # RUN 15: rules that do not apply to a dynamic library (MH_PIE, framework
+                        # RPATHs) are suppressed rather than emitted as noise. Recorded so the
+                        # suppression is auditable, never silent.
+                        "suppressed_rules": [s for r in lief_results
+                                             for s in (r.get("suppressed") or [])],
                         "truncated_symbol_lists": [
                             r.get("binary") for r in lief_results
                             if r.get("imported_syms_truncated")

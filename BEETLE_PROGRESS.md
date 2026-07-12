@@ -815,12 +815,53 @@ NO code change and show the order moves on its own). Only then is it safe to pas
 
 ═══════════════ TIER 3 — SCORE CALIBRATION ═══════════════
 
-[ ] RUN 15 — Score model realism (SHARED: scoring) — FP GUARD
-    Files changed:
-    Both reports regenerated: 
-    Acceptance (every deduction = real finding; no AOT FP inflates): 
-    Commit-ready:
-    Resume notes:
+[x] RUN 15 - Score model realism (SHARED: scoring/lief) - FP GUARD  DONE  -> iOS 89/100 grade B
+    I CHANGED NO WEIGHTS, NO CAPS, NO GRADE BANDS. The score is an OUTPUT. The only change was
+    removing two FALSE-POSITIVE CLASSES, both keyed on the Mach-O FILE TYPE (content, not path -
+    the RUN 9 discipline):
+      macho_no_pie x39      - emitted at INFO on EVERY framework, with a description that
+        literally said "expected and not a hardening gap". A finding that says it is not a
+        problem is not a finding. MH_PIE applies ONLY to the main executable image; a dylib
+        relocates regardless. SUPPRESSED (recorded, auditable).
+      macho_multiple_rpaths x35 -> x1 - one row per vendor framework. @executable_path/
+        @loader_path RPATHs are exactly what Xcode emits for a bundled framework. The
+        dylib-hijacking surface that matters is the MAIN EXECUTABLE's search path, which is
+        still assessed (Runner keeps its LOW). SUPPRESSED for libraries.
+    FINDINGS 87 -> 14. 74 of the 87 were noise. THAT is the real result.
+    THE LEDGER (every point traced to a real finding):
+      MEDIUM x4 = 12 raw -> CAPPED at 9 -> DEDUCTED 9
+        - Tracking SDKs Present but Not Declared   Info.plist            [Application]  (RUN 12.1)
+        - Framework Binaries Without Stack Canary  FirebaseCoreExtension [GoogleSDK]    (RUN 9)
+        - Binary Imports Insecure C APIs           Runner                [Application]  (RUN 8)
+        - Binary Imports Uncontrolled Allocation   Runner                [Application]  (RUN 8)
+      LOW x2 = 2 raw -> DEDUCTED 2 (uncapped)
+        - Firebase Storage Bucket Reference        GoogleService-Info.plist [Application]
+        - Multiple @-Relative RPATHs Set (2)       Runner (main executable only)
+      SECRETS 0 (the 3 Firebase keys are INFO client keys -> weight 0). CHAINS 0. BONUSES +0.
+      TOTAL DEDUCTED 11  =>  SCORE 100 - 11 = 89  (grade B "Good")
+    FP GUARD HOLDS: ZERO deductions trace to App.framework/App (Dart-AOT canary/ARC) or to a
+      string-index (RUN 4) finding. Suppressions recorded and auditable in lief_macho.
+      suppressed_rules: macho_no_pie x39, macho_multiple_rpaths x34; binary-protection
+      suppressions: canary x1, arc x3.
+    THE HONEST SURPRISE - THE SCORE WENT *UP*, 88 -> 89. Reported, not massaged. The LOW cap was
+      already binding (36 lows -> 3 pts), so removing 34 FP lows recovered only 1 point. The win
+      is not the number: it is that all 14 remaining findings are REAL.
+    MASVS-CODE 0 -> 16, and the reason matters: controls_present is STILL [] - NO control was
+      credited. The rise is pure PENALTY REDUCTION (74 FP findings left the category, so the
+      capped 40-pt penalty fell). RUN 14's rule holds: "Up-to-date Dependencies" stays
+      UNCREDITED because dependency coverage is not assessable.
+    STRUCTURAL DEFECT FOUND, NOT ACTED ON (would have been the forbidden move): the model caps
+      each severity at 3x its weight, so MEDIUM deducts at most 9 points NO MATTER HOW MANY
+      mediums exist - 4 mediums and 40 mediums score identically. This app's profile therefore
+      FLOORS at 89. Raising that cap would move the score toward MobSF's 50, which is exactly
+      the reverse-engineering CLAUDE.md forbids, so I STOPPED and flagged it. -> RUN 15.1.
+    Android diff (SHARED FILE): SCORE 33/F -> 33/F, score dict BYTE-IDENTICAL. endpoints / ips /
+      secrets / severity_summary / masvs_coverage / components / finding identities / permissions
+      ALL IDENTICAL. macho_* rules are Mach-O only; Android's native path is analyze_elf.
+    vs MobSF: Beetle 89/B on 14 evidence-backed findings. MobSF 50/B - but RUN 9 proved 5 of its
+      11 HIGHs are outright FPs and 6 more are overstatements. A defensible 89 beats an FP-driven 50.
+    Commit-ready: Y
+    Tests: 866 passed, 11 skipped (incl. 5 new: file-type beats path, path fallback).
 
 ═══════════════ TIER 4 — PENDING ANDROID + WEB/PDF ═══════════════
 

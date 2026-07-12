@@ -89,6 +89,26 @@ _ARC_SYMS = frozenset({"_objc_release", "_objc_retain", "_objc_autoreleaseReturn
                        "_objc_retainAutoreleasedReturnValue", "_objc_storeStrong"})
 
 
+def _is_library_macho(m, binary_path: str = "") -> bool:
+    """True when this Mach-O is a dynamic library / framework rather than the main executable.
+
+    Decided from the Mach-O HEADER's file type (MH_DYLIB / MH_BUNDLE vs MH_EXECUTE) — a
+    structural fact, the same content-over-filename discipline as RUN 9's Dart-AOT detection.
+    Falls back to the path shape only if LIEF cannot report the header (never guesses silently).
+    """
+    try:
+        ft = str(getattr(getattr(m, "header", None), "file_type", "")).upper()
+        if ft:
+            if "EXECUTE" in ft:
+                return False
+            if "DYLIB" in ft or "BUNDLE" in ft:
+                return True
+    except Exception:
+        pass
+    p = (binary_path or "").replace("\\", "/").lower()
+    return p.endswith(".dylib") or ".framework/" in p
+
+
 def _protection_flags(m, imports: list, exports: list) -> dict:
     """Per-binary hardening facts, derived from the symbol tables (structural, not guessed).
 
@@ -241,28 +261,38 @@ def analyze_macho(binary_path: str) -> dict:
         # (`.dylib`) and framework binaries are loaded at a relocatable address
         # regardless, so a missing MH_PIE on them is informational, not a finding
         # — flagging it produced noisy false positives on every embedded library.
-        _ext = os.path.splitext(rel)[1].lower()
-        _is_lib = _ext == ".dylib" or (not _ext and ".framework" in binary_path.replace("\\", "/"))
-        out["findings"].append({
-            "title":          "Mach-O Binary Not Position-Independent (PIE)",
-            "severity":       "info" if _is_lib else "high",
-            "category":       "Binary Hardening",
-            "rule_id":        "macho_no_pie",
-            "evidence_type":  "regex_match",
-            "cwe":            "CWE-121",
-            "masvs":          "MASVS-CODE-4",
-            "owasp":          "M7",
-            "file_path":      rel,
-            "description":    (
-                "Mach-O header lacks MH_PIE. ASLR is disabled for the main executable. "
-                "Not applicable to dynamic libraries / frameworks, which relocate regardless."
-                if not _is_lib else
-                "Library/framework Mach-O without MH_PIE — expected and not a hardening gap "
-                "(only the main executable image benefits from MH_PIE / ASLR)."
-            ),
-            "recommendation": "Rebuild the main executable with -Wl,-pie (MH_EXECUTE + MH_PIE).",
-            "confidence":     "high",
-        })
+        #
+        # RUN 15: those library rows were still EMITTED, at INFO, with a description that said
+        # "expected and not a hardening gap". A finding whose own text says it is not a problem
+        # is not a finding — it is 39 rows of noise (39 of this app's 87 findings). MH_PIE is
+        # meaningful ONLY for the main executable image; a dylib/framework relocates regardless.
+        # So the library case is now SUPPRESSED, not down-severitied.
+        #
+        # Decided from the Mach-O FILE TYPE (content), not the path — the same discipline as
+        # RUN 9's Dart-AOT detection. Suppression is recorded so it is auditable, never silent.
+        if _is_library_macho(m, binary_path):
+            out.setdefault("suppressed", []).append({
+                "rule_id": "macho_no_pie", "binary": rel,
+                "reason": ("MH_PIE applies only to the main executable image; a dynamic "
+                           "library/framework relocates regardless, so its absence is not a "
+                           "hardening gap."),
+            })
+        else:
+            out["findings"].append({
+                "title":          "Mach-O Binary Not Position-Independent (PIE)",
+                "severity":       "high",
+                "category":       "Binary Hardening",
+                "rule_id":        "macho_no_pie",
+                "evidence_type":  "binary_protection",
+                "cwe":            "CWE-121",
+                "masvs":          "MASVS-CODE-4",
+                "owasp":          "M7",
+                "file_path":      rel,
+                "description":    ("Mach-O header lacks MH_PIE. ASLR is disabled for the main "
+                                   "executable image."),
+                "recommendation": "Rebuild the main executable with -Wl,-pie (MH_EXECUTE + MH_PIE).",
+                "confidence":     "high",
+            })
 
     if not out["has_code_signature"]:
         out["findings"].append({
@@ -319,20 +349,38 @@ def analyze_macho(binary_path: str) -> dict:
                 "confidence":     "medium",
             })
 
-    # RPATH abuse surface
+    # RPATH abuse surface.
+    #
+    # RUN 15: this fired on EVERY framework — 35 of this app's 87 findings, one per vendor
+    # binary. @executable_path/../Frameworks and @loader_path/Frameworks are exactly what Xcode
+    # emits for a bundled framework: standard linkage, not 35 separate hijacking risks. The
+    # dylib-hijacking surface that actually matters is the MAIN EXECUTABLE's search path, which
+    # is what decides where the process looks for libraries. So the library case is suppressed
+    # (auditable, not silent), and the main executable is still assessed.
     writable_rpath = [r for r in out["rpaths"] if r.startswith("@executable_path") or r.startswith("@loader_path")]
     if len(writable_rpath) > 1:
-        out["findings"].append({
-            "title":          f"Multiple @-Relative RPATHs Set ({len(writable_rpath)})",
-            "severity":       "low",
-            "category":       "Binary Hardening",
-            "rule_id":        "macho_multiple_rpaths",
-            "evidence_type":  "regex_match",
-            "file_path":      rel,
-            "description":    f"Binary has {len(writable_rpath)} @executable_path/@loader_path RPATHs — expands the dylib hijacking surface.",
-            "recommendation": "Consolidate RPATHs; prefer a single well-known Frameworks directory.",
-            "confidence":     "low",
-        })
+        if _is_library_macho(m, binary_path):
+            out.setdefault("suppressed", []).append({
+                "rule_id": "macho_multiple_rpaths", "binary": rel,
+                "reason": ("@executable_path/@loader_path RPATHs in a bundled framework are "
+                           "standard Xcode linkage. The dylib-hijacking surface is decided by "
+                           "the MAIN executable's search path, which is assessed separately."),
+            })
+        else:
+            out["findings"].append({
+                "title":          f"Multiple @-Relative RPATHs Set ({len(writable_rpath)})",
+                "severity":       "low",
+                "category":       "Binary Hardening",
+                "rule_id":        "macho_multiple_rpaths",
+                "evidence_type":  "binary_protection",
+                "file_path":      rel,
+                "description":    (f"The main executable has {len(writable_rpath)} "
+                                   "@executable_path/@loader_path RPATHs — each is a directory "
+                                   "the process will search for dynamic libraries, widening the "
+                                   "dylib-hijacking surface."),
+                "recommendation": "Consolidate RPATHs; prefer a single well-known Frameworks directory.",
+                "confidence":     "low",
+            })
 
     return out
 
