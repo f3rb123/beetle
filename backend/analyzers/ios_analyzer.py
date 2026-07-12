@@ -406,11 +406,21 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                 log.exception("[trackers] iOS tracker detection failed")
                 results.setdefault("trackers", [])
 
+            # ── Strings section (browsable; emits NO findings) ────────────────
+            # HIGHEST secret-leak risk surface: it shows the raw strings themselves. Every value
+            # is routed through strings_section.redact() -> secret_intel.mask_value, so a
+            # credential in the string table can never appear in the clear (RUN 12's leak, one
+            # level worse).
+            try:
+                from . import strings_section
+                results["strings"] = strings_section.build(
+                    results, extra_emails=results.pop("_binary_emails", []))
+            except Exception:
+                log.exception("[strings] iOS strings section failed")
+
             # ── Privacy-declaration discrepancy (the ONE finding from this area) ──
             # MUST run after BOTH chains exist: the trackers (presence, above) and the property
-            # lists (absence). It is precisely their INTERSECTION. Running it inside the plist
-            # block put it BEFORE tracker detection, so results["trackers"] was empty and the
-            # finding never fired — the same ordering trap as RUN 11.
+            # lists (absence). It is precisely their INTERSECTION.
             try:
                 from . import ios_plists as _plists
                 _priv = _plists.build_privacy_declaration_finding(results)
@@ -1205,6 +1215,11 @@ def _scan_binary_strings(app_bundle: str, results: dict, base_dir: str = ""):
     from .tracker_db import ios_tracker_markers
     _markers = ios_tracker_markers()
     marker_hits: set[str] = set()
+    # Emails live in the Dart AOT blob (App.framework/App) — the ONE real address in this app,
+    # service.coord@cvx.com, is in there, alongside 44 Dart-symbol lookalikes. Harvested here so
+    # the Strings section can filter them; no extra pass.
+    from .strings_section import EMAIL_RE as _EMAIL_RE
+    email_hits: set[str] = set()
 
     for binary_path in _iter_macho_binaries(app_bundle):
         try:
@@ -1223,12 +1238,14 @@ def _scan_binary_strings(app_bundle: str, results: dict, base_dir: str = ""):
             for hit in network_intel.extract_ips_from_text(text, rel_path):
                 ip_hits.setdefault((hit["ip"], hit["file_path"]), hit)
             marker_hits.update(m for m in _markers if m in text)
+            email_hits.update(_EMAIL_RE.findall(text))
         except Exception:
             log.exception("[ios] binary string scan failed for %s", binary_path)
 
     results["_binary_endpoints"] = sorted(urls)
     results["_binary_ip_hits"] = list(ip_hits.values())
     results["_binary_tracker_markers"] = sorted(marker_hits)
+    results["_binary_emails"] = sorted(email_hits)
 
 
 # ─── Endpoint extraction ──────────────────────────────────────────────────────

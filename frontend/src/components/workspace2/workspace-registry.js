@@ -51,6 +51,9 @@ export const PANELS = [
   // manifest + resources, already covered by the Manifest panel).
   { id: 'plists', label: 'Property Lists', group: 'Investigation', icon: 'FileCode2',
     status: STATUS_READY, platforms: ['ios'] },
+  // BOTH platforms (no platforms gate): every app has a string table.
+  { id: 'strings', label: 'Strings', group: 'Investigation', icon: 'Binary',
+    status: STATUS_READY },
 
   // ── Static Analysis — derived posture & coverage ────────────────────────────
   { id: 'masvs', label: 'MASVS Coverage', group: 'Static Analysis', icon: 'ShieldCheck', status: STATUS_READY, count: 'masvs' },

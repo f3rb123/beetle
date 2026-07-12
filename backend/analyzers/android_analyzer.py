@@ -825,6 +825,15 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
         pass
     _record_module_metric(results, "live_checks", live_checks_started)
 
+    # ── Strings section (browsable; emits NO findings) ────────────────────────
+    # Same module as iOS. Every value goes through the secret-redaction gate before it can reach
+    # the report — a Strings section that printed a credential would be a leak, not a feature.
+    try:
+        from . import strings_section
+        results["strings"] = strings_section.build(results)
+    except Exception:
+        log.exception("[strings] Android strings section failed")
+
     # ── NEW: Tracker Detection ────────────────────────────────────────────────
     tracker_started = time.perf_counter()
     package_hints = set(results.get("app_info", {}).get("package_hints", []))

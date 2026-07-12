@@ -1025,6 +1025,95 @@ export function PropertyListsPanel({ results }) {
   )
 }
 
+// ───────────────────────────────── Strings ─────────────────────────────────
+// Both platforms. EVERY value here has already passed the backend's secret-redaction gate
+// (strings_section.redact -> secret_intel.mask_value), so a credential in the string table is
+// shown MASKED, never raw — a Strings section that printed an API key would be a leak, not a
+// feature. Masked values are badged so the analyst knows why they are seeing dots.
+export function StringsPanel({ results }) {
+  const s = results.strings || {}
+  const cats = s.categories || []
+  const [q, setQ] = useState('')
+  const ql = q.trim().toLowerCase()
+
+  if (!cats.length && !(s.urls || []).length && !(s.emails || []).length) {
+    return <EmptyState title="No strings extracted" body="No categorized strings were found in this app." />
+  }
+  const match = v => !ql || String(v).toLowerCase().includes(ql)
+
+  return (
+    <div>
+      <div className="ws-section__head">
+        <h1>Strings</h1>
+        <span className="ws-muted">categorized string table · secrets shown masked</span>
+      </div>
+
+      <div className="ws-metrics ws-section">
+        <Metric label="Categories" value={s.category_count ?? cats.length} />
+        <Metric label="Matches" value={s.total_matches ?? 0} />
+        <Metric label="Masked secrets" value={s.masked_count ?? 0} sub="never shown raw" />
+        <Metric label="Emails" value={(s.emails || []).length} sub={`${s.emails_rejected ?? 0} FPs dropped`} />
+      </div>
+
+      <input className="ws-input ws-section" placeholder="Filter strings…" value={q} onChange={e => setQ(e.target.value)} />
+
+      {(s.emails || []).length || s.emails_rejected ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>Emails <span className="ws-muted">· {(s.emails || []).length}</span></h2>
+          {(s.emails || []).length ? (
+            <div className="ws-scroll">
+              {(s.emails || []).filter(match).map((e, i) => <div key={i} className="ws-mcontrol ws-mono">{e}</div>)}
+            </div>
+          ) : <p className="ws-muted" style={{ fontSize: 12.5 }}>No real addresses found.</p>}
+          {s.emails_rejected ? (
+            <p className="ws-muted" style={{ fontSize: 12, marginTop: 8 }}>
+              {s.emails_rejected} false positive{s.emails_rejected === 1 ? '' : 's'} dropped
+              (Dart runtime symbols, format-string hosts, library-internal addresses)
+              {(s.emails_rejected_sample || []).length ? <> — e.g. <code className="ws-mono">{s.emails_rejected_sample[0]}</code></> : null}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {cats.map((c, i) => {
+        const rows = (c.matches || []).filter(m => match(m.value))
+        if (!rows.length) return null
+        return (
+          <div key={i} className="ws-card ws-card--pad ws-section">
+            <h2>{c.name} <span className="ws-muted">· {c.count}</span></h2>
+            {c.description ? <p className="ws-muted" style={{ fontSize: 12.5, marginTop: -6, marginBottom: 8 }}>{c.description}</p> : null}
+            <div className="ws-scroll" style={{ maxHeight: 320, overflowY: 'auto' }}>
+              {rows.map((m, j) => (
+                <div key={j} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '4px 0' }}>
+                  {m.masked ? <span className="ws-badge" title="Masked: this string is a credential">masked</span> : null}
+                  <code className="ws-mono" style={{ fontSize: 12.5, wordBreak: 'break-all' }}>{m.value}</code>
+                  {(m.files || []).length ? <span className="ws-muted ws-mono" style={{ fontSize: 11.5, marginLeft: 'auto' }}>{m.files[0]}</span> : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })}
+
+      {(s.urls || []).length ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>URLs <span className="ws-muted">· {(s.urls || []).length}</span></h2>
+          <div className="ws-scroll" style={{ maxHeight: 300, overflowY: 'auto' }}>
+            {(s.urls || []).filter(match).map((u, i) => <div key={i} className="ws-mono" style={{ fontSize: 12.5, padding: '3px 0', wordBreak: 'break-all' }}>{u}</div>)}
+          </div>
+        </div>
+      ) : null}
+
+      {(s.ips || []).length ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>IP Addresses <span className="ws-muted">· {(s.ips || []).length}</span></h2>
+          {(s.ips || []).filter(match).map((ip, i) => <div key={i} className="ws-mono" style={{ fontSize: 12.5 }}>{ip}</div>)}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export function ManifestPanel({ results }) {
   if (results.platform === 'ios') return <IosApplicationConfig results={results} />
   const info = results.app_info || {}

@@ -720,12 +720,47 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Commit-ready: Y
     Tests: 839 passed, 11 skipped.
 
-[ ] RUN 13 — Strings section + email FP filter (SHARED: both platforms)
-    Files changed:
-    Android diff: 
-    Acceptance (no Dart-symbol email FPs): 
-    Commit-ready:
-    Resume notes:
+[x] RUN 13 - Strings section + email FP filter (SHARED: both platforms)  DONE
+    Files changed: NEW backend/analyzers/strings_section.py (shared by both analyzers);
+      ios_analyzer.py (binary email harvest in the existing string walk + section);
+      android_analyzer.py (section); frontend registry/panels2/Workspace (Strings panel, BOTH
+      platforms - no gate); NEW backend/tests/test_strings_section.py (12 tests).
+    *** THE SECRET GATE (the RUN 12 lesson, one level worse) ***
+      This is the highest secret-leak-risk surface in the product: it shows the STRINGS
+      THEMSELVES. Every value passes strings_section.redact() BEFORE it can reach the report.
+      TWO triggers, because one was not enough:
+        1. the secret CATALOG matches the value (scan_text_for_secrets) -> mask via
+           secret_intel.mask_value (the SAME masking the secrets table uses - one impl);
+        2. the value sits in a category that IS a credential class ("Base64 Encoded String
+           (Potential Secret)"). CAUGHT IN THE REGENERATED REPORT: the first cut printed all 10
+           of those base64 blobs RAW (masked_count = 0) because the catalog does not match a bare
+           base64 blob. The section was literally saying "this may be a secret" and then showing
+           it. Now masked_count = 10, and the raw blob appears nowhere.
+      Verified: no raw Firebase key anywhere in the report; no raw base64 candidate in the section.
+    EMAIL FP FILTER - MobSF's ~95% garbage, quantified: the raw regex yields 48 hits on this app;
+      47 are dropped, 1 real address survives.
+        DROPPED: 44 Dart runtime symbols (_AnonymousRestorationInformation@133124995.
+          fromSerializableData) - already killed by string_analyzer._is_real_email;
+          2 format-string hosts (%@.app-analytics-services.com) - RUN 1.1's class, needed a new
+          rule because the local part is bare "%";
+          1 library-internal address (appro@openssl.org) - real, but OpenSSL's, not the app's.
+        KEPT: service.coord@cvx.com - the one genuine address (MobSF found it too, buried in
+          95% noise). VERIFIED against the bundle: it lives in the Dart AOT blob App.framework/App.
+    iOS section: 3 categories / 34 matches / 10 masked / 77 URLs / 1 IP + the emails.
+    Android diff (SHARED FILE - methodology applied: timestamps masked, set-derived fields
+      order-insensitive): endpoints / ips / secrets / string_analysis / severity_summary all
+      IDENTICAL; finding identities identical (45 -> 45); permissions content-identical.
+      INTENDED DELTA (the prompt asks for both platforms): Android GAINS results["strings"]
+      (10 categories, 28 matches, 0 masked, 0 emails). Its existing fields are untouched.
+    findings 87 -> 87 (surface, not a detector). severity 0/0/4/36/47.
+    *** BUG CAUGHT BY THE REGENERATED REPORT (6th time) ***: my inserted block dedented, so the
+      privacy-discrepancy check ended up nested INSIDE the strings block's `except` handler - it
+      only ran if the strings section THREW. It did not throw, so the RUN 12.1 finding silently
+      VANISHED (87 -> 86) while all 854 tests stayed green. Fixed the block structure; findings
+      back to 87. A unit test could not have caught this: the code was live-reachable only on an
+      exception path.
+    Commit-ready: Y
+    Tests: 856 passed, 11 skipped.
 
 [ ] RUN 14 — Vulnerable components verify + optional App Store metadata
     Files changed:
