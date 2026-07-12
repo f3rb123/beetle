@@ -33,6 +33,65 @@ GRADE_THRESHOLDS = [
 ]
 
 
+# Grade ordering, worst -> best, for composing the score-grade with the semantic ceiling.
+_GRADE_ORDER = ["F", "D", "C", "B", "A"]
+_GRADE_META = {
+    "A": ("Excellent",  "Very few issues detected. App demonstrates strong security practices."),
+    "B": ("Good",       "Minor issues detected. Overall security posture is reasonable."),
+    "C": ("Fair",       "Moderate security issues detected. Several items require attention."),
+    "D": ("Poor",       "Significant security issues found. Immediate remediation recommended."),
+    "F": ("Critical",   "Critical security vulnerabilities detected. App poses serious risk to users."),
+}
+
+
+def _apply_semantic_ceiling(grade, label, desc, ss, secrets, score):
+    """Cap the score-based grade by what the app actually SHIPS (RUN 15.2).
+
+    A/Excellent is a clean bill: no real finding ABOVE INFO — i.e. no LOW, MEDIUM, HIGH or
+    CRITICAL (findings OR secrets). A LOW is still a real, evidence-backed issue, so an app that
+    carries one is "very good, minor issues" (B), not a clean bill. B/Good tolerates LOW and
+    MEDIUM but nothing HIGH/CRITICAL. The ceiling only ever LOWERS the grade. Returns
+    (grade, label, desc, reason) with a reason that names the gating findings.
+    """
+    crit = int(ss.get("critical", 0) or 0)
+    high = int(ss.get("high", 0) or 0)
+    med = int(ss.get("medium", 0) or 0)
+    low = int(ss.get("low", 0) or 0)
+    # Secrets are scored on their DISPLAY severity, so an INFO client key never gates the grade;
+    # a real LOW-or-higher secret does.
+    sev_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+    secret_worst = max((sev_rank.get(str(s.get("display_severity") or s.get("severity") or "info").lower(), 0)
+                        for s in (secrets or [])), default=0)
+
+    if crit or high or secret_worst >= 3:
+        ceiling, why = "C", ("nothing HIGH or CRITICAL may grade above Fair — this app has "
+                             f"{crit} critical and {high} high-severity finding(s)"
+                             + (" plus a high-severity secret" if secret_worst >= 3 else ""))
+    elif med or secret_worst >= 2:
+        ceiling, why = "B", (f"a clean bill (Excellent) requires no finding above INFO — "
+                             f"this app has {med} real MEDIUM finding(s)"
+                             + (f" and {low} LOW" if low else "")
+                             + (" and a medium-severity secret" if secret_worst >= 2 else ""))
+    elif low or secret_worst >= 1:
+        ceiling, why = "B", (f"a clean bill (Excellent) requires no finding above INFO — "
+                             f"this app has {low} real LOW finding(s)"
+                             + (" and a low-severity secret" if secret_worst >= 1 else ""))
+    else:
+        ceiling, why = "A", "no findings above INFO"
+
+    # Grade = the WORSE (lower) of the score-band grade and the semantic ceiling.
+    final = grade if _GRADE_ORDER.index(grade) <= _GRADE_ORDER.index(ceiling) else ceiling
+    if final == grade:
+        # Score-band already at/below the ceiling — the number is the binding constraint.
+        reason = f"Score {score} in the {label} band; {why}."
+        return grade, label, desc, reason
+    # The ceiling lowered the grade: the app scored higher but its findings forbid that band.
+    new_label, new_desc = _GRADE_META[final]
+    reason = (f"Score {score} would place this in the {label} band, but capped at "
+              f"{final}/{new_label}: {why}.")
+    return final, new_label, new_desc, reason
+
+
 def graduated_deduction(weight: float, count: int) -> float:
     """Diminishing MARGINAL weight: the i-th finding of a severity deducts ``weight / i``.
 
@@ -139,7 +198,13 @@ def calculate_score(results: dict) -> dict:
     raw_score = max(0, min(100, 100 - total_deducted + total_bonus))
     score = round(raw_score)
 
-    # Letter grade
+    # Letter grade — the NUMBER picks a band, then a SEMANTIC CEILING can only lower it
+    # (RUN 15.2). The grade is a meaning label on the honest score, and the top bands are
+    # defined by what the app actually ships, not by arithmetic alone:
+    #   A/Excellent = a clean bill — NO real finding at MEDIUM or above (findings or secrets).
+    #   B/Good      = real but limited findings, nothing HIGH/CRITICAL.
+    # So one real MEDIUM forbids A, and one HIGH/CRITICAL forbids B, no matter how high the
+    # score. The ceiling never RAISES a grade, so a low score still grades low.
     grade_info = GRADE_THRESHOLDS[-1]
     for threshold, grade, label, desc in GRADE_THRESHOLDS:
         if score >= threshold:
@@ -147,6 +212,8 @@ def calculate_score(results: dict) -> dict:
             break
 
     _, grade, grade_label, grade_desc = grade_info
+    grade, grade_label, grade_desc, grade_reason = _apply_semantic_ceiling(
+        grade, grade_label, grade_desc, ss, secrets, score)
 
     # Risk level (matches findings)
     if ss.get("critical", 0) > 0:
@@ -173,6 +240,7 @@ def calculate_score(results: dict) -> dict:
         "total_bonus":    total_bonus,
         "factors":        factors,
         "chain_penalty":  chain_penalty,
+        "grade_reason":   grade_reason,
     }
 
 

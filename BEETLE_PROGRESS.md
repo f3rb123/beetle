@@ -894,6 +894,42 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Commit-ready: Y
     Tests: 877 passed, 11 skipped.
 
+[x] RUN 15.2 - semantic grade bands (SHARED: scoring)  DONE  -> iOS 92/B, Android 35/F
+    THE GRADE IS A MEANING LABEL ON THE HONEST SCORE. Architecture: final grade = WORSE of
+    (score-band grade, semantic ceiling). The ceiling can only LOWER a grade, never raise it.
+    Numeric thresholds UNCHANGED (A>=90 B>=75 C>=60 D>=40 F>=0) - the semantic definition adds a
+    ceiling GATE, it does not move the boundaries.
+    SEMANTIC CEILING (gate = LOW+, per human decision - a LOW is a real evidence-backed issue):
+      A / Excellent = clean bill: NO finding or secret ABOVE INFO (a single LOW bars it).
+      B / Good      = has LOW and/or MEDIUM findings, nothing HIGH/CRITICAL.
+      C / Fair      = has HIGH/CRITICAL (ceiling; the score may push lower - it never lifts up).
+    WHY LOW+ not MEDIUM+ (human, target-blind): under MEDIUM+, 60 real LOWs graded A/Excellent -
+      the exact accumulation-blindness RUN 15.1's harmonic curve killed on the SCORE side. It
+      must not survive on the GRADE side. LOW+ closes it (60 lows -> B).
+    THE SCORE IS NEVER TOUCHED - only the label mapping. iOS score stayed 92, Android 35.
+    iOS: score 92, grade A -> B/Good. Reason: "Score 92 would place this in the Excellent band,
+      but capped at B/Good: a clean bill (Excellent) requires no finding above INFO - this app
+      has 4 real MEDIUM finding(s) and 2 LOW." Grade reason cites the gating findings. This app
+      lands B BECAUSE it has 4 real MEDIUMs, not because a threshold was chosen to catch it -
+      identical under MEDIUM+ or LOW+ (the mediums already cap it).
+    Android: score 35, grade F -> F UNCHANGED. Ceiling for high/critical is C; min(F-band, C)=F -
+      the ceiling did not raise it. score dict identical apart from the new grade_reason field;
+      endpoints/ips/secrets/severity/finding-identities all identical.
+    MUST-HOLDS LOCKED (both directions, LOW+ reading):
+      1. zero findings above INFO -> A/Excellent
+      2. one real LOW (no mediums) -> cannot be A, grades B (score 99 -> B). CHANGED assertion.
+      3. this app (4 MEDIUM, 2 LOW, 92) -> B/Good, reason cites the mediums (+ notes the lows)
+      4. Android grade unchanged (F)
+      plus: ceiling only lowers (a high/critical D-band app is not lifted to its C ceiling);
+      an INFO client-key secret does NOT gate; a LOW/MEDIUM secret DOES.
+    Files: backend/analyzers/scoring.py (_apply_semantic_ceiling + grade_reason);
+      NEW backend/tests/test_grade_semantics.py (13 tests).
+    vs MobSF: Beetle scores 92 but grades B/Good - honest: a strong app that still ships 4 real
+      evidence-backed issues is not "Excellent". MobSF 50/B rests on mediums RUN 9 proved are
+      mostly framework-canary FPs.
+    Commit-ready: Y
+    Tests: 889 passed, 11 skipped.
+
 ═══════════════ TIER 4 — PENDING ANDROID + WEB/PDF ═══════════════
 
 [ ] RUN 16 — Android 5.1a verbose summary gate (SHARED: report_summaries.py)
