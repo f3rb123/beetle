@@ -1617,11 +1617,13 @@ def _score_section(story, results, T, styles):
     rows = [["Item", "Findings", "Points/item", "Total"]]
     for sev, info in deductions.items():
         color = SEVERITY_COLORS.get(sev, HexColor("#64748B"))
-        # When the per-severity cap bit, count x per_item != total. Label the row
-        # explicitly ("capped at 3x") so a reader never computes the uncapped product.
+        # Diminishing marginal weight (RUN 15.1): the i-th finding of a severity deducts
+        # weight/i, so count x per_item != total once there is more than one. Label the row
+        # explicitly ("diminishing returns") so a reader never computes the flat product.
         total_cell = f'<b>-{info["total"]}</b>'
         if info.get("capped"):
-            total_cell += f'<br/><font size="7" color="#64748B">capped at 3x (raw -{info.get("raw_total", "")})</font>'
+            total_cell += (f'<br/><font size="7" color="#64748B">diminishing returns '
+                           f'(raw -{info.get("raw_total", "")})</font>')
         rows.append([
             Paragraph(f'<font color="{color.hexval()}"><b>{sev.upper()}</b></font>', styles["table_cell"]),
             Paragraph(str(info["count"]),      styles["table_cell"]),

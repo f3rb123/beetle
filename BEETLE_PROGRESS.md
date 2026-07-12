@@ -863,6 +863,37 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Commit-ready: Y
     Tests: 866 passed, 11 skipped (incl. 5 new: file-type beats path, path fallback).
 
+[x] RUN 15.1 - graduated (diminishing-marginal) score contribution (SHARED: scoring)  DONE
+    THE DEFECT (found in RUN 15): the model capped each severity at 3x its weight - a CLIFF.
+      Full weight for the first three findings, then NOTHING. 4 MEDIUMs and 40 MEDIUMs scored
+      IDENTICALLY. The same flattening bit on LOW (36 lows -> 3 pts).
+    THE FIX: the i-th finding of a severity deducts weight/i (harmonic). CHOSEN BY SHAPE, not by
+      output. Applied UNIFORMLY to every tier AND to secrets (the defect was uniform).
+    WHY HARMONIC and not a gentler curve: property 1 (volume never overtakes severity) must hold
+      at ANY count. Harmonic's sum grows like ln(n): 1000 LOWs = 7.49 pts < one CRITICAL (15).
+      A weight/sqrt(i) curve FAILS this - 56 LOWs would already outweigh a CRITICAL. Harmonic is
+      the only candidate that holds property 1 AND fixes property 2.
+    PROPERTIES PROVEN + LOCKED (tests, both directions):
+      1. 40 INFO -> 100 vs 1 CRITICAL -> 85; 1000 LOW deduction 7.49 < 15. Volume never wins.
+      2. 4 MEDIUM -> 94, 40 MEDIUM -> 87 (old cap: BOTH 91). Accumulation now registers.
+      3. INFO weight 0 -> 500 INFO deduct 0. The Dart-AOT/string-index FP classes contribute
+         ZERO regardless of curve.
+    HONEST OUTPUT (target-blind, reported not massaged):
+      iOS: 89 -> 92. The harmonic curve DISCOUNTS FROM THE 2ND finding (3+1.5+1+0.75=6.25),
+        where the old cap gave the first THREE full weight (=9), so a FEW-findings app scores
+        HIGHER. New ledger: MEDIUM x4 -> 6.25, LOW x2 -> 1.5, total 7.75 -> 92. This crosses
+        B->A, which was flagged to the human BEFORE commit; grade-band redesign is RUN 15.2.
+      Android: 33 -> 35 (grade F UNCHANGED). Documented consequence of a UNIFORM formula on a
+        shared file: highs 24->24.16, mediums 9->7.78, lows 3->2.08; total 74->72.02. All
+        content (findings/severity/secrets/permissions) byte-identical - only score arithmetic.
+    FP GUARD holds: 0 deductions from Dart-AOT/string-index. MASVS-CODE still 16 (penalty-only;
+      RUN 14 rule holds, controls_present []).
+    Files: backend/analyzers/scoring.py (graduated_deduction + uniform application);
+      pdf_generator.py ("diminishing returns" label replaces "capped at 3x");
+      NEW backend/tests/test_score_graduated.py (11 tests); updated test_report_quality_v26.py.
+    Commit-ready: Y
+    Tests: 877 passed, 11 skipped.
+
 ═══════════════ TIER 4 — PENDING ANDROID + WEB/PDF ═══════════════
 
 [ ] RUN 16 — Android 5.1a verbose summary gate (SHARED: report_summaries.py)

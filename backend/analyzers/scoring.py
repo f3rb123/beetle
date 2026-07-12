@@ -33,6 +33,34 @@ GRADE_THRESHOLDS = [
 ]
 
 
+def graduated_deduction(weight: float, count: int) -> float:
+    """Diminishing MARGINAL weight: the i-th finding of a severity deducts ``weight / i``.
+
+    REPLACES a flat cap (min(weight*count, 3*weight)), which was a CLIFF: it gave full weight
+    to the first three findings and then charged nothing at all. Under it, 4 MEDIUMs and 40
+    MEDIUMs scored identically — accumulation simply did not register. The same flattening bit
+    on LOW: 36 lows deducted 3 points, which is why removing 34 false-positive lows in RUN 15
+    recovered only a single point.
+
+    THE CURVE IS CHOSEN BY ITS SHAPE, NEVER BY THE NUMBER IT PRODUCES:
+
+      * The 1st finding of a severity costs full weight — severity is never discounted away.
+      * Every additional finding STILL moves the score (weight/2, weight/3, …), so volume
+        registers, which is the defect being fixed.
+      * The sum grows like ln(n): unbounded, but slowly enough that VOLUME CAN NEVER OVERTAKE
+        SEVERITY at any count. 1000 LOWs deduct ~7.5 points and still cost less than a single
+        CRITICAL (15). This is the property the old cap existed to protect, and it survives.
+        (A gentler curve such as weight/sqrt(i) fails exactly here: 56 LOWs would outweigh a
+        CRITICAL.)
+
+    Harmonic decay is the canonical "the Nth matters less than the 1st, but still matters" law,
+    and it is the only one of the candidates that holds both properties at once.
+    """
+    if weight <= 0 or count <= 0:
+        return 0.0
+    return float(weight) * sum(1.0 / i for i in range(1, int(count) + 1))
+
+
 def calculate_score(results: dict) -> dict:
     """
     Calculate a weighted security score from findings and secrets.
@@ -54,15 +82,18 @@ def calculate_score(results: dict) -> dict:
     for sev, weight in SEVERITY_WEIGHTS.items():
         count = ss.get(sev, 0)
         if count and weight > 0:
-            # Diminishing returns for many findings of same severity: the per-severity
-            # deduction is capped at 3x the weight. Record whether the cap bit and the
-            # uncapped raw total so the renderer can label it ("capped at 3x") and the
-            # shown count x per_item never invites wrong arithmetic.
+            deducted = graduated_deduction(weight, count)
             raw = weight * count
-            deducted = min(raw, weight * 3)  # cap at 3x weight per severity
             deductions[sev] = {
-                "count": count, "per_item": weight, "total": deducted,
-                "raw_total": raw, "capped": deducted < raw, "cap": weight * 3,
+                "count": count, "per_item": weight,
+                "total": round(deducted, 2),
+                "raw_total": raw,
+                # Kept for renderers that label a discounted row. The discount is now a
+                # curve, not a cliff.
+                "capped": deducted < raw,
+                "cap": None,
+                "curve": "harmonic",
+                "marginal_weights": [round(weight / i, 2) for i in range(1, min(count, 6) + 1)],
             }
             total_deducted += deducted
 
@@ -77,8 +108,9 @@ def calculate_score(results: dict) -> dict:
 
     for sev, count in secret_sev_counts.items():
         weight = SEVERITY_WEIGHTS.get(sev, 3)
-        deducted = min(weight * count, weight * 3)
-        secret_deductions += deducted
+        # Same curve as findings — the flattening defect was uniform, so the fix is uniform.
+        secret_deductions += graduated_deduction(weight, count)
+    secret_deductions = round(secret_deductions, 2)
 
     total_deducted += secret_deductions
 
