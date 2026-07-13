@@ -42,6 +42,22 @@ After RUN 16 fixed L3 (permission order), Android is byte-stable EXCEPT:
     Cause: jadx decompiles the same APK to byte-different source across runs (proven: two
     ViewPager2.java decompiles had different md5 AND different line counts, 1121 vs 1122), so a
     match lands on line 428 vs 429. Out of Beetle's control.
+  *** UPDATED AT RUN 23 — the obfuscation-finding carrier of this drift is RETIRED. *** RUN 23
+    collapsed android_obfuscation_missing to a single app-owned representative, so ViewPager2.java
+    (and 124 other library locations) are no longer candidates on that finding — its +/-1 drift is
+    gone for good. BUT the tolerance STAYS: the SAME jadx mechanism rides on OTHER over-broad rules
+    that still carry rejected AndroidX candidates — CONFIRMED on android_log_debug
+    (AppCompatTextViewAutoSizeHelper.java 60<->61) and android_reflection. It is intermittent
+    (a given scan pair may show 0 drift leaves). L4 is REDUCED, not resolved; full closure needs the
+    RUN 19 breadth fixes (proposals 1 & 2: restrict reflection/log_debug to app-owned code).
+    READ THIS RIGHT (do NOT mark L4 done): obfuscation FINDING's drift = RETIRED; the jadx
+    byte-different-decompilation ROOT CAUSE = STILL OPEN — it affects ANY finding with rejected
+    AndroidX library candidates, and stays out of scope for the SAME reason as RUN 16 (not fixable
+    Beetle-side). RUN 23 removed one carrier, not the mechanism.
+  NEW at RUN 23 — L5 (separate, pre-existing): taint_flows list ORDER is nondeterministic
+    run-to-run (e.g. the WebView2Activity flow and the CustomReceiver flow swap positions). This is
+    an ordering issue, NOT jadx line-drift; sorting taint_flows order-insensitively makes the diff
+    empty. Unrelated to RUN 23. Logged for a later determinism pass; do NOT let it mask a real diff.
   MUST STAY BYTE-STABLE (tolerance does NOT extend here): primary evidence, finding identities,
     severity_summary, score, grade, and permissions. If any of THOSE move, it is a real bug.
   iOS has an analogous ENVIRONMENTAL variance: domain_intel geo (live DNS/geo of CDN IPs, e.g.
@@ -1166,6 +1182,53 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Files: backend/analyzers/code_rules.py.
     Commit-ready: Y
 
+[x] RUN 23 — tighten android_obfuscation_missing (whole-app posture collapse)  DONE
+    AUDIT VERIFIED (proposal 3): the rule is a WHOLE-APP posture proxy (is the app obfuscated?)
+    implemented as a per-file regex on R.id./R.layout./BuildConfig, which matched every UI class and
+    accrued 125 evidence locations. The audit's honest fix = compute ONCE, emit a single finding with
+    ONE representative location. It was ALSO the observed carrier of the L4 jadx line-drift.
+    HOW (3 files, minimal):
+      1. code_rules.py — added "posture": True to the rule + honest posture-wording description.
+         Pattern/severity/coverage UNCHANGED (still the same detection; only breadth changes).
+      2. code_analyzer.py — emit copies posture flag onto the finding ONLY when true (never stamps
+         ordinary findings, so no report-wide field churn).
+      3. evidence_selection/engine.py — new _collapse_posture_finding(), called from annotate AFTER
+         select() has scored the FULL candidate set and picked the app-owned primary. It preserves
+         that primary and collapses the WHERE-fields to it: file_evidence/files/file_count=1,
+         evidence_selection.supporting/rejected=[] candidate_count=1, and merged_locations +
+         fusion.merged_locations = [primary]. STRENGTH-fields (detection_count, evidence_count,
+         fusion score) are untouched — so the finding's strength and the app score cannot move.
+      Design note: collapse is POST-selection (not at emit) precisely so the app-owned primary
+      (AboutUsActivity.java:53) still wins over the alphabetical-first androidx candidate. Emit-time
+      collapse would have starved selection and changed the primary.
+    ITEMIZED EXPECTED DELTA (breadth fix — count changes are the POINT, unlike RUN 22's relabel):
+      obf finding: file_count 125->1, candidate_count 125->1, rejected 120->0, supporting 4->0,
+      merged_locations 125->1, +posture flag, +posture description; PRIMARY held. Report: one
+      consequent file_index drop + one summary counter. Everything else byte-identical.
+    PROVED (R22 baseline vs R23; taint sorted, timing/uuid masked) — 0 UNEXPLAINED leaves:
+      * obf finding: collapsed exactly as itemized; PRIMARY = AboutUsActivity.java:53 UNCHANGED;
+        ViewPager2 GONE from the finding entirely (was in merged_locations/fusion/evidence_view).
+      * source_explorer.file_index: -1 file = sources/androidx/.../ActionBarDrawerToggleHoneycomb.java
+        (deterministic, R23==R23b). TRACED: it was the obf finding's pre-collapse file_evidence[0]
+        (an AndroidX file the posture regex matched); no other finding references it, so it correctly
+        drops. stats.annotated_files 38->37, by_severity.info 26->25 — same one file.
+      * evidence_selection_summary.multi_candidate_findings 25->24 (obf no longer multi-candidate).
+      * NOTHING ELSE. All 45 other findings byte-identical.
+    INVARIANTS: findings COUNT 46->46 (posture collapses LOCATIONS, not the finding);
+      severity_summary {C1,H11,M7,L5,I22} unchanged; score 35/F unchanged; iOS 14 findings / 92 / B
+      unchanged, no iOS finding carries the posture flag (IOS_CODE_RULES has none). 897 tests pass.
+    L4 RE-SCOPED HONESTLY (do NOT overclaim):
+      * obfuscation finding: L4 carrier RETIRED — ViewPager2 drift candidate no longer exists.
+      * L4 broader: STILL OPEN. Same jadx byte-different-decompilation root cause rides on ANY
+        finding with rejected AndroidX library candidates — CONFIRMED on android_log_debug
+        (AppCompatTextViewAutoSizeHelper.java 60<->61) and android_reflection. Intermittent. Same
+        out-of-scope conclusion as RUN 16. Full closure = RUN 19 breadth proposals 1 & 2.
+      * L5 NEW (separate, pre-existing): taint_flows run-to-run ORDER swap — logged for a later
+        determinism pass, NOT touched here.
+    Files: backend/analyzers/code_rules.py, backend/analyzers/code_analyzer.py,
+      backend/analyzers/evidence_selection/engine.py.
+    Commit-ready: Y  (committed; NOT pushed — awaiting human confirm of attribution + L4 re-scope)
+
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
 - 2026-07-12  Plan created. Nothing run yet. Next: RUN 1.
@@ -1186,3 +1249,11 @@ NO code change and show the order moves on its own). Only then is it safe to pas
   RUN 1's actual win is endpoints 0 -> 78. Acceptance PASS (4/4). Android byte-identical
   (endpoints 1->1, ips 0->0, findings 45->45, severity identical). Tests 780 passed /
   11 skipped. NOT COMMITTED — nothing staged. Next: RUN 2.
+- 2026-07-13  RUN 22 COMMITTED (4b71473): relabeled the 2 regex_sast mislabels.
+- 2026-07-13  RUN 23 DONE + committed: android_obfuscation_missing collapsed to a single app-owned
+  posture location (125->1). Attribution PROVEN — 0 unexplained leaves; delta = obf collapse + one
+  file_index drop + one summary counter; taint(sorted)/timing masked. iOS 14/92/B held, score 35/F,
+  897 tests pass. L4 re-scoped: obf carrier RETIRED, broader L4 STILL OPEN (log_debug/reflection
+  AndroidX drift, out of scope, RUN 19 breadth fixes needed). New latent L5: taint_flows order swap.
+  NOT PUSHED — awaiting human confirm of the attribution proof + L4 re-scope wording. Next: push on
+  confirm, then triage remaining RUN 19 breadth proposals (1,2) / L1 / OSV.

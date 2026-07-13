@@ -733,6 +733,13 @@ CODE_RULES = [
         "recommendation": "Use domain names instead of hardcoded IPs. Remove all development server references from production builds.",
     },
     {
+        # RUN 23: this is a WHOLE-APP posture check (is the app obfuscated?), not a per-location
+        # vuln. The pattern matches readable R.id./R.layout./BuildConfig references, which occur in
+        # essentially every UI class — so it accrued 125 evidence locations, and its rejected
+        # library candidates (e.g. ViewPager2.java) carried the L4 jadx line-drift residual. The
+        # "posture" flag tells evidence_selection to collapse it to ONE representative location
+        # (the selected app-owned primary), so the signal stays but the 124 duplicate locations and
+        # their drift are gone. The regex/coverage is unchanged — only the evidence breadth is.
         "id":          "android_obfuscation_missing",
         "title":       "Code Obfuscation Not Detected",
         "pattern":     r"BuildConfig|R\.layout\.|R\.id\.|R\.string\.",
@@ -741,7 +748,8 @@ CODE_RULES = [
         "cwe":         "CWE-656",
         "masvs":       "MASVS-RESILIENCE-3",
         "owasp":       "M7",
-        "description": "Readable class/resource names suggest code obfuscation may not be applied. Without ProGuard/R8, the full app logic is readable after decompilation.",
+        "posture":     True,
+        "description": "Whole-app resilience posture check: readable class/resource references were found, indicating ProGuard/R8 obfuscation is likely not applied. This is a single app-wide signal — one representative location is shown, not a per-file finding.",
         "recommendation": "Enable ProGuard/R8 minification in release builds. Apply obfuscation rules for sensitive code paths.",
     },
 ]

@@ -419,6 +419,11 @@ def _run_rules_per_file(file_map: dict, rules: list, results: dict):
         }
         if rule.get("poc"):
             finding["poc"] = rule["poc"]
+        # RUN 23: mark whole-app posture rules so evidence_selection collapses their many
+        # duplicate locations to one representative. Set only when true — never stamp the key
+        # on ordinary findings (that would be a no-op field change across the whole report).
+        if rule.get("posture"):
+            finding["posture"] = True
 
         results["findings"].append(finding)
 
