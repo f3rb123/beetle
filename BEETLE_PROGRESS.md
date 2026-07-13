@@ -66,6 +66,10 @@ After RUN 16 fixed L3 (permission order), Android is byte-stable EXCEPT:
     byte-different-decompilation ROOT CAUSE = STILL OPEN — it affects ANY finding with rejected
     AndroidX library candidates, and stays out of scope for the SAME reason as RUN 16 (not fixable
     Beetle-side). RUN 23 removed one carrier, not the mechanism.
+    UPDATED RUN 25: android_reflection (103 androidx) + android_log_debug (112 androidx) carriers
+    also RETIRED (restricted to app-owned code). Still 17 findings carry androidx candidates
+    (insecure_deserialization 26, print_stack_trace 14, implicit_intent_sensitive 14, ...). L4 is
+    REDUCED to 17 residual carriers, STILL NOT closed. Root cause unchanged.
   NEW at RUN 23 — L5 (separate, pre-existing): taint_flows list ORDER is nondeterministic
     run-to-run (e.g. the WebView2Activity flow and the CustomReceiver flow swap positions). This is
     an ordering issue, NOT jadx line-drift; sorting taint_flows order-insensitively makes the diff
@@ -1292,7 +1296,58 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     ALL live user-facing bugs now CLOSED: view-code #1/#2 (RUN 20+24), short-PDF #4 (RUN 21),
       CISO #3 (was already correct). Remaining work is optional polish only: RUN 19 breadth 1&2
       (also broadly retires L4), L1 Android, L2 (blocked on a Swift/ObjC source app), OSV coverage, L5.
-    Commit-ready: Y  (committed 47a928d -> amended; pushed to origin/v1.3-dev)
+    Commit-ready: Y  (committed 12facac; pushed to origin/v1.3-dev)
+
+[x] RUN 25 — restrict android_reflection + android_log_debug to app-owned code (audit 1&2)  DONE
+    VERIFIED FIRST: audit proposals 1&2 = restrict these two over-broad rules to APP-OWNED code
+    (reflection 228 locations / 227 library; log_debug 181 / 180 library). Confirmed app-owned uses
+    the EXISTING signal classify_file(path,ctx).is_application (RUN 8/9/15), not a new heuristic; the
+    manifest package is set at _parse_manifest (line 421) BEFORE SAST (524), so context_from_results
+    is valid at emit time. Guard list respected (cipher/exec/credential rules untouched).
+    IMPLEMENTATION (code_rules.py + code_analyzer.py):
+      Added "app_owned_only": True to both rules; in _run_rules_per_file the emit filters each such
+      rule's file matches to is_application files (cached), and does NOT fire the finding if none
+      remain. Gating at EMIT means fusion / merged_locations / ownership / evidence_selection all see
+      only app-owned files — no downstream surgery, and no library candidate can carry L4 drift.
+    BOTH FINDINGS SURVIVE (they had an app-owned match): reflection -> LoginActivity.java:107,
+      log_debug -> LoginActivity.java:84; file_count 228->1 and 181->1; primary UNCHANGED.
+    *** THE INVERTED GUARD CAUGHT A CASCADE — stopped, investigated, human-ratified. ***
+      Un-demotion: both were INFO only because RUN 15 demoted them as LIBRARY-owned. Now app-owned,
+      they are no longer demoted -> keep rule severity LOW (correct: real Log/reflection in app code).
+      Revealed chain: reflection being a real app finding made it chain-eligible, and the correlation
+      engine emitted a NEW "Dynamic Code Loading / Reflection RCE" finding.
+      INVESTIGATION (human asked: earned HIGH or co-occurrence?): the chain is HEURISTIC, not proven.
+      engine.reachability_proof: CODE_LOADING has no taint sink category, so a code-loading chain can
+      NEVER be taint-proven -> always PROOF_HEURISTIC. Its own check "Reachability proven by data-flow
+      (taint)" = false. It was wired from capability co-occurrence (exported InsecureShopProvider + an
+      app-owned reflection finding), NO dataflow linking provider input to the reflection sink.
+    CHAIN-ENGINE FIX (attack_chains/engine.py + model.py + bridge.py) — general, keyed on proof type:
+      Found + fixed an INVERSION: heuristic chains were being FORCED UP to HIGH (`if sev_rank<high:
+      severity=high`). Now a heuristic (co-occurrence) chain CAPS at MEDIUM — real, worth review, not
+      proven exploitable (same bar as RUN 9 canary / RUN 12.1 discrepancy MEDIUMs). proven chains stay
+      HIGH; manifest-only (structural) chains are untouched. Added chain.severity_reason ("capabilities
+      co-occur but reachability not proven — heuristic linkage") surfaced on the finding. sev_rank is
+      INVERTED (critical=0..info=4) — cap condition is sev_rank(sev) < sev_rank("medium").
+      TEST LOCKS BOTH DIRECTIONS: test_heuristic_injection_chain_caps_at_medium (heuristic SQLi ->
+      MEDIUM + severity_reason) alongside the existing proven-SQLi -> HIGH test. 898 tests pass.
+    FULL ATTRIBUTION (R24 baseline vs R25) — the ENTIRE delta is 3 things, nothing else:
+      android_reflection info->low; android_log_debug info->low; NEW chain_CHAIN-7a268fef60 MEDIUM
+      (heuristic). 0 other finding severities changed; the 6 pre-existing chains byte-identical.
+      count 46->47; severity_summary {C1,H11,M8,L7,I20}; score 35->34/F (grade HELD). Every deduction
+      traces to a REAL finding: 2 genuine app-owned LOWs (were mislabeled library INFO) + 1 genuine
+      MEDIUM co-occurrence chain. NO unproven HIGH. The chain's HIGH->MEDIUM cap is why score is 34
+      not something worse — the unearned HIGH does not stand.
+    L4 (honest): reflection (103 androidx) + log_debug (112 androidx) drift carriers RETIRED. But L4 is
+      NOT closed — 17 findings STILL carry androidx library candidates (android_insecure_deserialization
+      26, print_stack_trace 14, implicit_intent_sensitive 14, content_provider_query 10, behavior_*).
+      Same jadx root cause; only the two biggest carriers removed. Full closure needs restricting those
+      too, or a systemic androidx-candidate strip — out of RUN 25 scope.
+    iOS UNTOUCHED (chain-engine change is SHARED but proven not to shift iOS): 14 findings, 92/B,
+      severity_summary identical.
+    Files: backend/analyzers/code_rules.py, backend/analyzers/code_analyzer.py,
+      backend/analyzers/attack_chains/engine.py, backend/analyzers/attack_chains/model.py,
+      backend/analyzers/attack_chains/bridge.py, backend/tests/test_chain_reachability.py.
+    Commit-ready: Y  (do NOT push until human confirms the cascade handling + final score)
 
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
@@ -1329,3 +1384,13 @@ NO code change and show the order moves on its own). Only then is it safe to pas
   findings both correct; 40 Mach-O still card; PDF shows decoded value, no bplist leak. iOS 14/92/B,
   Android finding-level byte-stable. 897 tests pass. NOT PUSHED — awaiting human confirm of the
   plist-finding table + broad proof. Next: push on confirm, then RUN 19 breadth (1,2) / L1 / OSV.
+- 2026-07-13  RUN 24 confirmed + pushed (12facac). RUN 25 DONE + committed: restricted
+  android_reflection + android_log_debug to app-owned code (audit 1&2). The inverted guard caught a
+  cascade — un-demotion info->low (correct) surfaced a NEW "Reflection RCE" chain. Investigation:
+  chain is HEURISTIC co-occurrence (CODE_LOADING can never be taint-proven), not earned as HIGH.
+  Human ratified: cap heuristic chains at MEDIUM (general rule, keyed on proof type) — fixed an
+  engine inversion that FORCED heuristic->HIGH; proven stay HIGH, manifest-only untouched; added
+  severity_reason + a both-directions test. Delta fully attributed: reflection/log_debug info->low +
+  1 MEDIUM chain, nothing else; score 35->34/F (grade held), every deduction a real finding. L4
+  reduced (2 carriers retired, 17 residual, still open). iOS 14/92/B. 898 tests pass. NOT PUSHED —
+  awaiting human confirm of the cascade handling + final score. Next: push on confirm; L1 / OSV / L5.

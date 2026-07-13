@@ -381,6 +381,12 @@ CODE_RULES = [
 
     # ── Logging ───────────────────────────────────────────────────────────────
     {
+        # RUN 25 (audit proposal 2): restrict to APP-OWNED code. `Log.(d|v|i|...)` matches every
+        # log call in the app AND every bundled library (181 locations here, 180 of them library).
+        # A log call inside AndroidX/GMS is not the app's logging hygiene problem, so gate this rule
+        # on the existing APPLICATION ownership signal (classify_file.is_application) — the same
+        # signal RUN 8/9/15 use. This also removes this rule's rejected AndroidX candidates, which
+        # were an L4 jadx line-drift carrier (AppCompatTextViewAutoSizeHelper.java 60<->61).
         "id":          "android_log_debug",
         "title":       "Sensitive Data May Be Logged (Log.d/v/i)",
         "pattern":     r"\bLog\.(d|v|i|e|w|wtf)\(",
@@ -389,7 +395,8 @@ CODE_RULES = [
         "cwe":         "CWE-532",
         "masvs":       "MASVS-STORAGE-2",
         "owasp":       "M9",
-        "description": "App uses Android logging APIs. Log output is accessible to any app with READ_LOGS permission (pre-4.1) or via ADB. Sensitive data (tokens, credentials, PII) in logs is a common finding.",
+        "app_owned_only": True,
+        "description": "Application code uses Android logging APIs. Log output is accessible to any app with READ_LOGS permission (pre-4.1) or via ADB. Sensitive data (tokens, credentials, PII) in logs is a common finding. Scoped to application code — logging inside bundled libraries is not reported.",
         "recommendation": "Remove all Log statements from production builds or wrap in BuildConfig.DEBUG checks. Never log sensitive data.",
     },
     {
@@ -496,6 +503,11 @@ CODE_RULES = [
         "recommendation": "Avoid dynamic code loading. If required, validate the integrity of loaded code with cryptographic signatures before execution.",
     },
     {
+        # RUN 25 (audit proposal 1): restrict to APP-OWNED code. `.invoke(`/`.getMethod(` etc.
+        # appear in nearly all framework+library code (228 locations here, 227 of them library);
+        # reflection inside AndroidX/GMS/Retrofit/RxJava is ubiquitous and not the app's finding.
+        # Gate on the existing APPLICATION ownership signal (classify_file.is_application). This also
+        # drops this rule's 103 rejected AndroidX candidates (an L4 jadx line-drift carrier).
         "id":          "android_reflection",
         "title":       "Java Reflection Usage",
         "pattern":     r"java\.lang\.reflect\.|\.getMethod\(|\.invoke\(|\.getDeclaredMethod\(|\.getDeclaredField\(",
@@ -504,7 +516,8 @@ CODE_RULES = [
         "cwe":         "CWE-470",
         "masvs":       "MASVS-RESILIENCE-3",
         "owasp":       "M7",
-        "description": "Java reflection is used. Reflection can be used to bypass access controls, invoke hidden APIs, and is often used in exploits and obfuscation.",
+        "app_owned_only": True,
+        "description": "Application code uses Java reflection. Reflection can be used to bypass access controls, invoke hidden APIs, and is often used in exploits and obfuscation. Scoped to application code — reflection inside bundled libraries is not reported.",
         "recommendation": "Minimize reflection usage. Document legitimate uses. Avoid using reflection to invoke untrusted code.",
     },
     {

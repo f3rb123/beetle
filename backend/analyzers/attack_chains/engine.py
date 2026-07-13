@@ -935,13 +935,22 @@ class AttackChainEngine:
                     severity = "medium"
 
         # Reachability gate (Flaw B): an injection/RCE chain with no taint flow from
-        # external input to the matching sink is heuristic — it may exist, but it is
-        # capped below CRITICAL and below 60 confidence so it can never present as a
-        # proven critical finding on co-occurrence alone.
+        # external input to the matching sink is heuristic — the capabilities co-occur but the
+        # dataflow that would prove exploitability is NOT demonstrated.
+        # RUN 25: cap such a chain at MEDIUM. It is real and worth analyst review, but an unproven
+        # dataflow must never present as a HIGH exploit ("real, worth investigating, not proven
+        # exploitable" — same bar as canary/discrepancy MEDIUMs). This corrects a prior inversion
+        # that FORCED heuristic chains UP to HIGH. Only heuristic is touched: manifest-only
+        # (structural) and proven (taint-linked) chains keep their computed severity.
         proof = ctx.reachability_proof(tmpl, entry)
+        severity_reason = ""
         if proof == PROOF_HEURISTIC:
-            if C.sev_rank(severity) < C.sev_rank("high"):
-                severity = "high"
+            # sev_rank is inverted (critical=0 … info=4): a rank BELOW medium's means MORE severe.
+            if C.sev_rank(severity) < C.sev_rank("medium"):
+                severity = "medium"
+                severity_reason = ("Capabilities co-occur but reachability is not proven — heuristic "
+                                   "linkage (no taint dataflow from external input to the sink). Capped "
+                                   "at MEDIUM: real and worth investigating, not proven exploitable.")
             confidence = min(confidence, C.HEURISTIC_CONFIDENCE_CAP)
             conf_expl = {**conf_expl, "reachability_cap": C.HEURISTIC_CONFIDENCE_CAP,
                          "reachability_proof": proof}
@@ -971,7 +980,7 @@ class AttackChainEngine:
             reachability_proof=proof,
             overall_confidence=confidence, overall_evidence_quality=evidence_q,
             overall_exploitability=exploitability, overall_impact=tmpl.impact,
-            severity=severity,
+            severity=severity, severity_reason=severity_reason,
             affected_components=components, affected_files=files,
             affected_classes=classes, affected_methods=methods,
             evidence_references=refs,

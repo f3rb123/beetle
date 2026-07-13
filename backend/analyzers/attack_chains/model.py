@@ -103,7 +103,7 @@ class AttackChain:
     #   proven        — a taint flow links external input to the matching sink in an
     #                    application-owned class reachable from the entry component.
     #   heuristic      — an injection/RCE template matched on capability co-occurrence
-    #                    only; no dataflow proof. Severity capped below CRITICAL,
+    #                    only; no dataflow proof. Severity capped at MEDIUM (RUN 25),
     #                    confidence below 60.
     #   manifest-only  — a non-injection template resting on manifest/config/
     #                    distribution/device evidence, which makes no dataflow claim.
@@ -114,6 +114,9 @@ class AttackChain:
     overall_exploitability: int = 0
     overall_impact: str = ""
     severity: str = "medium"
+    # Set when a rule deliberately caps this chain's severity (e.g. a heuristic co-occurrence
+    # chain capped to MEDIUM), so the UI/report can explain WHY it is not higher. "" otherwise.
+    severity_reason: str = ""
 
     affected_components: list = field(default_factory=list)
     affected_files: list = field(default_factory=list)

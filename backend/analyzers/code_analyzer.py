@@ -379,9 +379,36 @@ def _run_rules_per_file(file_map: dict, rules: list, results: dict):
             emitted.add(rid)
             ordered.append((rid, rule_matches[rid]))
 
+    # RUN 25: some rules (android_reflection, android_log_debug) are only meaningful in the app's
+    # own code — a Log/reflection call inside a bundled library is not the app's finding. Gate them
+    # on the EXISTING per-file APPLICATION ownership signal (classify_file.is_application — the same
+    # signal RUN 8/9/15 use), not a new heuristic. Build the context once, lazily, only if needed.
+    _app_owned_cache: dict[str, bool] = {}
+    _own_ctx = None
+    if any(data["rule"].get("app_owned_only") for _rid, data in ordered):
+        from .evidence_selection.library import classify_file as _classify_file
+        from .ownership.engine import context_from_results as _ctx_from_results
+        _own_ctx = _ctx_from_results(results)
+
+        def _is_app_owned(path: str) -> bool:
+            v = _app_owned_cache.get(path)
+            if v is None:
+                v = bool(_classify_file(path, _own_ctx).is_application)
+                _app_owned_cache[path] = v
+            return v
+
     for rule_id, data in ordered:
         rule    = data["rule"]
         fentries = sorted(data["files"], key=lambda x: x["path"])
+
+        # RUN 25: app-owned-only rules keep only application-owned evidence; if none remains the
+        # finding does not fire (a purely-library match is not the app's issue). Everything
+        # downstream (fusion merged_locations, ownership, evidence_selection) then sees only
+        # app-owned files, so no library candidate can carry the L4 jadx line-drift.
+        if rule.get("app_owned_only"):
+            fentries = [e for e in fentries if _is_app_owned(e["path"])]
+            if not fentries:
+                continue
 
         # Primary evidence = first file, first line
         primary   = fentries[0]
