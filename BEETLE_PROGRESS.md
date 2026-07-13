@@ -1465,6 +1465,46 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       frontend/src/components/workspace2/{SourceExplorer.jsx, source-explorer-model.js, ui.jsx, panels.jsx}.
     Commit-ready: Y  (committed 597a59a; pushed to origin/v1.3-dev)
 
+[x] RUN 29 — three live-UI bugs, VERIFIED BY ACTUALLY RENDERING (Playwright headless Chromium)  DONE
+    *** Closed the L6 gap for this run: installed Playwright + drove the REAL rebuilt UI (login ->
+        /scans/:id/:section -> click), asserting the rendered DOM (scroll position, strings, drawer
+        text) — not HTTP/simulation. RUN 24/28 passed sims while the UI failed; this did not. ***
+    BUG 1 — view-code autoscroll broken for large content (REGRESSION surfaced by RUN 28's binary
+      strings). CodeBlockViewer's 120ms + behavior:'smooth' fired before an 11k-row Mach-O strings
+      table laid out and a smooth scroll to a far row under-shot. FIX: rAF-gated INSTANT scroll with
+      a re-assert after late paint. ALSO fixed a RUN 28 mismatch: JSON was beautified in the VIEWER
+      but the focus line was resolved against the RAW bytes -> moved beautify into openCode so the
+      resolved line and the rendered rows agree; rawContent kept for Copy. VERIFIED in real UI:
+      MD5 binary (11825 rows) focus 8731 inView+centered; Realm 1160, SHA-1 2758 centered; iOS plist
+      32 in view; Android source (jadx .java) 56 centered.
+    BUG 2 — binaries showed a dead "no source" card. The extracted STRINGS are the readable content
+      of a Mach-O (no jadx equivalent exists for iOS). FIX (main.py /file): a binary with a useful
+      amount of strings returns the strings listing (searchable text, X-Beetle-View header) for BOTH
+      a file-tree browse AND a finding (which also scrolls to its symbol); only a truly-opaque blob
+      (<20 strings) still cards. Supersedes RUN 28's "browse -> card". VERIFIED in real UI: browsing
+      Runner -> 11825 rows of strings, header "Compiled binary — extracted strings (searchable)",
+      search "_CC_MD5" -> 1/2 matches.
+    BUG 3 — findings showed WRONG "Why Dangerous" (categorizer false-match). analyst_intel.categorize
+      greedy-substring-matched a title+description+EVIDENCE blob, so a stack-canary/malloc finding on
+      a Firebase framework rendered "Permissive Firebase rules expose the database", Realm-on-a-
+      webview-framework rendered WebView, and a deep-link finding titled "-> WebViewActivity" rendered
+      WebView. FIX: categorize on the finding's OWN identity — rule_id + category FIELD + cwe are
+      authoritative; the free-text TITLE is a last resort only; unconfident -> GENERIC (neutral).
+      Storage-at-rest checked before crypto (Realm/NSUserDefaults -> FILE_STORAGE, not crypto);
+      generalized the FILE_STORAGE narrative to cover unencrypted local DB/prefs; removed loose tokens
+      ("_des" matched "_deserialization", "ats" matched other words). Drives why_dangerous +
+      attack_scenario + remediation + code_example together (all keyed on the category). Locked with
+      test_analyst_categorize.py (8 cases, both directions). VERIFIED in real drawers: Realm/
+      NSUserDefaults -> storage, canary/malloc/deserialization -> neutral, MD5/SHA1 -> crypto,
+      cloud_firebase -> firebase, deeplink(->WebViewActivity) -> deep-links, jailbreak -> root.
+    BOTH-PLATFORM SWEEP: full table built for all 14 iOS + 47 Android findings (rule_id -> category /
+      view-type / scroll). 0 cross-category text leaks on either platform after the fixes.
+    DISCIPLINE: iOS 14/92/B, Android 47/34/F unchanged (BUG 3 text-only; BUG 1/2 presentation).
+      912 tests pass (8 new). Android Source Explorer / scroll / JSON unaffected (verified).
+    Files: backend/main.py, backend/analyzers/analyst_intel.py, backend/tests/test_analyst_categorize.py,
+      frontend/src/pages/Results.jsx, frontend/src/components/CodeBlockViewer.jsx.
+    Commit-ready: Y  (do NOT push until human confirms the both-platform table + real-UI verification)
+
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
 - 2026-07-12  Plan created. Nothing run yet. Next: RUN 1.

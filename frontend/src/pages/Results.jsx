@@ -144,6 +144,7 @@ function WorkspaceCodeModal({ state, onClose, onNavigate }) {
           title={state.path}
           meta={state.meta}
           content={state.content}
+          rawContent={state.rawContent}
           binaryInfo={state.binaryInfo}
           language={state.language}
           highlightedLines={state.lines}
@@ -1057,7 +1058,15 @@ export default function Results() {
           return
         }
       }
-      const content = await response.text()
+      const rawContent = await response.text()
+      // RUN 29 / BUG 1: pretty-print JSON HERE (not in the viewer) so the line the resolver picks
+      // and the lines the viewer renders are the SAME — otherwise a JSON finding's declared line
+      // (numbered against the minified bytes) no longer matched the beautified rows and the scroll
+      // went nowhere. rawContent is kept for the Copy button (original bytes).
+      let content = rawContent
+      if (inferLanguage(path) === 'json' && rawContent.trim()) {
+        try { content = JSON.stringify(JSON.parse(rawContent), null, 2) } catch { content = rawContent }
+      }
 
       // Deterministic resolution chain (declared → snippet → class → method →
       // title → line 1). Never fabricates an exact line; non-declared is ≈approx.
@@ -1072,17 +1081,21 @@ export default function Results() {
       })
 
       const span = r.lines.length > 1 ? `${r.lines[0]}–${r.lines[r.lines.length - 1]}` : `${r.lines[0]}`
-      // RUN 28 / BUG 1: strings-listing view for a binary finding — label it with the matched
-      // symbol + string index so it reads as evidence, not a random source file.
+      // RUN 29 / BUG 1+2: label the strings view. A binary FINDING scrolls to its symbol; a bare
+      // binary BROWSE (X-Beetle-View header) shows the compiled binary's extracted strings.
+      const isBinaryStrings = response.headers.get('X-Beetle-View') === 'binary-strings'
       const meta = opts.stringsIndex
         ? `Extracted strings${opts.symbol ? ` · ${opts.symbol}` : ''} · string #${opts.stringsIndex}`
-        : `${r.approximate ? '≈ lines' : 'Lines'} ${span}${opts.source ? ` · ${opts.source}` : ''}${r.approximate ? ` · ${r.strategy}` : ''}`
+        : isBinaryStrings
+          ? 'Compiled binary — extracted strings (searchable)'
+          : `${r.approximate ? '≈ lines' : 'Lines'} ${span}${opts.source ? ` · ${opts.source}` : ''}${r.approximate ? ` · ${r.strategy}` : ''}`
       setCodeState({
         ...base,
         lines: r.lines,
         focus: r.focus,
         approximate: r.approximate,
         content,
+        rawContent,
         loading: false,
         error: '',
         meta,

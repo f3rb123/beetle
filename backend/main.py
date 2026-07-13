@@ -1518,15 +1518,16 @@ async def get_file(
         raise HTTPException(404, detail="File not found")
 
     if payload.get("kind") == "binary":
-        # RUN 28 / BUG 1: a FINDING's view-code on a binary passes its string index — return the
-        # extracted-strings listing (text) so the viewer shows the matched symbol + the surrounding
-        # strings and scrolls to that index. A bare file-tree browse (no index) still gets the
-        # generic binary card, so the two paths are NOT collapsed.
-        if strings_index is not None:
-            from decompiler import binary_strings_listing
-            listing = binary_strings_listing(scan_id, normalized)
-            if listing:
-                return PlainTextResponse(content=listing)
+        # RUN 29 / BUG 2: the extracted strings ARE the readable content of a compiled binary (there
+        # is no source — no jadx equivalent exists for a Mach-O). Return them as searchable text for
+        # ANY binary with a useful amount of strings, whether reached by BROWSING the file tree or by
+        # a FINDING (which also passes strings_index so the viewer scrolls to its symbol). Only a
+        # truly-opaque blob (too few printable strings) falls back to the descriptive card. This
+        # supersedes RUN 28's "browse -> generic card": a dead "no source" card hides real content.
+        from decompiler import binary_strings_listing
+        listing = binary_strings_listing(scan_id, normalized)
+        if listing and listing.count("\n") >= 20:
+            return PlainTextResponse(content=listing, headers={"X-Beetle-View": "binary-strings"})
         return JSONResponse(content={"binary": True, "info": payload["info"]})
 
     return PlainTextResponse(content=payload.get("content", ""))
