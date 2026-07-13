@@ -172,16 +172,38 @@ def _is_ios_binary_path(path: str) -> bool:
 
 BPLIST_EVIDENCE_LANG = "Binary Property List"
 
+# Android compiled binaries + their printable-strings dumps. A rule/secret match on one
+# carries an INDEX into the extracted-strings listing (string_analyzer/scan_storage dump raw
+# .dex/.so strings when no decompiled source exists), NOT a source line — the exact Android twin
+# of an iOS Mach-O match. RUN 26 (L1): carding these was previously iOS-only, so an Android
+# binary-primary finding rendered its string index as a misleading file:line.
+_ANDROID_BINARY_SUFFIXES = (
+    ".dex", ".so", ".arsc", ".odex", ".vdex", ".oat",
+    ".dex.txt", ".so.txt", ".arsc.txt",
+)
 
-def _is_binary_evidence(path: str, binary_files: set | None) -> bool:
-    """True when the primary's file is binary-format. Prefers the scan's content-detected
-    set (Mach-O magic / bplist00, recorded by ios_analyzer._record_binary_format_files);
-    falls back to iOS Mach-O path shapes when that set is unavailable."""
+
+def _is_android_binary_path(path: str) -> bool:
+    """True for an Android compiled binary (or its strings dump) whose match 'line' is a
+    string index, not a source line."""
+    return (path or "").replace("\\", "/").lower().endswith(_ANDROID_BINARY_SUFFIXES)
+
+
+def _is_binary_evidence(path: str, binary_files: set | None, platform: str | None = None) -> bool:
+    """True when the primary's file is binary-format — its match 'line' indexes an extracted-
+    strings listing, not source. Prefers the scan's content-detected set (Mach-O magic / bplist00,
+    recorded by ios_analyzer._record_binary_format_files); otherwise uses platform path shapes:
+    iOS Mach-O/framework shapes, or Android .dex/.so/.arsc binaries (RUN 26)."""
     if not path:
         return False
     if binary_files and path.replace("\\", "/").lower() in binary_files:
         return True
-    return _is_ios_binary_path(path)
+    if platform == "android":
+        return _is_android_binary_path(path)
+    if platform == "ios":
+        return _is_ios_binary_path(path)
+    # Unknown platform: be conservative and recognise either shape family.
+    return _is_ios_binary_path(path) or _is_android_binary_path(path)
 
 
 def _as_binary_evidence(view: dict, is_plist: bool = False) -> dict:
@@ -289,7 +311,7 @@ def build_evidence_view(finding: dict, platform: str | None = None,
     if not isinstance(sel, dict) or not sel.get("primary"):
         view = _fallback_view(finding)
         fp = (view.get("primary") or {}).get("file")
-        if platform == "ios" and _is_binary_evidence(fp, binary_files):
+        if _is_binary_evidence(fp, binary_files, platform):
             return _as_binary_evidence(view, is_plist=str(fp).lower().endswith(".plist"))
         return view
 
@@ -337,9 +359,10 @@ def build_evidence_view(finding: dict, platform: str | None = None,
         "framework_only": bool(sel.get("framework_only")),
         "fallback": False,
     }
-    # A binary primary (Mach-O or bplist) carries a strings index / parse artifact, not a
-    # source line — render it as binary evidence so no consumer prints file:line. iOS only.
+    # A binary primary (iOS Mach-O / bplist, or an Android .dex/.so/.arsc) carries a strings
+    # index / parse artifact, not a source line — render it as binary evidence so no consumer
+    # prints file:line. RUN 26: Android is now covered too (was iOS-only, the L1 gap).
     fp = primary.get("file")
-    if platform == "ios" and _is_binary_evidence(fp, binary_files):
+    if _is_binary_evidence(fp, binary_files, platform):
         return _as_binary_evidence(view, is_plist=str(fp).lower().endswith(".plist"))
     return view

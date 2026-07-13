@@ -1347,7 +1347,39 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Files: backend/analyzers/code_rules.py, backend/analyzers/code_analyzer.py,
       backend/analyzers/attack_chains/engine.py, backend/analyzers/attack_chains/model.py,
       backend/analyzers/attack_chains/bridge.py, backend/tests/test_chain_reachability.py.
-    Commit-ready: Y  (do NOT push until human confirms the cascade handling + final score)
+    Commit-ready: Y  (committed 8c48657; pushed to origin/v1.3-dev)
+
+[x] RUN 26 — L1: Android .dex/.arsc string-index-as-source-line (twin of RUN 4/20)  DONE
+    VERIFIED FIRST (heeded the CONSUMER-FIELD rule — did NOT assume the file-server): traced the
+    whole path against live source. string_analyzer._collect_files dumps .dex/.so printable strings
+    ONLY when no decompiled source exists (has_source=False); a match's "line" is then the index in
+    that strings dump, not a source line. The file-server ALREADY cards binaries on click, and
+    finding_model marks .dex/.so/.arsc paths unresolved — so the real gap was elsewhere:
+    *** ROOT CAUSE: evidence_selection/view.py build_evidence_view carded binary-primary findings
+        ONLY when platform=="ios" (lines 292 & 343, via _is_ios_binary_path). An Android finding
+        whose primary is a .dex/.so/.arsc rendered its string-index as a misleading file:line in the
+        EVIDENCE VIEW — the field the PDF (RUN 21), UI panels and SARIF all read. The iOS RUN 4/20
+        carding was never extended to Android. This is exactly the consumer-field lesson: fix the
+        field the renderer reads (evidence_view), not the file-server (which was already correct).
+    FIX (view.py only): added _ANDROID_BINARY_SUFFIXES (.dex/.so/.arsc/.odex/.vdex/.oat + .dex.txt/
+      .so.txt/.arsc.txt) + _is_android_binary_path; made _is_binary_evidence platform-aware; removed
+      the iOS-only gate at both call sites so an Android binary primary is carded (artifact=True,
+      line=0, string_index preserved) — the same treatment iOS Mach-O/bplist gets. iOS path
+      unchanged (platform=="ios" -> _is_ios_binary_path, identical).
+    TEST: test_android_binary_evidence_carding.py (4 cases) — .dex/.so/.arsc/.dex.txt primary carded;
+      a real .java primary NOT carded (line preserved); iOS Mach-O still carded (regression). 902 pass.
+    ARTIFACT PROOF (shared-file run -> regenerated BOTH):
+      Android R25->R26: count 47->47, score 34/F, severity identical; ZERO findings carded (InsecureShop
+        has jadx source, so NO binary-primary finding exists -> the new carding is correctly DORMANT).
+        After L5 taint-order + L4 jadx-line tolerances: 0 other differing leaves. Byte-clean.
+      iOS R25->R26: 14/92/B unchanged; findings carded as binary 11->11 (iOS carding preserved).
+    LIMITATION (transparent): L1 only manifests on a NO-SOURCE / packed APK (the .dex/.so fallback).
+      No such APK is available (InsecureShop has full source; testapp.ipa is iOS). So the fix is
+      verified by code trace + unit test + zero-regression on both apps, but NOT by a live end-to-end
+      repro on a real no-source APK. Same blocker class as L2. Offer: full validation if a
+      packed/obfuscated Android sample is provided. L1 status -> FIXED (code+test), live-repro DEFERRED.
+    Files: backend/analyzers/evidence_selection/view.py; NEW backend/tests/test_android_binary_evidence_carding.py.
+    Commit-ready: Y  (do NOT push until human confirms the verified-not-live-reproduced caveat)
 
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
@@ -1394,3 +1426,12 @@ NO code change and show the order moves on its own). Only then is it safe to pas
   1 MEDIUM chain, nothing else; score 35->34/F (grade held), every deduction a real finding. L4
   reduced (2 carriers retired, 17 residual, still open). iOS 14/92/B. 898 tests pass. NOT PUSHED —
   awaiting human confirm of the cascade handling + final score. Next: push on confirm; L1 / OSV / L5.
+- 2026-07-13  RUN 25 confirmed + pushed (8c48657). RUN 26 DONE + committed: L1 (Android binary
+  string-index-as-source-line). Heeded the consumer-field rule — did NOT touch the file-server
+  (already correct). Real bug: build_evidence_view carded binary primaries iOS-only; extended to
+  Android (.dex/.so/.arsc) so no phantom file:line reaches PDF/panel/SARIF. view.py only + a 4-case
+  test (902 pass). Shared-file: regenerated both — Android byte-clean (carding DORMANT, no
+  binary-primary finding on InsecureShop; 0 delta after L4/L5 tolerances), iOS 14/92/B, carded 11->11.
+  LIMITATION: L1 only fires on a no-source/packed APK we don't have -> fix is code+test+zero-regression
+  verified, live repro DEFERRED (same blocker class as L2). NOT PUSHED — awaiting human confirm of the
+  verified-not-live-reproduced caveat. Next: push on confirm; then OSV / L5 / (L1 live repro if APK).
