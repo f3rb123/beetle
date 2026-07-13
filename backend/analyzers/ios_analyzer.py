@@ -1206,6 +1206,11 @@ def _remap_decodable_plist_finding_lines(app_bundle: str, results: dict, base_di
     _xml_cache: dict[str, list] = {}
 
     def _xml_lines(rel: str):
+        """Decoded-XML lines for a plist, or None. Mirrors decompiler._maybe_decode_plist
+        EXACTLY (decode a binary bplist OR any .plist — the file server round-trips XML plists
+        to canonical XML too), so the line numbers computed here match the XML the viewer
+        actually renders. RUN 20 only handled bplist magic; a decodable XML plist rendered
+        canonicalized in the viewer but was never remapped — this generalizes it."""
         if rel in _xml_cache:
             return _xml_cache[rel]
         # Finding file_path is relative to the scan extraction root (base_dir/tmpdir).
@@ -1218,24 +1223,30 @@ def _remap_decodable_plist_finding_lines(app_bundle: str, results: dict, base_di
         lines = None
         try:
             with open(full, "rb") as f:
-                if f.read(8) == b"bplist00":
-                    f.seek(0)
+                head = f.read(6)
+            if head[:6] == b"bplist" or rel.lower().endswith(".plist"):
+                with open(full, "rb") as f:
                     xml = plistlib.dumps(plistlib.load(f), fmt=plistlib.FMT_XML).decode("utf-8", "replace")
-                    lines = xml.split("\n")
+                lines = xml.split("\n")
         except Exception:
             lines = None
         _xml_cache[rel] = lines
         return lines
 
-    for f in findings:
-        fp = str(f.get("file_path") or "")
-        if not fp.lower().endswith(".plist"):
-            continue
-        lines = _xml_lines(fp)
+    def _anchor(rel: str, tokens: list):
+        """(1-based line, stripped text) of the first token found in rel's decoded XML, or None."""
+        lines = _xml_lines(rel)
         if not lines:
-            continue
-        # Anchor tokens = the value carried in the finding (title tail after an em/en dash, or
-        # the snippet). Search the decoded XML for the most specific one.
+            return None
+        for token in tokens:
+            for i, line in enumerate(lines, 1):
+                if token in line:
+                    return (i, line.strip())
+        return None
+
+    for f in findings:
+        # Anchor tokens = the value carried in the finding (title tail after an em/en dash or
+        # colon, or the snippet). Search the decoded XML for the most specific one.
         title = str(f.get("title") or "")
         cand = []
         for sep in (" — ", " – ", " - ", ": "):
@@ -1244,21 +1255,36 @@ def _remap_decodable_plist_finding_lines(app_bundle: str, results: dict, base_di
         if f.get("snippet"):
             cand.append(str(f["snippet"]).strip())
         cand = [c for c in cand if len(c) >= 4]
-        hit = None
-        for token in cand:
-            for i, line in enumerate(lines, 1):
-                if token in line:
-                    hit = (i, line.strip())
-                    break
+
+        # (1) Top-level finding location, if it is a decodable plist.
+        fp = str(f.get("file_path") or "")
+        if fp.lower().endswith(".plist") and _xml_lines(fp) is not None:
+            hit = _anchor(fp, cand) if cand else None
             if hit:
-                break
-        if hit:
-            f["line"] = hit[0]
-            f["snippet"] = hit[1][:240]
-        else:
-            # No anchor found — the raw bplist line is still an artifact, so clear it and let
-            # the viewer fall back to content search rather than scroll to a wrong line.
-            f["line"] = 0
+                f["line"] = hit[0]
+                f["snippet"] = hit[1][:240]
+            else:
+                # No anchor — the raw bplist line is an artifact; clear it so the viewer
+                # content-searches / renders without scrolling to a wrong line.
+                f["line"] = 0
+
+        # (2) EVERY plist file_evidence entry — RUN 20 fixed only f["line"] and left these at
+        # the raw-bplist artifact line (e.g. [3]). buildEvidence() (frontend) reads file_evidence
+        # BEFORE the top-level location, so a stale [3] made View Code land on the wrong line even
+        # though f["line"] was already 32. Remap each to ITS own decoded-XML line, or clear it.
+        for e in f.get("file_evidence") or []:
+            ep = str((e or {}).get("path") or "")
+            if not ep.lower().endswith(".plist") or _xml_lines(ep) is None:
+                continue
+            ehit = _anchor(ep, cand) if cand else None
+            if ehit:
+                e["lines"] = [ehit[0]]
+                # Overwrite any existing snippet: for a bplist it is a raw-bytes dump
+                # ("bplist00…"), meaningless in the decoded XML the viewer shows. Replace it
+                # with the decoded-XML line so the evidence card and the scroll target agree.
+                e["snippet"] = ehit[1][:240]
+            else:
+                e["lines"] = []
 
 
 def _record_binary_format_files(app_bundle: str, results: dict, base_dir: str = "") -> None:

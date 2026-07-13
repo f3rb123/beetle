@@ -22,6 +22,18 @@ value is masked. A green test does not prove this — only reading the rendered 
 
 (applies to RUN 13, 15, 16, 17 and every future shared-file change)
 
+*** CONSUMER-FIELD RULE (durable — RUN 20 set the right field, the UI read a different one) ***
+When correcting evidence DATA (a line, a snippet, a path), fix the field the RENDERER actually
+reads — not just the field you first think of. RUN 20 correctly remapped a plist finding's
+top-level f["line"] to the decoded-XML line (32), but the frontend's buildEvidence (ui.jsx) reads
+file_evidence[*].lines FIRST, which still held the raw-bplist artifact [3] — so View Code kept
+scrolling to the wrong line and RUN 20 "passed" its one-finding check while the bug was live.
+RUN 24 fixed the consumed field (file_evidence) and generalized it. GENERALIZES: before claiming
+an evidence fix works, TRACE which field the consumer (frontend buildEvidence / resolveEvidenceLines,
+PDF _findings_section, SARIF, source_explorer._finding_paths) actually reads, and correct THAT.
+A finding often carries the same location in several fields (line / file_evidence / merged_locations /
+evidence_view); correcting one and not the rest leaves a silent mismatch.
+
 THE ANDROID GUARD IS ORDER-INSENSITIVE ON SET-DERIVED FIELDS.
 Byte-equality is the right test ONLY for fields that are already deterministically ordered:
     endpoints, ips, findings, severity_summary, secrets   -> compare byte-for-byte.
@@ -58,6 +70,14 @@ After RUN 16 fixed L3 (permission order), Android is byte-stable EXCEPT:
     run-to-run (e.g. the WebView2Activity flow and the CustomReceiver flow swap positions). This is
     an ordering issue, NOT jadx line-drift; sorting taint_flows order-insensitively makes the diff
     empty. Unrelated to RUN 23. Logged for a later determinism pass; do NOT let it mask a real diff.
+  NEW at RUN 24 — L6 (test-coverage gap, NOT a runtime bug): the frontend has NO test infra
+    (no test script in frontend/package.json), so the view-code line-resolution / autoscroll path
+    (Results.jsx resolveEvidenceLines + buildEvidence + CodeBlockViewer) is verified only by build +
+    data-level simulation, never an automated regression test. This is the SECOND scroll/remap
+    regression in this exact area (RUN 20 then RUN 24); without a test it can regress a third time.
+    A future frontend-test effort MUST cover: (a) declared line out of range -> falls through, never a
+    phantom row; (b) a plist finding scrolls to its decoded-XML value line; (c) an absence-finding
+    (no anchor) renders + highlights nothing. Not broken today — a durable safety net is missing.
   MUST STAY BYTE-STABLE (tolerance does NOT extend here): primary evidence, finding identities,
     severity_summary, score, grade, and permissions. If any of THOSE move, it is a real bug.
   iOS has an analogous ENVIRONMENTAL variance: domain_intel geo (live DNS/geo of CDN IPs, e.g.
@@ -1227,7 +1247,52 @@ NO code change and show the order moves on its own). Only then is it safe to pas
         determinism pass, NOT touched here.
     Files: backend/analyzers/code_rules.py, backend/analyzers/code_analyzer.py,
       backend/analyzers/evidence_selection/engine.py.
-    Commit-ready: Y  (committed; NOT pushed — awaiting human confirm of attribution + L4 re-scope)
+    Commit-ready: Y  (committed 1e9cabd; pushed to origin/v1.3-dev)
+
+[x] RUN 24 — iOS view-code: generalize the plist line-remap + frontend autoscroll safety  DONE
+    VERIFIED FIRST (all facts held): backend file-serving is CORRECT (decompiler._maybe_decode_plist
+      decodes bplist AND round-trips XML plists via plistlib.dumps(FMT_XML), line 455) — NOT touched.
+      Mach-O + non-decodable blobs correctly card. The bugs were exactly as the prompt described.
+    ROOT CAUSES (two, both confirmed against live source + a live scan):
+      Bug B (backend, the real one): RUN 20's _remap_decodable_plist_finding_lines fixed only
+        f["line"], leaving file_evidence[*].lines at the RAW-bplist artifact (cloud_firebase: f.line
+        was 32 but file_evidence.lines was [3]). ui.jsx buildEvidence() reads file_evidence BEFORE the
+        top-level location, so the DEFAULT "View Code" entry pointed at line 3 = the `<plist>` header,
+        not the bucket at line 32. Also the remap only decoded bplist magic, not XML plists (which the
+        file server canonicalizes) — so an XML-plist finding would render canonical XML never remapped.
+      Bug A (frontend safety net): resolveEvidenceLines() (Results.jsx) trusted declared lines with NO
+        range check — an out-of-range artifact line targets a nonexistent row (silent no-scroll).
+    FIX (ios_analyzer.py + Results.jsx only):
+      * _remap: _xml_lines now mirrors _maybe_decode_plist EXACTLY (bplist OR .plist round-trip), and
+        the remap rewrites EVERY plist file_evidence entry to its own decoded-XML line (or clears it to
+        [] when no anchor), and overwrites the raw-bplist snippet with the decoded line. Generalized
+        from "one finding" to all plist findings + all their plist evidence entries.
+      * resolveEvidenceLines: keep only IN-RANGE declared lines; if none survive, fall through to the
+        existing snippet/token/line-1 chain. Never targets a nonexistent row.
+    PLIST-FINDING TABLE (every decodable-plist finding in the app — there are 2):
+      cloud_firebase_storage_bucket / GoogleService-Info.plist (bplist): BEFORE file_evidence.lines=[3]
+        -> View Code landed on line 3 (`<plist version="1.0">`). AFTER f.line=32, file_evidence.lines=
+        [32], snippet=`<string>ilogistics-check-in.appspot.com</string>`. Simulated frontend: default
+        View Code -> focus line 32 = the bucket. FIXED. (Legit location correction: file_evidence 3->32;
+        NOT a finding/severity/score change — f.line was already 32 from RUN 20.)
+      ios_privacy_declaration_discrepancy / Info.plist (bplist): f.line=None, file_evidence.lines=[]
+        (the NSPrivacyTracking keys are ABSENT — that IS the finding, nothing to anchor). Stays
+        approximate -> renders Info.plist, resolves to line 1, never a nonexistent row. CORRECT.
+    BROAD PROOF: 40 Mach-O binary_evidence_files still card (App.framework/App Dart-AOT, FBLPromises,
+      Firebase*), ZERO decodable plists wrongly carded. PDF follow-through (RUN 21): the decoded bucket
+      value is in the PDF, raw `bplist00` does NOT leak.
+    INVARIANTS: iOS 14->14 findings, 92/B, severity_summary identical. Android BYTE-STABLE at the
+      finding level (46->46, 35/F, severity + all finding identities identical) — iOS-analyzer + a
+      presentation-only frontend guard; Android never calls the remap. 897 backend tests pass
+      (incl. the 4 plist tests); no frontend test infra (verified via build + data-level simulation).
+    Files: backend/analyzers/ios_analyzer.py, frontend/src/pages/Results.jsx.
+    LESSONS LOGGED: L6 (frontend view-code/scroll has NO regression test — 2nd regression here,
+      RUN 20 then RUN 24) + the CONSUMER-FIELD RULE in the methodology (fix the field the renderer
+      reads, not just the one you set — RUN 20's exact miss).
+    ALL live user-facing bugs now CLOSED: view-code #1/#2 (RUN 20+24), short-PDF #4 (RUN 21),
+      CISO #3 (was already correct). Remaining work is optional polish only: RUN 19 breadth 1&2
+      (also broadly retires L4), L1 Android, L2 (blocked on a Swift/ObjC source app), OSV coverage, L5.
+    Commit-ready: Y  (committed 47a928d -> amended; pushed to origin/v1.3-dev)
 
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
@@ -1257,3 +1322,10 @@ NO code change and show the order moves on its own). Only then is it safe to pas
   AndroidX drift, out of scope, RUN 19 breadth fixes needed). New latent L5: taint_flows order swap.
   NOT PUSHED — awaiting human confirm of the attribution proof + L4 re-scope wording. Next: push on
   confirm, then triage remaining RUN 19 breadth proposals (1,2) / L1 / OSV.
+- 2026-07-13  RUN 23 confirmed + pushed (1e9cabd). RUN 24 DONE + committed: generalized the iOS
+  decodable-plist line-remap so file_evidence entries (not just f.line) get the decoded-XML line —
+  cloud_firebase now scrolls to line 32 (the bucket) instead of line 3 (the <plist> header); added a
+  frontend range-guard so a stale/out-of-range declared line never targets a nonexistent row. 2 plist
+  findings both correct; 40 Mach-O still card; PDF shows decoded value, no bplist leak. iOS 14/92/B,
+  Android finding-level byte-stable. 897 tests pass. NOT PUSHED — awaiting human confirm of the
+  plist-finding table + broad proof. Next: push on confirm, then RUN 19 breadth (1,2) / L1 / OSV.

@@ -106,8 +106,14 @@ function locateToken(content, needles) {
 // Never fabricates an exact line: anything past declared lines is flagged
 // approximate. Order: declared → snippet → class-name → method/title → line 1.
 export function resolveEvidenceLines(content, ev = {}) {
-  const declared = (ev.lines || []).filter(Boolean)
-  if (declared.length) return { lines: declared, focus: ev.highlightLine || declared[0], approximate: false, strategy: ev.source || 'declared' }
+  // Guard against a declared line that does not exist in the rendered content (e.g. a raw
+  // binary-plist artifact line, or a decoded XML shorter than the claimed line). Trusting it
+  // would scroll to a nonexistent row (silent no-scroll) or the wrong line. Keep only in-range
+  // declared lines; if none survive, fall through to snippet/token resolution below.
+  const totalLines = content ? content.split('\n').length : 0
+  const inRange = n => Number.isInteger(n) && n >= 1 && n <= totalLines
+  const declared = (ev.lines || []).filter(inRange)
+  if (declared.length) return { lines: declared, focus: inRange(ev.highlightLine) ? ev.highlightLine : declared[0], approximate: false, strategy: ev.source || 'declared' }
 
   if (ev.snippet) {
     const hit = locateSnippet(content, ev.snippet)
