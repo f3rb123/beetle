@@ -106,8 +106,14 @@ function locateToken(content, needles) {
 // Never fabricates an exact line: anything past declared lines is flagged
 // approximate. Order: declared → snippet → class-name → method/title → line 1.
 export function resolveEvidenceLines(content, ev = {}) {
-  const declared = (ev.lines || []).filter(Boolean)
-  if (declared.length) return { lines: declared, focus: ev.highlightLine || declared[0], approximate: false, strategy: ev.source || 'declared' }
+  // Guard against a declared line that does not exist in the rendered content (e.g. a raw
+  // binary-plist artifact line, or a decoded XML shorter than the claimed line). Trusting it
+  // would scroll to a nonexistent row (silent no-scroll) or the wrong line. Keep only in-range
+  // declared lines; if none survive, fall through to snippet/token resolution below.
+  const totalLines = content ? content.split('\n').length : 0
+  const inRange = n => Number.isInteger(n) && n >= 1 && n <= totalLines
+  const declared = (ev.lines || []).filter(inRange)
+  if (declared.length) return { lines: declared, focus: inRange(ev.highlightLine) ? ev.highlightLine : declared[0], approximate: false, strategy: ev.source || 'declared' }
 
   if (ev.snippet) {
     const hit = locateSnippet(content, ev.snippet)
@@ -138,6 +144,7 @@ function WorkspaceCodeModal({ state, onClose, onNavigate }) {
           title={state.path}
           meta={state.meta}
           content={state.content}
+          rawContent={state.rawContent}
           binaryInfo={state.binaryInfo}
           language={state.language}
           highlightedLines={state.lines}
@@ -1030,7 +1037,11 @@ export default function Results() {
     setCodeState({ ...base, content: '', binaryInfo: null, loading: true, error: '', meta: 'Loading source…' })
 
     try {
-      const response = await apiFetch(`/api/scans/${scanId}/file?path=${encodeURIComponent(path)}`)
+      // RUN 28 / BUG 1: a binary FINDING passes its Mach-O string index — ask the server for the
+      // extracted-strings listing (text) so we scroll to the matched symbol instead of showing a
+      // generic protections card. A plain tree browse (no index) still gets the card.
+      const stringsQ = opts.stringsIndex ? `&strings_index=${encodeURIComponent(opts.stringsIndex)}` : ''
+      const response = await apiFetch(`/api/scans/${scanId}/file?path=${encodeURIComponent(path)}${stringsQ}`)
       if (!response.ok) throw new Error(response.status === 404 ? 'Source file not available for this scan.' : 'Unable to open source file.')
 
       // Compiled artifacts come back as a JSON envelope — render a binary card,
@@ -1047,7 +1058,15 @@ export default function Results() {
           return
         }
       }
-      const content = await response.text()
+      const rawContent = await response.text()
+      // RUN 29 / BUG 1: pretty-print JSON HERE (not in the viewer) so the line the resolver picks
+      // and the lines the viewer renders are the SAME — otherwise a JSON finding's declared line
+      // (numbered against the minified bytes) no longer matched the beautified rows and the scroll
+      // went nowhere. rawContent is kept for the Copy button (original bytes).
+      let content = rawContent
+      if (inferLanguage(path) === 'json' && rawContent.trim()) {
+        try { content = JSON.stringify(JSON.parse(rawContent), null, 2) } catch { content = rawContent }
+      }
 
       // Deterministic resolution chain (declared → snippet → class → method →
       // title → line 1). Never fabricates an exact line; non-declared is ≈approx.
@@ -1062,15 +1081,24 @@ export default function Results() {
       })
 
       const span = r.lines.length > 1 ? `${r.lines[0]}–${r.lines[r.lines.length - 1]}` : `${r.lines[0]}`
+      // RUN 29 / BUG 1+2: label the strings view. A binary FINDING scrolls to its symbol; a bare
+      // binary BROWSE (X-Beetle-View header) shows the compiled binary's extracted strings.
+      const isBinaryStrings = response.headers.get('X-Beetle-View') === 'binary-strings'
+      const meta = opts.stringsIndex
+        ? `Extracted strings${opts.symbol ? ` · ${opts.symbol}` : ''} · string #${opts.stringsIndex}`
+        : isBinaryStrings
+          ? 'Compiled binary — extracted strings (searchable)'
+          : `${r.approximate ? '≈ lines' : 'Lines'} ${span}${opts.source ? ` · ${opts.source}` : ''}${r.approximate ? ` · ${r.strategy}` : ''}`
       setCodeState({
         ...base,
         lines: r.lines,
         focus: r.focus,
         approximate: r.approximate,
         content,
+        rawContent,
         loading: false,
         error: '',
-        meta: `${r.approximate ? '≈ lines' : 'Lines'} ${span}${opts.source ? ` · ${opts.source}` : ''}${r.approximate ? ` · ${r.strategy}` : ''}`,
+        meta,
       })
     } catch (openError) {
       setCodeState({

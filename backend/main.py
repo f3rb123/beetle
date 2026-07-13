@@ -1480,6 +1480,9 @@ async def list_files(scan_id: str, _user: dict = Depends(_require_auth)):
 async def get_file(
     scan_id: str,
     path: str = Query(..., description="Relative file path within decompiled output"),
+    strings_index: int | None = Query(
+        None, description="For a binary FINDING's view-code: the Mach-O string index to show "
+                          "the matched symbol + surrounding strings, instead of the generic card."),
     _user: dict = Depends(_require_auth),
 ):
     # Defense-in-depth: decode, normalize, and block any path that tries to
@@ -1515,6 +1518,16 @@ async def get_file(
         raise HTTPException(404, detail="File not found")
 
     if payload.get("kind") == "binary":
+        # RUN 29 / BUG 2: the extracted strings ARE the readable content of a compiled binary (there
+        # is no source — no jadx equivalent exists for a Mach-O). Return them as searchable text for
+        # ANY binary with a useful amount of strings, whether reached by BROWSING the file tree or by
+        # a FINDING (which also passes strings_index so the viewer scrolls to its symbol). Only a
+        # truly-opaque blob (too few printable strings) falls back to the descriptive card. This
+        # supersedes RUN 28's "browse -> generic card": a dead "no source" card hides real content.
+        from decompiler import binary_strings_listing
+        listing = binary_strings_listing(scan_id, normalized)
+        if listing and listing.count("\n") >= 20:
+            return PlainTextResponse(content=listing, headers={"X-Beetle-View": "binary-strings"})
         return JSONResponse(content={"binary": True, "info": payload["info"]})
 
     return PlainTextResponse(content=payload.get("content", ""))

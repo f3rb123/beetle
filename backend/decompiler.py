@@ -532,6 +532,33 @@ def inspect_file(scan_id: str, rel_path: str) -> dict | None:
         return None
 
 
+def binary_strings_listing(scan_id: str, rel_path: str) -> str | None:
+    """The printable-strings listing of a resolvable binary (one run per line), reproduced with
+    the SAME extraction the SAST used, so its line numbers match the ``string_index`` a Mach-O
+    finding reports. RUN 28 / BUG 1: a binary finding's "view code" shows the matched symbol and
+    the surrounding strings at that index instead of a generic protections card. Returns None when
+    the path does not resolve or is not a binary."""
+    candidate = resolve_source_path(scan_id, rel_path)
+    if candidate is None:
+        return None
+    try:
+        from analyzers import binary_inspector
+        if not binary_inspector.is_binary(candidate, rel_path):
+            return None
+    except Exception:
+        return None
+    try:
+        # Match code_analyzer._collect_ios_files: read_bytes(max_bytes=5 MiB) then _extract_strings.
+        raw = candidate.read_bytes()[: 5 * 1024 * 1024]
+    except Exception:
+        return None
+    try:
+        from analyzers.code_analyzer import _extract_strings
+        return _extract_strings(raw)
+    except Exception:
+        return None
+
+
 def list_source_files(scan_id: str, max_files: int = 10000) -> dict:
     """
     List all source files available in the decompiled output.
@@ -566,6 +593,35 @@ def list_source_files(scan_id: str, max_files: int = 10000) -> dict:
                     files.append(rel)
         if files:
             result["apk_extract"] = sorted(files)
+
+    # ipa_extract - iOS bundle content. RUN 27: the iOS Source Explorer tree was EMPTY because
+    # this subdir was never enumerated (only jadx/apktool/apk_extract/repo were), so the tree fell
+    # back to sparse finding-evidence paths (mostly Mach-O framework binaries that correctly card).
+    # List the VIEWABLE bundle files (plists — bplist or XML, both decode to readable XML via
+    # inspect_file — plus text/config/JSON). Compiled binaries (Mach-O executables, .dylib,
+    # frameworks, .car, embedded.mobileprovision) are intentionally EXCLUDED: they have no source
+    # and would only render as binary cards. A path here is served like Android's: flattenManifest
+    # prefixes the subdir ("ipa_extract/…") and resolve_source_path resolves it under scan_work.
+    # RUN 28 (refines RUN 27): browse the WHOLE iOS bundle, not just viewable files. A viewable
+    # file (plist/JSON/config) opens to its content; a compiled binary (Mach-O executable, .dylib,
+    # embedded.mobileprovision) opens to the binary card (correct — no source), and a binary FINDING
+    # opens to its symbol + strings (BUG 1). Only pure media/assets (images, fonts, compiled asset
+    # catalogs) are skipped — they are neither source nor security-relevant and only add noise.
+    ipa_ext_base = scan_work / "ipa_extract"
+    if ipa_ext_base.exists():
+        _IPA_SKIP_EXTS = (
+            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".icns", ".pdf", ".svg",
+            ".ttf", ".otf", ".woff", ".woff2", ".car", ".nib", ".momd", ".mom", ".omo",
+            ".mp3", ".mp4", ".mov", ".m4a", ".aac", ".caf", ".wav", ".ogg", ".zip",
+        )
+        files = []
+        for path in ipa_ext_base.rglob("*"):
+            if path.is_file() and len(files) < max_files:
+                if path.suffix.lower() in _IPA_SKIP_EXTS:
+                    continue
+                files.append(str(path.relative_to(ipa_ext_base)))
+        if files:
+            result["ipa_extract"] = sorted(files)
 
     # repo - CI/CD repository scan (pipeline + source files, incl. extensionless
     # well-known files like Jenkinsfile / Dockerfile that have no suffix).

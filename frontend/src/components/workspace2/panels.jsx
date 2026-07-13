@@ -82,7 +82,7 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCod
         <Metric label="Security Score" value={<>{score.score ?? '—'}<small>/100</small></>} sub={score.grade ? `Grade ${score.grade}` : ''} />
         <Metric label="Source Resolution" value={`${res.source_resolution_pct ?? '—'}%`} sub="findings located" />
         <Metric label="View Code" value={`${res.view_code_coverage_pct ?? '—'}%`} sub="renderable evidence" />
-        <Metric label="Attack Chains" value={chains.length} sub="cloud exposure paths" />
+        <Metric label="Attack Chains" value={allChains.length} sub="correlated exploit paths" />
         <Metric label="Secrets" value={secretsSum.total_application_secrets ?? (results.secrets || []).length} sub={`${secretsSum.suppressed_sdk_secrets ?? 0} SDK suppressed`} />
       </div>
 
@@ -212,7 +212,8 @@ export function OverviewPanel({ results, onOpenSection, onOpenFinding, onOpenCod
         <div className="ws-launcher">
           {[
             ['ciso', 'CISO Summary', Briefcase], ['developer', 'Developer Report', Wrench],
-            ['manifest', 'Manifest', ScrollText], ['network', 'Network', Network],
+            ['manifest', results.platform === 'ios' ? 'Info.plist & Entitlements' : 'Manifest', ScrollText],
+            ['network', 'Network', Network],
             ['certificate', 'Certificates', Fingerprint], ['components', 'Application Components', Boxes],
             ['androidapis', 'Android APIs', Cpu], ['malware', 'Malware', Bug],
             ['ai', 'AI Actions', Sparkles], ['compare', 'Scan Compare', GitCompare],
@@ -541,6 +542,14 @@ function PrimaryEvidenceCard({ view, finding, onOpenCode }) {
     if (nav._onOpenCode) (vw === 'smali' ? nav.openSmali : nav.openSource)(p.file, lines, opts)
     else onOpenCode?.(p.file, lines, opts)
   }
+  // RUN 28 / BUG 1: open the binary's extracted-strings listing scrolled to the matched symbol,
+  // instead of a generic protections card.
+  const openStrings = () => {
+    const opts = { stringsIndex: p.string_index, symbol: p.symbol, snippet: p.snippet }
+    const ls = p.string_index ? [p.string_index] : []
+    if (nav._onOpenCode) nav.openSource(p.file, ls, opts)
+    else onOpenCode?.(p.file, ls, opts)
+  }
   return (
     <div className="ws-block">
       <div className="ws-block__label">Primary Evidence</div>
@@ -552,7 +561,22 @@ function PrimaryEvidenceCard({ view, finding, onOpenCode }) {
           {p.owner_type ? <span className="ws-badge ws-badge--own" title={ownershipLabel({ ownership: p.owner_type }) || p.owner_type}>{ownershipLabel({ ownership: p.owner_type }) || p.owner_type}</span> : null}
           {p.source ? <span className="ws-badge ws-badge--engine">{p.source}</span> : null}
         </div>
-        {p.snippet ? <pre className="ws-code">{p.snippet}</pre> : null}
+        {/* Mach-O evidence: a compiled binary has no source line. Show the matched
+            symbol and where it sits in the binary's strings listing — never file:line. */}
+        {p.binary ? (
+          <div className="ws-primary__binary">
+            <div className="ws-primary__binary-row">
+              <span className="ws-badge">Binary evidence</span>
+              {p.symbol ? <code className="ws-mono">{p.symbol}</code> : null}
+              {p.string_index ? <span className="ws-muted ws-mono">string #{p.string_index}</span> : null}
+            </div>
+            <div className="ws-primary__note">
+              Compiled binary — no source line exists. The proof is the symbol/string above,
+              recovered from the binary's extracted strings.
+            </div>
+          </div>
+        ) : null}
+        {p.snippet && !p.binary ? <pre className="ws-code">{p.snippet}</pre> : null}
         {(p.reasons || []).length ? (
           <ul className="ws-primary__reasons">
             {p.reasons.slice(0, 5).map((r, i) => <li key={i}>✓ {r}</li>)}
@@ -563,6 +587,7 @@ function PrimaryEvidenceCard({ view, finding, onOpenCode }) {
         ) : null}
         <div className="ws-primary__actions">
           {/* Certificate / signing artifacts have no source file — only offer Copy. */}
+          {p.binary ? <button type="button" className="ws-btn ws-btn--primary" onClick={openStrings}><FileCode2 size={14} /> View Strings</button> : null}
           {p.artifact ? null : <button type="button" className="ws-btn ws-btn--primary" onClick={() => open('java')}><FileCode2 size={14} /> View Source</button>}
           {p.artifact ? null : <button type="button" className="ws-btn" onClick={() => open('smali')} title="Smali view (Source Explorer — roadmap)"><Layers size={14} /> View Smali</button>}
           <button type="button" className="ws-btn" onClick={() => copyToClipboard(p.file + (p.line ? `:${p.line}` : ''))}>Copy Path</button>
@@ -916,6 +941,9 @@ function openEvidence(loc, evidence, i, onOpenCode) {
   onOpenCode(loc.path, loc.lines, {
     snippet: loc.snippet, source: loc.source, approximate: loc.approximate,
     highlightLine: loc.highlightLine, className: loc.className, titleKeywords: loc.titleKeywords,
+    // RUN 28 / BUG 1: binary-evidence context so a Mach-O finding's view-code shows its symbol +
+    // surrounding strings at the string index, not a generic card.
+    stringsIndex: loc.stringsIndex, symbol: loc.symbol, binaryEvidence: loc.binary,
     evidence, index: i,
   })
 }

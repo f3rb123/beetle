@@ -127,6 +127,7 @@ def to_first_class_findings(results: dict) -> list:
             "overall_confidence": confidence,
             "chain_confidence": _confidence_label(confidence),
             "reachability_proof": chain.get("reachability_proof", ""),
+            "severity_reason": chain.get("severity_reason", ""),
             "exploitability": chain.get("overall_exploitability", 0),
             "overall_exploitability": chain.get("overall_exploitability", 0),
             "description": chain.get("summary", ""),

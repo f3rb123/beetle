@@ -160,6 +160,26 @@ def test_intent_to_sqlite_taint_in_app_class_produces_proven_chain():
            f"entry should be the app activity, got {c['entry_point'].get('component')!r}")
 
 
+def test_heuristic_injection_chain_caps_at_medium():
+    """RUN 25: an injection/RCE chain that matches on capability co-occurrence with NO taint
+    dataflow is heuristic. Its template severity would be HIGH (sql_injection), but with the
+    reachability unproven it must cap at MEDIUM — real, worth review, not proven exploitable —
+    and carry a severity_reason explaining why. (Counterpart to the proven→HIGH test above.)"""
+    # App-owned exported entry + a raw-SQL sink, but NO intent→sql taint flow.
+    chains = ENGINE.build_chains(_results([_RAW_SQL], _APP_ACTIVITY))
+    sqli = _sqli_chains(chains)
+    _check(sqli, f"expected a heuristic SQLi chain, got {[c['type'] for c in chains]}")
+    c = sqli[0]
+    _check(c["reachability_proof"] == "heuristic",
+           f"co-occurrence SQLi must be heuristic, got {c['reachability_proof']}")
+    _check(c["severity"] == "medium",
+           f"heuristic injection chain must cap at MEDIUM, got {c['severity']}")
+    _check(c.get("severity_reason"),
+           "a capped heuristic chain must explain WHY it is MEDIUM (severity_reason)")
+    _check("reachability" in c["severity_reason"].lower(),
+           f"severity_reason must cite unproven reachability: {c['severity_reason']!r}")
+
+
 def test_taint_flow_in_library_class_is_not_proven():
     """Same taint categories but the sink class is a bundled SDK, not app code — the
     dataflow does not live in the application, so the chain stays heuristic."""

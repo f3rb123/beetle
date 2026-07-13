@@ -34,3 +34,14 @@ tmp/
  
 *.pdf
 internal/MISSING_FEATURES.md
+
+# Beetle production-run planning docs (local working files, static)
+CLAUDE.md
+BEETLE_PROMPTS.md
+# BEETLE_PROGRESS.md is deliberately TRACKED — it is the crash-recovery / cross-session
+# resume record, which only works if it survives in version history.
+
+# Test binaries (never commit large app files)
+testapps/
+*.apk
+*.ipa

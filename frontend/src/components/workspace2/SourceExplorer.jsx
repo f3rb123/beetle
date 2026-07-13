@@ -21,7 +21,7 @@ import { apiFetch } from '../../lib/auth.js'
 import { EmptyState } from './ui.jsx'
 import { useWorkspaceNav } from './workspace-context.jsx'
 import {
-  buildTree, buildOverlay, badgeForNode, nodePasses, filterPathSet,
+  buildTree, buildOverlay, badgeForNode, nodePasses, filterPathSet, categoryPathSet,
   ancestorsOf, resolveManifestPath, normalizePath, SEV_COLOR,
   QUICK_FILTERS, EXPLORER_EXTENSIONS,
 } from './source-explorer-model.js'
@@ -227,6 +227,21 @@ export function SourceExplorerPanel({ results, scanId, onOpenCode, extensions, i
   const fileCount = paths.filter(p => !p.endsWith('/')).length
   const breadcrumb = selected ? normalizePath(selected).split('/') : []
 
+  // RUN 28 / BUG 2: a category's count MUST equal the number of files that category will actually
+  // list, or the pane shows e.g. "secrets 4" then "No files in the secrets category". Both now
+  // derive from the SAME set — tree files whose normalized path is in the category — so a security
+  // file that isn't in the browsable tree (e.g. a Mach-O secret, which has no viewable source) is
+  // counted only if it is listable. Guarantees count === list for every category.
+  const normFilePaths = useMemo(() => paths.filter(p => !p.endsWith('/')).map(normalizePath), [paths])
+  // Count tree files whose normalized path is in the given filter's set ('findings' or a security
+  // category). Same set the tree list uses (filterPathSet), so count === list.
+  const filterFileCount = useCallback((id) => {
+    if (!id || id === 'all') return fileCount
+    const cs = filterPathSet(id, { securityIndex, fileIndex })
+    if (!cs) return 0
+    return normFilePaths.reduce((n, np) => n + (cs.has(np) ? 1 : 0), 0)
+  }, [securityIndex, fileIndex, normFilePaths, fileCount])
+
   // Count files that survive the active search/category filter, so we can show an
   // explicit "no matches" state instead of a silently-empty tree.
   const queryLc = q.trim().toLowerCase()
@@ -250,9 +265,7 @@ export function SourceExplorerPanel({ results, scanId, onOpenCode, extensions, i
           the Security Explorer pane (no separate filtering system). */}
       <div className="ws-ex-quick" role="tablist" aria-label="Quick filters">
         {QUICK_FILTERS.map(f => {
-          const count = f.id === 'all' ? fileCount
-            : f.id === 'findings' ? Object.keys(fileIndex).length
-            : (securityIndex[f.id] || []).length
+          const count = filterFileCount(f.id)
           const disabled = f.future || (f.id !== 'all' && !count)
           const active = activeCat === f.id
           return (
@@ -296,7 +309,7 @@ export function SourceExplorerPanel({ results, scanId, onOpenCode, extensions, i
             <span className="ws-ex-cat__count">{fileCount}</span>
           </button>
           {SEC_CATS.map(([id, label, Icon]) => {
-            const n = (securityIndex[id] || []).length
+            const n = filterFileCount(id)
             return (
               <button key={id} type="button" disabled={!n}
                 className={`ws-ex-cat${activeCat === id ? ' is-active' : ''}${!n ? ' is-empty' : ''}`}

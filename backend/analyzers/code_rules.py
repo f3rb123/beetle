@@ -381,6 +381,12 @@ CODE_RULES = [
 
     # ── Logging ───────────────────────────────────────────────────────────────
     {
+        # RUN 25 (audit proposal 2): restrict to APP-OWNED code. `Log.(d|v|i|...)` matches every
+        # log call in the app AND every bundled library (181 locations here, 180 of them library).
+        # A log call inside AndroidX/GMS is not the app's logging hygiene problem, so gate this rule
+        # on the existing APPLICATION ownership signal (classify_file.is_application) — the same
+        # signal RUN 8/9/15 use. This also removes this rule's rejected AndroidX candidates, which
+        # were an L4 jadx line-drift carrier (AppCompatTextViewAutoSizeHelper.java 60<->61).
         "id":          "android_log_debug",
         "title":       "Sensitive Data May Be Logged (Log.d/v/i)",
         "pattern":     r"\bLog\.(d|v|i|e|w|wtf)\(",
@@ -389,7 +395,8 @@ CODE_RULES = [
         "cwe":         "CWE-532",
         "masvs":       "MASVS-STORAGE-2",
         "owasp":       "M9",
-        "description": "App uses Android logging APIs. Log output is accessible to any app with READ_LOGS permission (pre-4.1) or via ADB. Sensitive data (tokens, credentials, PII) in logs is a common finding.",
+        "app_owned_only": True,
+        "description": "Application code uses Android logging APIs. Log output is accessible to any app with READ_LOGS permission (pre-4.1) or via ADB. Sensitive data (tokens, credentials, PII) in logs is a common finding. Scoped to application code — logging inside bundled libraries is not reported.",
         "recommendation": "Remove all Log statements from production builds or wrap in BuildConfig.DEBUG checks. Never log sensitive data.",
     },
     {
@@ -496,6 +503,11 @@ CODE_RULES = [
         "recommendation": "Avoid dynamic code loading. If required, validate the integrity of loaded code with cryptographic signatures before execution.",
     },
     {
+        # RUN 25 (audit proposal 1): restrict to APP-OWNED code. `.invoke(`/`.getMethod(` etc.
+        # appear in nearly all framework+library code (228 locations here, 227 of them library);
+        # reflection inside AndroidX/GMS/Retrofit/RxJava is ubiquitous and not the app's finding.
+        # Gate on the existing APPLICATION ownership signal (classify_file.is_application). This also
+        # drops this rule's 103 rejected AndroidX candidates (an L4 jadx line-drift carrier).
         "id":          "android_reflection",
         "title":       "Java Reflection Usage",
         "pattern":     r"java\.lang\.reflect\.|\.getMethod\(|\.invoke\(|\.getDeclaredMethod\(|\.getDeclaredField\(",
@@ -504,11 +516,15 @@ CODE_RULES = [
         "cwe":         "CWE-470",
         "masvs":       "MASVS-RESILIENCE-3",
         "owasp":       "M7",
-        "description": "Java reflection is used. Reflection can be used to bypass access controls, invoke hidden APIs, and is often used in exploits and obfuscation.",
+        "app_owned_only": True,
+        "description": "Application code uses Java reflection. Reflection can be used to bypass access controls, invoke hidden APIs, and is often used in exploits and obfuscation. Scoped to application code — reflection inside bundled libraries is not reported.",
         "recommendation": "Minimize reflection usage. Document legitimate uses. Avoid using reflection to invoke untrusted code.",
     },
     {
-        "id":          "android_process_death",
+        # RUN 22: id relabeled from the mislabeled "android_process_death" — the pattern,
+        # title, CWE-502 and description all describe INSECURE DESERIALIZATION, which the id
+        # now matches. The pattern is unchanged, so this only corrects the rule's identity.
+        "id":          "android_insecure_deserialization",
         "title":       "Object Deserialization",
         "pattern":     r"ObjectInputStream|readObject\(\)|Serializable|Parcelable.*readFromParcel",
         "severity":    "medium",
@@ -634,16 +650,21 @@ CODE_RULES = [
         "recommendation": "Use explicit intents (specifying the target component) for sensitive IPC. Use LocalBroadcastManager for local broadcasts.",
     },
     {
-        "id":          "android_content_provider_no_permission",
-        "title":       "ContentProvider Query Without Permission Check",
+        # RUN 22: id + title relabeled from the mislabeled
+        # "android_content_provider_no_permission" / "...Without Permission Check". The pattern
+        # detects a ContentResolver QUERY (usage) — it does NOT verify whether a permission is
+        # missing, so the old name/title asserted a gap the rule never checks. Now named for what
+        # it detects: a content-provider query the reviewer should confirm is permission-guarded.
+        "id":          "android_content_provider_query",
+        "title":       "ContentProvider Query",
         "pattern":     r"getContentResolver\(\)\.query\(|contentResolver\.query\(",
         "severity":    "low",
         "category":    "Platform Interaction",
         "cwe":         "CWE-284",
         "masvs":       "MASVS-PLATFORM-1",
         "owasp":       "M1",
-        "description": "ContentProvider queries detected. Ensure the target provider is protected with appropriate permissions.",
-        "recommendation": "Verify target ContentProvider has proper read/write permissions. Sanitize URI inputs to prevent path traversal.",
+        "description": "The app queries a ContentProvider (usage detected — this is not itself a finding of a missing permission). Review that the target provider enforces read/write permissions and that URI inputs are validated.",
+        "recommendation": "Confirm the target ContentProvider is permission-guarded (android:permission / exported=false as appropriate) and sanitize URI inputs to prevent path traversal.",
     },
 
     # ── Data Transmission ──────────────────────────────────────────────────────
@@ -725,6 +746,13 @@ CODE_RULES = [
         "recommendation": "Use domain names instead of hardcoded IPs. Remove all development server references from production builds.",
     },
     {
+        # RUN 23: this is a WHOLE-APP posture check (is the app obfuscated?), not a per-location
+        # vuln. The pattern matches readable R.id./R.layout./BuildConfig references, which occur in
+        # essentially every UI class — so it accrued 125 evidence locations, and its rejected
+        # library candidates (e.g. ViewPager2.java) carried the L4 jadx line-drift residual. The
+        # "posture" flag tells evidence_selection to collapse it to ONE representative location
+        # (the selected app-owned primary), so the signal stays but the 124 duplicate locations and
+        # their drift are gone. The regex/coverage is unchanged — only the evidence breadth is.
         "id":          "android_obfuscation_missing",
         "title":       "Code Obfuscation Not Detected",
         "pattern":     r"BuildConfig|R\.layout\.|R\.id\.|R\.string\.",
@@ -733,7 +761,8 @@ CODE_RULES = [
         "cwe":         "CWE-656",
         "masvs":       "MASVS-RESILIENCE-3",
         "owasp":       "M7",
-        "description": "Readable class/resource names suggest code obfuscation may not be applied. Without ProGuard/R8, the full app logic is readable after decompilation.",
+        "posture":     True,
+        "description": "Whole-app resilience posture check: readable class/resource references were found, indicating ProGuard/R8 obfuscation is likely not applied. This is a single app-wide signal — one representative location is shown, not a per-file finding.",
         "recommendation": "Enable ProGuard/R8 minification in release builds. Apply obfuscation rules for sensitive code paths.",
     },
 ]

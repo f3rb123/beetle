@@ -6,6 +6,8 @@ import hashlib
 import logging
 import struct
 import base64
+import io
+import zlib
 import mimetypes
 import tempfile
 from pathlib import Path
@@ -23,7 +25,11 @@ from . import scan_storage
 from . import finding_model
 from .code_analyzer import run_ios_sast
 from .string_analyzer import analyze_strings
-from .source_corpus import SourceCorpus
+from .apple_png import (
+    PNG_SIG, png_dimensions, renderable_image_bytes, best_icon_png_from_assets_car,
+)
+from .source_corpus import SourceCorpus, printable_text
+from . import endpoint_intel
 from .scoring import calculate_score
 from .path_utils import relativize_path
 from .virustotal import run_virustotal
@@ -75,6 +81,7 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         "jwts":             [],
         "ips":              [],
         "endpoints":        [],
+        "domain_intel":     [],
         "sdks":             [],
         "framework":        {"type": "native", "details": []},
         "permissions":      {"dangerous": [], "all": []},
@@ -145,7 +152,14 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                 binary_path = os.path.join(app_bundle, binary_name)
                 if os.path.exists(binary_path):
                     _analyze_macho(binary_path, results)
-                    _scan_binary_strings(binary_path, results, tmpdir)
+            # String-scan EVERY Mach-O in the bundle, not just the main executable: a
+            # Flutter app's URLs/IPs live in the framework binaries (App.framework/App),
+            # which the Runner binary never contains. Fills _binary_endpoints /
+            # _binary_ip_hits, merged into endpoints/ips once the pool below returns.
+            _scan_binary_strings(app_bundle, results, tmpdir)
+            # Which bundle files are binary-format (Mach-O / bplist) — consumed by the
+            # evidence view so their "line" is never rendered as a source line.
+            _record_binary_format_files(app_bundle, results, tmpdir)
 
         # ── Parallelize heavy independent scans to speed up iOS analysis.
         # Each module is CPU-bound on file IO + regex — running them on a
@@ -208,6 +222,15 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
 
             results["jwts"] = _fut_jwts.result() or []
             results["ips"]  = _fut_ips.result() or []
+            # Merge Mach-O binary IP hits BEFORE annotate so they are classified,
+            # owned and de-duped by the same canonical model as the text-file hits.
+            _bin_ips = results.pop("_binary_ip_hits", []) or []
+            if _bin_ips:
+                _seen_ips = {(h.get("ip"), h.get("file_path")) for h in results["ips"]}
+                for _h in _bin_ips:
+                    if (_h["ip"], _h["file_path"]) not in _seen_ips:
+                        _seen_ips.add((_h["ip"], _h["file_path"]))
+                        results["ips"].append(_h)
             # Phase 1.99: enrich raw IP hits (classify / owner / suppress / merge /
             # intelligence) using the SAME canonical model as Android, BEFORE the
             # public-IP finding and UI consume them. Additive; URLs untouched.
@@ -216,6 +239,12 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
             except Exception:
                 log.exception("[network_intel] iOS IP enrichment failed; raw IPs left as-is")
             _fut_endpoints.result()
+            # Merge Mach-O binary URLs into the endpoint list, deduped against what the
+            # text scan already found. These have no call site (stripped AOT code), so
+            # they arrive here rather than through extract_endpoints' called-only default.
+            _bin_eps = results.pop("_binary_endpoints", []) or []
+            if _bin_eps:
+                results["endpoints"] = sorted(set(results.get("endpoints") or []) | set(_bin_eps))
             # Phase 2.5.5: Cloud Configuration discovery (parity with Android) —
             # classify Firebase/GCS buckets + endpoints and emit findings BEFORE
             # fusion so they traverse the same pipeline.
@@ -245,6 +274,18 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                 react_native_analyzer.analyze([app_bundle or tmpdir], results, platform="ios")
             except Exception:
                 log.exception("[react_native] iOS analysis failed; continuing without RN findings")
+
+        # ── Domain Geo/Intel Check ───────────────────────────────────────────
+        # Runs AFTER every endpoint contributor (binary strings, text scan, Flutter, RN)
+        # so it sees the final list. iOS never called this, so domain_intel was absent
+        # from every iOS report regardless of how many endpoints were found. Android's
+        # _add_domain_intel_summary finding is deliberately NOT mirrored here — this
+        # populates the section without adding a finding.
+        try:
+            from .domain_analyzer import check_domains
+            check_domains(results.get("endpoints", []), results)
+        except Exception:
+            log.exception("[domain_intel] iOS domain intelligence failed; section left empty")
 
         # ── Semgrep SAST (Phase 2.4) — external detection engine via the SAST
         # adapter. Gated on availability (no-op + zero cost when absent); runs only
@@ -320,10 +361,73 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         # ── Entitlements ─────────────────────────────────────────────────────
         if app_bundle:
             _analyze_entitlements(app_bundle, results)
+        # ── Certificate summary — build results["certificate"] from the signing
+        # certs + provisioning fields _analyze_entitlements just parsed, so the
+        # report renders signing/provisioning details instead of "No certificate
+        # data". Additive; iOS-only (Android builds results["certificate"] in
+        # cert_analyzer). ──
+        _build_ios_certificate(results)
 
         # ── Embedded Frameworks ──────────────────────────────────────────────
         if app_bundle:
             _analyze_embedded_frameworks(app_bundle, results)
+
+            # ── Property Lists (enumeration surface) ─────────────────────────
+            # The enumeration itself emits no findings. The ONE finding that comes out of this
+            # area is the privacy-declaration DISCREPANCY, which exists only at the INTERSECTION
+            # of two independent evidence chains — trackers present (RUN 11) and declarations
+            # absent (RUN 12) — so it must run after both.
+            try:
+                from . import ios_plists
+                ios_plists.analyze(app_bundle, results)
+            except Exception:
+                log.exception("[plists] iOS property-list enumeration failed")
+
+            # ── Tracker detection ────────────────────────────────────────────
+            # MUST run AFTER _analyze_embedded_frameworks: it is what populates results["sdks"]
+            # from the real Frameworks/ directory. Running earlier left the pod list EMPTY, so
+            # every tracker fell back to marker evidence and FirebaseCrashlytics — which plainly
+            # ships a framework — was mislabelled "statically linked".
+            #
+            # NOT a wire-up of Android's detect_trackers(): all 73 of its signatures key on an
+            # ANDROID PACKAGE PREFIX, which an iOS app has none of. iOS trackers are proven by
+            # pod name (RUN 7), by an endpoint the app contains (RUN 1), or by a marker string
+            # statically linked into a Mach-O (RUN 8's string scan) — that third signal is what
+            # catches Firebase Analytics, which ships NO framework and is linked into Runner.
+            try:
+                from .tracker_db import detect_trackers_ios
+                results["trackers"] = detect_trackers_ios(
+                    sdk_names=[s.get("name") for s in results.get("sdks") or []
+                               if isinstance(s, dict)],
+                    endpoints=results.get("endpoints") or [],
+                    binary_markers=results.pop("_binary_tracker_markers", []),
+                )
+            except Exception:
+                log.exception("[trackers] iOS tracker detection failed")
+                results.setdefault("trackers", [])
+
+            # ── Strings section (browsable; emits NO findings) ────────────────
+            # HIGHEST secret-leak risk surface: it shows the raw strings themselves. Every value
+            # is routed through strings_section.redact() -> secret_intel.mask_value, so a
+            # credential in the string table can never appear in the clear (RUN 12's leak, one
+            # level worse).
+            try:
+                from . import strings_section
+                results["strings"] = strings_section.build(
+                    results, extra_emails=results.pop("_binary_emails", []))
+            except Exception:
+                log.exception("[strings] iOS strings section failed")
+
+            # ── Privacy-declaration discrepancy (the ONE finding from this area) ──
+            # MUST run after BOTH chains exist: the trackers (presence, above) and the property
+            # lists (absence). It is precisely their INTERSECTION.
+            try:
+                from . import ios_plists as _plists
+                _priv = _plists.build_privacy_declaration_finding(results)
+                if _priv:
+                    results["findings"].append(_priv)
+            except Exception:
+                log.exception("[privacy] privacy-declaration check failed")
 
         # ── Overlap the remaining independent scans ─────────────────────────
         from concurrent.futures import ThreadPoolExecutor as _TPE
@@ -375,7 +479,59 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                         "binaries_scanned": len(lief_results),
                         "objc_class_total": objc_class_count,
                         "instrumentation_hits": inst_hits,
+                        # RUN 15: rules that do not apply to a dynamic library (MH_PIE, framework
+                        # RPATHs) are suppressed rather than emitted as noise. Recorded so the
+                        # suppression is auditable, never silent.
+                        "suppressed_rules": [s for r in lief_results
+                                             for s in (r.get("suppressed") or [])],
+                        "truncated_symbol_lists": [
+                            r.get("binary") for r in lief_results
+                            if r.get("imported_syms_truncated")
+                        ],
                     }
+                    # Imported-symbol API scan across the main binary AND every framework:
+                    # ONE consolidated finding per class (insecure API / logging / malloc),
+                    # each listing the symbols that are genuinely in the import table.
+                    # Per-binary protection table (main executable first, then frameworks).
+                    # The FP guard lives in binary_protections: missing canary/ARC on the
+                    # Dart-AOT blob, and missing ARC on a pure-C library, are NOT findings.
+                    from . import binary_protections
+                    _main = results["app_info"].get("bundle_executable") or ""
+                    _bundle_rel0 = relativize_path(app_bundle, tmpdir) if app_bundle else ""
+
+                    def _owner_of(rel_binary: str) -> str:
+                        """Ownership Engine verdict for a bundle binary, via its FULL
+                        bundle-relative path — the same fix RUN 8 made (a bare name is
+                        mistaken for a CocoaPod). Drives HIGH-vs-MEDIUM severity below."""
+                        from .ownership import get_engine as _own_engine
+                        from .ownership.types import OwnershipContext as _Ctx
+                        from .canonical_finding import CanonicalFinding as _CF
+                        path = f"{_bundle_rel0}/{rel_binary}" if _bundle_rel0 else rel_binary
+                        res = _own_engine().classify(
+                            _CF(title="_bin", file_path=path, platform="ios",
+                                evidence_type="binary_protection"),
+                            _Ctx(platform="ios"))
+                        return res.owner_type
+
+                    prot_rows = binary_protections.build_table(
+                        lief_results, main_binary=_main, owner_of=_owner_of)
+                    results["binary_protections"] = prot_rows
+                    prot_findings, prot_suppressed = binary_protections.build_findings(prot_rows)
+                    results["findings"].extend(prot_findings)
+                    results["binary_protections_suppressed"] = prot_suppressed
+
+                    from . import binary_api_scan
+                    _bundle_rel = relativize_path(app_bundle, tmpdir) if app_bundle else ""
+                    api_findings = binary_api_scan.build_findings(
+                        lief_results, platform="ios", bundle_prefix=_bundle_rel)
+                    if api_findings:
+                        results["findings"].extend(api_findings)
+                        results["binary_api_scan"] = {
+                            f["rule_id"]: {
+                                "symbols": f["matched_symbols"],
+                                "binaries": f["matched_binaries"],
+                            } for f in api_findings
+                        }
         except Exception as _e:
             log.debug(f"lief macho scan failed: {_e}")
 
@@ -405,6 +561,15 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
                     results["findings"].extend(merged["findings"])
                 results["components"] = merged.get("components", [])
                 results["cve_stats"]  = merged.get("stats", {})
+                # "0 CVEs" is only a real negative if the scanner COULD have found one. Canary-
+                # test each ecosystem against OSV; if it does not answer, say the components are
+                # UNASSESSABLE rather than letting a structural zero read as "no known vulns".
+                try:
+                    cov = cve_mapper.assess_coverage(results["components"])
+                    results["cve_stats"]["coverage"] = cov
+                    results["cve_stats"]["cves_assessable"] = cov["assessable"] > 0
+                except Exception:
+                    log.exception("[cve] coverage assessment failed")
         except Exception as _e:
             log.debug(f"cve mapping failed: {_e}")
 
@@ -462,6 +627,14 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     # detected secret. MUST run BEFORE secret_intel masking so it sees raw values;
     # it stores only derived, non-sensitive signals. Additive only; never
     # suppresses or re-severities. Deterministic, network-free. ──
+    # Deterministically surface Firebase GoogleService-Info.plist config (API_KEY /
+    # CLIENT_ID) as INFO before the intelligence + processing stages. Dedup-safe
+    # (skips values already in results["secrets"]); iOS-only. Runs BEFORE the two
+    # stages below so these config keys traverse the same masking/status pipeline.
+    try:
+        _extract_firebase_plist_config(app_bundle, results)
+    except Exception:
+        log.exception("[firebase_plist] Firebase config extraction failed")
     try:
         from . import secret_intelligence
         secret_intelligence.annotate(results)
@@ -529,6 +702,18 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
         finding_model.demote_library_code_findings(results)
     except Exception:
         log.exception("[library_noise] demotion failed")
+    # ── Phase 7.5: trust framework — evidence quality, resolution coverage scores
+    # and the overall trust score. Mirror of the Android placement
+    # (android_analyzer.py:984): runs AFTER findings, source-resolution stats and
+    # ownership have populated, and BEFORE the v2 attack chains — so the iOS report
+    # shows a real Trust Score instead of "-". Additive; annotate_trust reads only
+    # results["findings"] + per-finding fields (no manifest/Android-only input),
+    # so it needs no manifest_xml guard here. iOS-only call site; Android unchanged. ──
+    try:
+        from . import trust_engine
+        trust_engine.annotate_trust(results)
+    except Exception:
+        log.exception("[trust_engine] failed; report left without a trust score")
     # ── Phase 1.3: Confidence Engine — explainable per-finding confidence
     # (detection/ownership/evidence/context/exploitability/overall). Additive
     # only; reads owner_* from the Ownership Engine above. Never changes severity,
@@ -562,6 +747,14 @@ def analyze_ipa(ipa_path: str, scan_id: str, filename: str) -> dict:
     # and promote it into the legacy location fields so every surface shows the right
     # file. Runs BEFORE attack chains so chains reference corrected primaries. Mirror
     # of the Android placement. ──
+    # A finding on a BINARY plist carries a raw-bplist "line" that is a parse artifact (e.g.
+    # line 3), meaningless for the XML the source viewer actually shows. Re-map it to the
+    # decoded-XML line of the finding's own value so View Code scrolls to the real key. Runs
+    # BEFORE evidence_selection so the corrected line flows through the whole pipeline.
+    try:
+        _remap_decodable_plist_finding_lines(app_bundle, results, tmpdir)
+    except Exception:
+        log.exception("[plist] finding-line remap failed")
     try:
         from . import evidence_selection
         evidence_selection.annotate(results, platform="ios")
@@ -694,13 +887,27 @@ def _analyze_info_plist(plist_path: str, results: dict):
     })
 
     # ── Permissions ───────────────────────────────────────────────────────────
+    # Read the keys ACTUALLY present in this plist — the usage-description VALUE is the
+    # developer's own justification ("…uses your camera for taking photos."), which is what
+    # MobSF shows and what an analyst reviews. It was being discarded in favour of Beetle's
+    # static label, so the report said "Camera access" and never showed the app's reason.
     dangerous = []
     all_perms = []
     for key, (sev, desc) in IOS_PERMISSIONS.items():
         if key in plist:
             all_perms.append(key)
-            dangerous.append({"permission": key, "short_name": key.replace("NS", "").replace("UsageDescription", ""),
-                               "severity": sev, "description": desc})
+            reason = plist.get(key)
+            reason = reason.strip() if isinstance(reason, str) else ""
+            dangerous.append({
+                "permission": key,
+                "short_name": key.replace("NS", "").replace("UsageDescription", ""),
+                "severity": sev,
+                "description": desc,              # Beetle's classification of the capability
+                "usage_description": reason,      # the developer's declared reason (MobSF parity)
+                # An empty usage string is itself a finding-worthy smell: iOS requires a
+                # non-empty purpose string, and a blank one means the user sees no reason.
+                "reason_declared": bool(reason),
+            })
 
     results["permissions"]["all"]       = all_perms
     results["permissions"]["dangerous"] = dangerous
@@ -732,6 +939,95 @@ def _analyze_info_plist(plist_path: str, results: dict):
     # ── ATS Configuration ─────────────────────────────────────────────────────
     ats = plist.get("NSAppTransportSecurity", {})
     results["app_info"]["ats"] = ats
+    # Distinguish "ATS not declared" (iOS enforces it by default — the SECURE state) from
+    # "declared and weakened". An absent key is not the same as a false value, and the
+    # report must not imply the app configured something it never configured.
+    declared = "NSAppTransportSecurity" in plist
+    if not declared:
+        state, summary = "default", "Not declared — ATS enforced by default (HTTPS required)."
+    elif ats.get("NSAllowsArbitraryLoads"):
+        state, summary = "disabled", "NSAllowsArbitraryLoads = true — ATS fully disabled; cleartext HTTP allowed to any host."
+    elif ats.get("NSExceptionDomains"):
+        doms = list(ats.get("NSExceptionDomains") or {})
+        state = "exceptions"
+        summary = f"ATS enforced with {len(doms)} per-domain exception(s): {', '.join(doms[:5])}."
+    else:
+        state, summary = "enforced", "ATS declared and enforced; no arbitrary loads, no exception domains."
+
+    # The global relaxations, each reported by name. NSAllowsArbitraryLoadsInWebContent /
+    # ...InMedia are narrower than the blanket switch, so they are their own rows rather than
+    # being collapsed into "ATS disabled" — the report should say WHICH door is open.
+    global_flags = [
+        {"key": "NSAllowsArbitraryLoads",
+         "value": bool(ats.get("NSAllowsArbitraryLoads")),
+         "severity": "high" if ats.get("NSAllowsArbitraryLoads") else "info",
+         "meaning": ("Cleartext HTTP allowed to ANY host — ATS fully disabled."
+                     if ats.get("NSAllowsArbitraryLoads")
+                     else "Not set — HTTPS required for all connections.")},
+        {"key": "NSAllowsArbitraryLoadsInWebContent",
+         "value": bool(ats.get("NSAllowsArbitraryLoadsInWebContent")),
+         "severity": "medium" if ats.get("NSAllowsArbitraryLoadsInWebContent") else "info",
+         "meaning": ("WebView content may load over cleartext HTTP (app's own requests still "
+                     "protected)." if ats.get("NSAllowsArbitraryLoadsInWebContent")
+                     else "Not set — WebView content must use HTTPS.")},
+        {"key": "NSAllowsArbitraryLoadsForMedia",
+         "value": bool(ats.get("NSAllowsArbitraryLoadsForMedia")),
+         "severity": "medium" if ats.get("NSAllowsArbitraryLoadsForMedia") else "info",
+         "meaning": ("AV media may load over cleartext HTTP."
+                     if ats.get("NSAllowsArbitraryLoadsForMedia")
+                     else "Not set — media must use HTTPS.")},
+        {"key": "NSAllowsLocalNetworking",
+         "value": bool(ats.get("NSAllowsLocalNetworking")),
+         "severity": "info",     # local-network exemption is not an internet exposure
+         "meaning": ("Local-network (.local / literal IP) connections exempt from ATS."
+                     if ats.get("NSAllowsLocalNetworking")
+                     else "Not set.")},
+    ]
+
+    # Per-exception-domain rows. An exception that permits INSECURE HTTP loads is the real
+    # weakness; one that merely lowers the TLS floor or disables forward secrecy is weaker but
+    # still a downgrade, so each is scored on what it actually relaxes.
+    domain_rows = []
+    for domain, cfg in (ats.get("NSExceptionDomains") or {}).items():
+        cfg = cfg if isinstance(cfg, dict) else {}
+        insecure = bool(cfg.get("NSExceptionAllowsInsecureHTTPLoads")
+                        or cfg.get("NSThirdPartyExceptionAllowsInsecureHTTPLoads"))
+        min_tls = str(cfg.get("NSExceptionMinimumTLSVersion")
+                      or cfg.get("NSThirdPartyExceptionMinimumTLSVersion") or "")
+        no_pfs = (cfg.get("NSExceptionRequiresForwardSecrecy") is False
+                  or cfg.get("NSThirdPartyExceptionRequiresForwardSecrecy") is False)
+        weak_tls = min_tls in ("TLSv1.0", "TLSv1.1")
+        if insecure:
+            sev, why = "high", "Allows cleartext HTTP to this domain."
+        elif weak_tls:
+            sev, why = "medium", f"Lowers the TLS floor to {min_tls}."
+        elif no_pfs:
+            sev, why = "medium", "Disables forward secrecy for this domain."
+        else:
+            sev, why = "info", "Exception declared but no insecure relaxation."
+        domain_rows.append({
+            "domain": domain,
+            "allows_insecure_http": insecure,
+            "includes_subdomains": bool(cfg.get("NSIncludesSubdomains")),
+            "minimum_tls": min_tls or "TLSv1.2 (default)",
+            "requires_forward_secrecy": not no_pfs,
+            "severity": sev,
+            "why": why,
+        })
+    domain_rows.sort(key=lambda d: {"high": 0, "medium": 1, "info": 2}[d["severity"]])
+
+    enforced = state in ("default", "enforced") and not any(
+        f["value"] for f in global_flags if f["severity"] != "info")
+    results["app_info"]["ats_state"] = {
+        "declared": declared, "state": state, "summary": summary,
+        "enforced": enforced,
+        "allows_arbitrary_loads": bool(ats.get("NSAllowsArbitraryLoads")),
+        "exception_domains": list(ats.get("NSExceptionDomains") or {}),
+        "global_flags": global_flags,
+        "domains": domain_rows,
+        "posture": ("ATS enforced" if enforced else
+                    ("ATS disabled" if ats.get("NSAllowsArbitraryLoads") else "ATS weakened")),
+    }
 
     if ats.get("NSAllowsArbitraryLoads"):
         results["findings"].append({
@@ -864,29 +1160,238 @@ def _analyze_macho(binary_path: str, results: dict):
 
 
 # ─── Binary strings scan ──────────────────────────────────────────────────────
-def _scan_binary_strings(binary_path: str, results: dict, base_dir: str = ""):
-    try:
-        with open(binary_path, "rb") as f:
-            raw = f.read()
-        text = printable_text(raw)
-        seen = {f"{s['name']}:{s['value']}" for s in results["secrets"]}
-        rel_path = relativize_path(binary_path, base_dir) if base_dir else binary_path
-        for s in scan_text_for_secrets(text, rel_path):
-            key = f"{s['name']}:{s['value']}"
-            if key not in seen:
-                seen.add(key)
-                results["secrets"].append(s)
-    except Exception:
-        pass
+_MACHO_MAGIC = (
+    b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",   # 32/64-bit big-endian
+    b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",   # 32/64-bit little-endian
+    b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",   # fat/universal
+)
+_MAX_BINARIES = 40                  # matches lief_analyzer.analyze_all_macho's cap
+_MAX_BINARY_BYTES = 64 * 1024 * 1024
+
+
+def _iter_macho_binaries(app_bundle: str):
+    """Yield every Mach-O in the .app bundle — main executable, Frameworks/*.framework/*,
+    and *.dylib. Identified by magic bytes (these files are extension-less), so this needs
+    no LIEF and no second full walk beyond this one."""
+    count = 0
+    for root, _dirs, files in os.walk(app_bundle):
+        for fn in sorted(files):
+            full = os.path.join(root, fn)
+            try:
+                if os.path.getsize(full) < 256:
+                    continue
+                with open(full, "rb") as f:
+                    if f.read(4) not in _MACHO_MAGIC:
+                        continue
+            except OSError:
+                continue
+            yield full
+            count += 1
+            if count >= _MAX_BINARIES:
+                return
+
+
+def _remap_decodable_plist_finding_lines(app_bundle: str, results: dict, base_dir: str = "") -> None:
+    """For a finding whose evidence is a DECODABLE binary plist, set its line/snippet to the
+    decoded-XML line of the finding's own value — so View Code scrolls to the real key instead
+    of the meaningless raw-bplist line. Renders the same XML the file server shows (plistlib
+    FMT_XML), so the line the finding declares matches the line the viewer displays.
+
+    Purely a location correction: never changes severity, ownership, category or finding count.
+    """
+    import plistlib
+    findings = results.get("findings") or []
+    if not app_bundle or not findings:
+        return
+    _xml_cache: dict[str, list] = {}
+
+    def _xml_lines(rel: str):
+        """Decoded-XML lines for a plist, or None. Mirrors decompiler._maybe_decode_plist
+        EXACTLY (decode a binary bplist OR any .plist — the file server round-trips XML plists
+        to canonical XML too), so the line numbers computed here match the XML the viewer
+        actually renders. RUN 20 only handled bplist magic; a decodable XML plist rendered
+        canonicalized in the viewer but was never remapped — this generalizes it."""
+        if rel in _xml_cache:
+            return _xml_cache[rel]
+        # Finding file_path is relative to the scan extraction root (base_dir/tmpdir).
+        if base_dir and not os.path.isabs(rel):
+            full = os.path.join(base_dir, rel)
+        elif os.path.isabs(rel):
+            full = rel
+        else:
+            full = os.path.join(app_bundle, rel)
+        lines = None
+        try:
+            with open(full, "rb") as f:
+                head = f.read(6)
+            if head[:6] == b"bplist" or rel.lower().endswith(".plist"):
+                with open(full, "rb") as f:
+                    xml = plistlib.dumps(plistlib.load(f), fmt=plistlib.FMT_XML).decode("utf-8", "replace")
+                lines = xml.split("\n")
+        except Exception:
+            lines = None
+        _xml_cache[rel] = lines
+        return lines
+
+    def _anchor(rel: str, tokens: list):
+        """(1-based line, stripped text) of the first token found in rel's decoded XML, or None."""
+        lines = _xml_lines(rel)
+        if not lines:
+            return None
+        for token in tokens:
+            for i, line in enumerate(lines, 1):
+                if token in line:
+                    return (i, line.strip())
+        return None
+
+    for f in findings:
+        # Anchor tokens = the value carried in the finding (title tail after an em/en dash or
+        # colon, or the snippet). Search the decoded XML for the most specific one.
+        title = str(f.get("title") or "")
+        cand = []
+        for sep in (" — ", " – ", " - ", ": "):
+            if sep in title:
+                cand.append(title.split(sep, 1)[1].strip())
+        if f.get("snippet"):
+            cand.append(str(f["snippet"]).strip())
+        cand = [c for c in cand if len(c) >= 4]
+
+        # (1) Top-level finding location, if it is a decodable plist.
+        fp = str(f.get("file_path") or "")
+        if fp.lower().endswith(".plist") and _xml_lines(fp) is not None:
+            hit = _anchor(fp, cand) if cand else None
+            if hit:
+                f["line"] = hit[0]
+                f["snippet"] = hit[1][:240]
+            else:
+                # No anchor — the raw bplist line is an artifact; clear it so the viewer
+                # content-searches / renders without scrolling to a wrong line.
+                f["line"] = 0
+
+        # (2) EVERY plist file_evidence entry — RUN 20 fixed only f["line"] and left these at
+        # the raw-bplist artifact line (e.g. [3]). buildEvidence() (frontend) reads file_evidence
+        # BEFORE the top-level location, so a stale [3] made View Code land on the wrong line even
+        # though f["line"] was already 32. Remap each to ITS own decoded-XML line, or clear it.
+        for e in f.get("file_evidence") or []:
+            ep = str((e or {}).get("path") or "")
+            if not ep.lower().endswith(".plist") or _xml_lines(ep) is None:
+                continue
+            ehit = _anchor(ep, cand) if cand else None
+            if ehit:
+                e["lines"] = [ehit[0]]
+                # Overwrite any existing snippet: for a bplist it is a raw-bytes dump
+                # ("bplist00…"), meaningless in the decoded XML the viewer shows. Replace it
+                # with the decoded-XML line so the evidence card and the scroll target agree.
+                e["snippet"] = ehit[1][:240]
+            else:
+                e["lines"] = []
+
+
+def _record_binary_format_files(app_bundle: str, results: dict, base_dir: str = "") -> None:
+    """Record every file in the bundle that is OPAQUE BINARY — no viewable source.
+
+    The evidence view consumes this set to render a "binary" card (hiding View Source) instead
+    of file:line, so it must contain ONLY files a reader genuinely cannot view:
+
+      * Mach-O binaries — a rule match indexes the extracted-strings listing, not a source line.
+      * A binary plist ONLY IF plistlib cannot decode it. A DECODABLE bplist is VIEWABLE: the
+        file server (decompiler._maybe_decode_plist) renders it as readable XML, so a finding on
+        it (e.g. cloud_firebase_storage_bucket on GoogleService-Info.plist) must show that source,
+        NOT a "Binary Property List" card. Only a non-decodable blob (e.g. embedded.mobileprovision,
+        a CMS/PKCS#7 container) is truly opaque. This mirrors the file server exactly — one
+        definition of "viewable", so the finding card and the source viewer never disagree.
+
+    Detected by content, not extension — an IPA's Info.plist may be XML or binary.
+    """
+    if not app_bundle or not os.path.isdir(app_bundle):
+        return
+    import plistlib
+    found: list[str] = []
+    for root, _dirs, files in os.walk(app_bundle):
+        for fn in files:
+            full = os.path.join(root, fn)
+            try:
+                if os.path.getsize(full) < 8:
+                    continue
+                with open(full, "rb") as f:
+                    head = f.read(8)
+            except OSError:
+                continue
+            if head[:4] in _MACHO_MAGIC:
+                found.append(relativize_path(full, base_dir) if base_dir else full)
+            elif head == b"bplist00":
+                # A bplist that decodes is viewable (rendered as XML) — not binary evidence.
+                try:
+                    with open(full, "rb") as f:
+                        plistlib.load(f)
+                    continue  # decodable -> viewable, skip
+                except Exception:
+                    found.append(relativize_path(full, base_dir) if base_dir else full)
+    if found:
+        results["binary_evidence_files"] = sorted(set(found))
+
+
+def _scan_binary_strings(app_bundle: str, results: dict, base_dir: str = ""):
+    """Dump printable strings from every Mach-O and harvest secrets + URLs + IPs.
+
+    URLs/IPs are stashed on results["_binary_endpoints"] / ["_binary_ip_hits"] rather than
+    merged here: results["endpoints"]/["ips"] are not populated until the thread pool in
+    analyze_ipa returns, and merging early would just be overwritten.
+    """
+    if not app_bundle or not os.path.isdir(app_bundle):
+        return
+    seen_secrets = {f"{s['name']}:{s['value']}" for s in results.get("secrets") or []}
+    urls: set[str] = set()
+    ip_hits: dict[tuple, dict] = {}
+    # Tracker markers for SDKs that are STATICALLY LINKED into a binary rather than shipped as a
+    # framework — Firebase Analytics is linked straight into Runner in this app, so a
+    # framework-only check would miss it entirely. Reuses this walk; no extra pass.
+    from .tracker_db import ios_tracker_markers
+    _markers = ios_tracker_markers()
+    marker_hits: set[str] = set()
+    # Emails live in the Dart AOT blob (App.framework/App) — the ONE real address in this app,
+    # service.coord@cvx.com, is in there, alongside 44 Dart-symbol lookalikes. Harvested here so
+    # the Strings section can filter them; no extra pass.
+    from .strings_section import EMAIL_RE as _EMAIL_RE
+    email_hits: set[str] = set()
+
+    for binary_path in _iter_macho_binaries(app_bundle):
+        try:
+            with open(binary_path, "rb") as f:
+                raw = f.read(_MAX_BINARY_BYTES)
+            text = printable_text(raw)
+            rel_path = relativize_path(binary_path, base_dir) if base_dir else binary_path
+
+            for s in scan_text_for_secrets(text, rel_path):
+                key = f"{s['name']}:{s['value']}"
+                if key not in seen_secrets:
+                    seen_secrets.add(key)
+                    results.setdefault("secrets", []).append(s)
+
+            urls.update(endpoint_intel.extract_urls_from_text(text))
+            for hit in network_intel.extract_ips_from_text(text, rel_path):
+                ip_hits.setdefault((hit["ip"], hit["file_path"]), hit)
+            marker_hits.update(m for m in _markers if m in text)
+            email_hits.update(_EMAIL_RE.findall(text))
+        except Exception:
+            log.exception("[ios] binary string scan failed for %s", binary_path)
+
+    results["_binary_endpoints"] = sorted(urls)
+    results["_binary_ip_hits"] = list(ip_hits.values())
+    results["_binary_tracker_markers"] = sorted(marker_hits)
+    results["_binary_emails"] = sorted(email_hits)
 
 
 # ─── Endpoint extraction ──────────────────────────────────────────────────────
 def _extract_endpoints(tmpdir: str, results: dict, *, corpus: SourceCorpus = None):
     # Phase 2.5.6: broad, multi-source extraction shared with Android via
     # endpoint_intel (Swift/ObjC/plist/json/js + ws/wss + custom-scheme deep links).
-    from . import endpoint_intel
+    # verbose=True: the iOS bundle is compiled — plists, flutter_assets and framework
+    # resources carry URLs as bare literals with no call site to prove, so the
+    # called-only default (right for Android's decompiled Java/Kotlin source) would
+    # drop nearly all of them. iOS-only; Android's extract_endpoints call is untouched.
     results["endpoints"] = endpoint_intel.extract_endpoints(
-        tmpdir, corpus=corpus or SourceCorpus(), results=results)
+        tmpdir, corpus=corpus or SourceCorpus(), results=results, verbose=True)
 
 
 # ─── Framework detection ──────────────────────────────────────────────────────
@@ -895,19 +1400,47 @@ def _detect_framework(app_bundle: str, results: dict):
         return
 
     files = set()
-    for root, _, fnames in os.walk(app_bundle):
+    dirs_set = set()
+    for root, dnames, fnames in os.walk(app_bundle):
+        for d in dnames:
+            dirs_set.add(d.lower())
         for f in fnames:
             files.add(f.lower())
 
     fw_type  = "native"
     details  = []
 
-    # Flutter
-    if "flutter_assets" in os.listdir(app_bundle) if os.path.exists(app_bundle) else []:
+    # Flutter — RECURSIVE detection. `flutter_assets` is normally nested under
+    # Frameworks/App.framework/ (and plugins under Frameworks/*.framework/), so a
+    # top-level os.listdir misses it and the app is mislabeled "native".
+    _FLUTTER_DIRS  = {"flutter_assets", "app.framework", "flutter.framework"}
+    _FLUTTER_FILES = {"libapp.dylib", "libflutter.dylib"}
+    # Well-known Flutter plugin Pods (ship as *.framework in Frameworks/) — their
+    # presence is a strong Flutter signal even without the App/Flutter framework dirs.
+    _FLUTTER_PLUGIN_PODS = {
+        "webview_flutter_wkwebview", "flutter_secure_storage", "image_picker_ios",
+        "path_provider_foundation", "shared_preferences_foundation", "url_launcher_ios",
+        "sqflite", "sqflite_darwin", "connectivity_plus", "package_info_plus",
+        "geolocator_apple", "google_maps_flutter_ios", "device_info_plus",
+        "flutter_plugin_android_lifecycle", "google_sign_in_ios", "firebase_core",
+    }
+
+    def _pod_name(d):  # a *.framework dir's pod name
+        return d[:-len(".framework")] if d.endswith(".framework") else d
+
+    plugin_hit = next((_pod_name(d) for d in dirs_set if _pod_name(d) in _FLUTTER_PLUGIN_PODS), None)
+    _flutter_dir_hit = dirs_set & _FLUTTER_DIRS
+    _flutter_file_hit = files & _FLUTTER_FILES
+    if _flutter_dir_hit or _flutter_file_hit or plugin_hit:
         fw_type = "flutter"
-        details.append("Flutter detected via flutter_assets directory")
+        why = []
+        if "flutter_assets" in dirs_set: why.append("flutter_assets directory")
+        if "app.framework" in dirs_set: why.append("Frameworks/App.framework")
+        if "flutter.framework" in dirs_set: why.append("Frameworks/Flutter.framework")
+        if _flutter_file_hit: why.append(", ".join(sorted(_flutter_file_hit)))
+        if plugin_hit: why.append(f"Flutter plugin pod ({plugin_hit})")
+        details.append("Flutter detected via " + "; ".join(why))
         results["findings"].append({
-            "rule_id":        "framework_flutter_detected",
             "rule_id":        "framework_flutter_detected",
             "title":          "Flutter Framework Detected",
             "severity":       "info",
@@ -991,22 +1524,38 @@ def _extract_ios_app_icon(app_bundle: str, plist_path: str, results: dict):
     if not app_bundle or not os.path.exists(app_bundle):
         return
 
-    def _emit(raw: bytes, src_path: str) -> bool:
-        if not raw or len(raw) > 1_500_000:
+    # Best candidate seen so far: (pixel_area, renderable_bytes, src_path, source).
+    # Every candidate is judged by what it ACTUALLY DECODES TO, never by its filename:
+    # the bundle's AppIcon PNGs are Apple CgBI (unrenderable until converted), and the
+    # plist-declared name is not necessarily the highest-resolution rendition.
+    best: list = []
+
+    def _consider(raw: bytes, src_path: str, source: str = "ipa") -> None:
+        std = renderable_image_bytes(raw)
+        if not std:
+            return
+        dims = png_dimensions(std) if std[:8] == PNG_SIG else None
+        if dims:
+            w, h = dims
+            if w != h or w < 20:        # an app icon is square
+                return
+            area = w * h
+        else:
+            area = 1                    # JPEG — keep, but never outrank a sized PNG
+        if not best or area > best[0][0]:
+            best[:] = [(area, std, src_path, source)]
+
+    def _emit_best() -> bool:
+        if not best:
             return False
-        # Quick PNG / JPEG magic sniff
-        is_png = raw[:8] == b"\x89PNG\r\n\x1a\n"
-        is_jpg = raw[:3] == b"\xff\xd8\xff"
-        if not (is_png or is_jpg):
-            return False
-        mime = "image/png" if is_png else "image/jpeg"
-        encoded = base64.b64encode(raw).decode("ascii")
-        results["app_info"]["icon_data"] = f"data:{mime};base64,{encoded}"
+        _area, std, src_path, source = best[0]
+        mime = "image/png" if std[:8] == PNG_SIG else "image/jpeg"
+        results["app_info"]["icon_data"] = f"data:{mime};base64,{base64.b64encode(std).decode('ascii')}"
         try:
             results["app_info"]["icon_path"] = os.path.relpath(src_path, app_bundle).replace("\\", "/")
         except ValueError:
             results["app_info"]["icon_path"] = os.path.basename(src_path)
-        results["app_info"]["icon_source"] = "ipa"
+        results["app_info"]["icon_source"] = source
         return True
 
     # (1) iTunesArtwork — present in older distribution formats
@@ -1014,8 +1563,7 @@ def _extract_ios_app_icon(app_bundle: str, plist_path: str, results: dict):
         candidate = os.path.join(os.path.dirname(app_bundle), artwork)
         if os.path.isfile(candidate):
             try:
-                if _emit(Path(candidate).read_bytes(), candidate):
-                    return
+                _consider(Path(candidate).read_bytes(), candidate)
             except Exception:
                 pass
 
@@ -1056,36 +1604,139 @@ def _extract_ios_app_icon(app_bundle: str, plist_path: str, results: dict):
                 except OSError:
                     continue
 
-    # Try explicit candidates first (plist-declared).
+    # Consider every plist-declared candidate and every heuristic PNG — then pick the
+    # highest-resolution one that actually decodes (see _consider). Previously the first
+    # readable candidate won, which on this app meant the iPad 76x76@2x rendition.
     seen = set()
     for candidate in icon_candidates:
         if candidate in seen or not os.path.isfile(candidate):
             continue
         seen.add(candidate)
         try:
-            if _emit(Path(candidate).read_bytes(), candidate):
-                return
+            _consider(Path(candidate).read_bytes(), candidate)
         except Exception:
             continue
 
-    # Then largest heuristic match.
     for _, path in sorted(heuristic, reverse=True):
         if path in seen:
             continue
+        seen.add(path)
         try:
-            if _emit(Path(path).read_bytes(), path):
-                return
+            _consider(Path(path).read_bytes(), path)
         except Exception:
             continue
 
-    # (5) Record why icon couldn't be extracted — e.g. icon lives in Assets.car
+    # (5) Assets.car — modern Xcode/Flutter builds compile the AppIcon asset-catalog into
+    # Assets.car and may ship NO loose PNGs. Carve the embedded PNG renditions directly
+    # (no actool/macOS needed). Considered alongside the loose files, not only as a last
+    # resort, so the largest rendition wins wherever it lives.
     assets_car = os.path.join(app_bundle, "Assets.car")
+    carved = None
     if os.path.isfile(assets_car):
+        try:
+            carved = best_icon_png_from_assets_car(Path(assets_car).read_bytes())
+        except Exception:
+            carved = None
+        if carved:
+            _consider(carved, assets_car, source="assets_car")
+
+    if _emit_best():
+        return
+
+    # Nothing decodable anywhere — record WHY instead of failing silently, keeping the
+    # Assets.car diagnosis distinct from "the bundle simply has no icon".
+    if os.path.isfile(assets_car) and not carved:
         results["app_info"]["icon_source"] = "assets_car_unsupported"
         results["app_info"]["icon_note"] = (
-            "App icon is embedded in compiled Assets.car. "
+            "App icon is embedded in compiled Assets.car and could not be carved. "
             "Install `assetutil` (macOS) or `acextract` to extract PNGs."
         )
+    else:
+        results["app_info"]["icon_source"] = "unavailable"
+        results["app_info"]["icon_note"] = (
+            "No renderable app icon found: the bundle ships no standard PNG/JPEG icon, and "
+            "no CgBI (Apple-crushed) PNG could be decoded."
+        )
+
+
+# ─── Firebase GoogleService-Info.plist config extraction ─────────────────────
+# Deterministically surface the Firebase client config (API_KEY / CLIENT_ID) as
+# INFO application-config secrets. The generic AIza pattern already catches API_KEY,
+# but CLIENT_ID (an OAuth client id, not an AIza key) is matched by NO pattern, so it
+# was invisible. A dedicated structured parse guarantees both keys render (INFO, like
+# the Android Firebase key) regardless of how the plist is stored (XML or binary) and
+# is dedup-safe (a value already present in results["secrets"] is not re-emitted).
+# iOS-only call site; Android is untouched.
+_FIREBASE_PLIST_KEYS = (
+    # plist key,       secret title,               rule_id / type,          confidence
+    ("API_KEY",        "Google API Key",           "secret_google_api_key",  90),
+    ("CLIENT_ID",      "Google OAuth Client ID",   "secret_google_client_id", 80),
+    ("GOOGLE_APP_ID",  "Firebase App ID",          "secret_firebase_app_id",  75),
+)
+
+
+def _secret_has_evidence(s: dict) -> bool:
+    """Mirror of the evidence gate in secret_intel._build_canonical (secret_intel.py:747):
+    a secret without path AND line AND snippet is dropped there ("no evidence, no finding").
+    """
+    path = s.get("full_path") or s.get("file_path") or s.get("source")
+    return bool(path and s.get("line") and s.get("snippet"))
+
+
+def _extract_firebase_plist_config(app_bundle: str, results: dict) -> None:
+    if not app_bundle or not os.path.isdir(app_bundle):
+        return
+    added = 0
+    for root, _dirs, files in os.walk(app_bundle):
+        for fname in files:
+            if fname != "GoogleService-Info.plist":
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, "rb") as f:
+                    plist = plistlib.load(f)
+            except Exception:
+                continue
+            rel = os.path.relpath(fpath, os.path.dirname(app_bundle)).replace("\\", "/")
+            for key, title, rule_id, conf in _FIREBASE_PLIST_KEYS:
+                val = plist.get(key)
+                if not isinstance(val, str) or not val.strip():
+                    continue
+                val = val.strip()
+                # GoogleService-Info.plist is a BINARY plist, so the generic scanners
+                # extract the value but cannot quote a source line — they emit it with an
+                # empty snippet, and the shared evidence gate then drops it silently. A
+                # blind "already seen -> skip" therefore SUPPRESSED the key entirely: the
+                # only copy with real evidence (this one) was never added. So: keep a
+                # generic hit that HAS evidence, but replace evidence-less duplicates,
+                # which would not survive the gate anyway.
+                prior = [s for s in results.get("secrets") or []
+                         if str(s.get("value") or "").strip() == val]
+                if any(_secret_has_evidence(s) for s in prior):
+                    continue  # already surfaced WITH evidence — do not duplicate
+                if prior:
+                    results["secrets"] = [s for s in results["secrets"]
+                                          if str(s.get("value") or "").strip() != val]
+                results.setdefault("secrets", []).append({
+                    "title": title, "name": title,
+                    "severity": "info", "category": "API Key",
+                    "description": (f"{title} from GoogleService-Info.plist ({key}). Firebase "
+                                    "client-side identifiers are shipped in every app and are not "
+                                    "confidential; surfaced for inventory."),
+                    "recommendation": ("Restrict the key in the Google Cloud console (API + app "
+                                       "restrictions). No action if already restricted."),
+                    "file_path": rel, "line": 1,
+                    "snippet": f"{key} = {val[:6]}…",
+                    "confidence": conf, "exploitability": 20,
+                    "validation_status": "detected",
+                    "rule_id": rule_id, "evidence_type": "plist_key",
+                    "value": val, "source": "firebase_plist",
+                    "cwe": "CWE-200", "masvs": "MASVS-STORAGE-1", "owasp": "M1",
+                    "provenance": "beetle_native", "kind": "client_key",
+                })
+                added += 1
+    if added:
+        results.setdefault("scan_metrics", {})["firebase_plist_secrets"] = added
 
 
 # ─── embedded.mobileprovision certificate parsing ────────────────────────────
@@ -1126,6 +1777,108 @@ def _parse_mobileprovision_certs(raw: bytes) -> list[dict]:
             continue
         result.append(entry)
     return result
+
+
+def _rfc4514_attrs(dn: str) -> dict:
+    """Parse an RFC4514 distinguished-name string (as produced by
+    x509 .rfc4514_string()) into {CN, O, OU, C, ...}. First value per type wins.
+
+    Splits on unescaped commas only (rfc4514 escapes literal commas as '\\,').
+    """
+    attrs: dict[str, str] = {}
+    if not dn:
+        return attrs
+    parts, buf, esc = [], [], False
+    for ch in dn:
+        if esc:
+            buf.append(ch)
+            esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == ",":
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    parts.append("".join(buf))
+    for p in parts:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            k = k.strip().upper()
+            if k and k not in attrs:
+                attrs[k] = v.strip()
+    return attrs
+
+
+def _ios_cert_date(iso: str) -> str:
+    """Normalize an ISO cert timestamp (e.g. '2024-01-01T00:00:00Z') to YYYY-MM-DD."""
+    if not iso:
+        return ""
+    return str(iso).split("T", 1)[0]
+
+
+def _ios_cert_expired(not_after_iso: str) -> bool | None:
+    """True/False if the leaf cert not_after is in the past/future; None if unknown.
+
+    Derived from the parsed date (evidence), never assumed.
+    """
+    if not not_after_iso:
+        return None
+    from datetime import datetime, timezone
+    s = str(not_after_iso).rstrip("Z")
+    try:
+        dt = datetime.fromisoformat(s)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt < datetime.now(timezone.utc)
+
+
+def _build_ios_certificate(results: dict) -> None:
+    """Populate results["certificate"] for iOS from the already-parsed signing
+    certificates + provisioning fields in results["app_info"].
+
+    Leaves results["certificate"] unset when the IPA carries no signing/provisioning
+    data (unsigned / stripped) — the report then shows "No certificate data", the same
+    as before. Additive; never overwrites an existing certificate dict.
+    """
+    if results.get("certificate"):
+        return
+    ai = results.get("app_info", {}) or {}
+    certs = ai.get("signing_certificates") or []
+    team          = ai.get("provisioning_team", "")
+    prov_type     = ai.get("provisioning_type", "")
+    prov_profile  = ai.get("provisioning_profile", "")
+    prov_expiry   = ai.get("provisioning_expiry", "")
+    if not certs and not (team or prov_type or prov_profile):
+        return  # nothing was parsed → no certificate section
+
+    leaf = certs[0] if certs else {}
+    subject = _rfc4514_attrs(leaf.get("subject", ""))
+    issuer  = _rfc4514_attrs(leaf.get("issuer", ""))
+    not_after = leaf.get("not_after", "")
+
+    cert = {
+        "available": True,
+        "platform": "ios",
+        "subject": subject,
+        "issuer": issuer,
+        "signing_identity": subject.get("CN", ""),
+        "team": team,
+        "provisioning_type": prov_type,
+        "provisioning_profile": prov_profile,
+        "provisioning_expiry": prov_expiry,
+        "valid_from": _ios_cert_date(leaf.get("not_before", "")),
+        "valid_to": _ios_cert_date(not_after),
+        "serial": leaf.get("serial", ""),
+        "sha1_fingerprint": leaf.get("sha1", ""),
+        "sha256_fingerprint": leaf.get("sha256", ""),
+    }
+    expired = _ios_cert_expired(not_after)
+    if expired is not None:
+        cert["expired"] = expired
+    results["certificate"] = cert
 
 
 # ─── Entitlements ─────────────────────────────────────────────────────────────
@@ -1330,7 +2083,81 @@ _KNOWN_FRAMEWORKS = {
     "SquareReaderSDK":  ("payments",   "high",   "Square Reader SDK — PCI scope, handles card data"),
     "TwilioVoice":      ("comms",      "medium", "Twilio Voice SDK"),
     "XCTest":           ("debug",      "high",   "XCTest framework — should not ship in release build"),
+
+    # ── Flutter runtime — NOT third-party SDKs ────────────────────────────────
+    # "App" is the app's OWN compiled Dart code (the AOT blob) and "Flutter" is the
+    # engine. Listing them as unknown third-party dependencies misattributes the app's
+    # own code to a vendor, so they are categorised as runtime and never flagged.
+    "App":     ("runtime", "info", "Dart AOT blob — the app's OWN compiled code, not a third-party SDK"),
+    "Flutter": ("runtime", "info", "Flutter engine runtime"),
+
+    # ── Firebase / Google (this app ships 13 Firebase modules) ────────────────
+    "FirebaseCore":               ("backend",   "info", "Firebase core SDK"),
+    "FirebaseCoreExtension":      ("backend",   "info", "Firebase core extension"),
+    "FirebaseCoreInternal":       ("backend",   "info", "Firebase core internals"),
+    "FirebaseSharedSwift":        ("backend",   "info", "Firebase shared Swift support"),
+    "FirebaseInstallations":      ("backend",   "info", "Firebase Installations — per-install identifier"),
+    "FirebaseRemoteConfig":       ("backend",   "info", "Firebase Remote Config — server-driven config"),
+    "FirebaseRemoteConfigInterop":("backend",   "info", "Firebase Remote Config interop"),
+    "FirebaseABTesting":          ("analytics", "info", "Firebase A/B Testing"),
+    "FirebaseSessions":           ("analytics", "info", "Firebase Sessions — session telemetry"),
+    "FirebasePerformance":        ("analytics", "info", "Firebase Performance Monitoring"),
+    "FirebaseCrashlytics":        ("analytics", "info", "Crashlytics crash reporting"),
+    "GoogleDataTransport":        ("utility",   "info", "Google data transport — telemetry delivery"),
+    "GoogleUtilities":            ("utility",   "info", "Google shared utilities"),
+    "FBLPromises":                ("utility",   "info", "Google FBLPromises — async primitives"),
+    "Promises":                   ("utility",   "info", "PromisesSwift — async primitives"),
+    "nanopb":                     ("utility",   "info", "nanopb — embedded protobuf codec"),
+
+    # ── Security / anti-tamper ────────────────────────────────────────────────
+    "IOSSecuritySuite":                 ("security", "info", "iOS Security Suite — jailbreak / debugger / hook detection"),
+    "flutter_jailbreak_detection_plus": ("security", "info", "Flutter jailbreak-detection plugin"),
+
+    # ── Flutter plugins present in this bundle ────────────────────────────────
+    "webview_flutter_wkwebview":     ("webview",  "info", "Flutter WKWebView plugin — renders web content in-app"),
+    "flutter_secure_storage":        ("storage",  "info", "Flutter secure storage — Keychain-backed"),
+    "shared_preferences_foundation": ("storage",  "info", "Flutter shared preferences — NSUserDefaults-backed"),
+    "path_provider_foundation":      ("storage",  "info", "Flutter path provider — filesystem locations"),
+    "connectivity_plus":             ("network",  "info", "Flutter connectivity state plugin"),
+    "network_speed":                 ("network",  "info", "Network speed measurement plugin"),
+    "camera_avfoundation":           ("media",    "info", "Flutter camera plugin (AVFoundation)"),
+    "image_picker_ios":              ("media",    "info", "Flutter image picker — photo library / camera"),
+    "just_audio":                    ("media",    "info", "Flutter audio playback plugin"),
+    "audio_session":                 ("media",    "info", "Flutter audio session management"),
+    "nfc_manager":                   ("nfc",      "info", "Flutter NFC plugin"),
+    "qr_code_scanner_plus":          ("scanning", "info", "Flutter QR / barcode scanner"),
+    "snowfinch_logger":              ("logging",  "info", "Snowfinch logger (vendor plugin)"),
+    "snowfinch_app_logger":          ("logging",  "info", "Snowfinch app logger (vendor plugin)"),
+    "package_info_plus":             ("platform", "info", "Flutter package info plugin"),
+    "device_info_plus":              ("platform", "info", "Flutter device info plugin"),
+    "battery_plus":                  ("platform", "info", "Flutter battery state plugin"),
+    "flutter_timezone":              ("platform", "info", "Flutter timezone plugin"),
+    "fluttertoast":                  ("platform", "info", "Flutter toast/UI plugin"),
 }
+
+# Family fallbacks — so a Firebase/Google module NOT named above is still categorised
+# instead of landing in "unknown". Checked only after an exact-name miss; a genuinely
+# unrecognised pod still reports "unknown", which is the honest answer.
+_FRAMEWORK_PREFIXES = (
+    ("Firebase", ("backend",   "info", "Firebase module")),
+    ("Google",   ("utility",   "info", "Google SDK module")),
+    ("GTM",      ("utility",   "info", "Google Tag Manager module")),
+)
+
+
+def _classify_framework(name: str):
+    """(category, severity, description, known) for an embedded framework.
+
+    Exact name first, then family prefix. Anything still unmatched stays "unknown" —
+    RUN 7 is about categorising what this bundle ACTUALLY ships, not about guessing.
+    """
+    info = _KNOWN_FRAMEWORKS.get(name)
+    if info:
+        return info[0], info[1], info[2], True
+    for prefix, fallback in _FRAMEWORK_PREFIXES:
+        if name.startswith(prefix):
+            return fallback[0], fallback[1], f"{fallback[2]} ({name})", True
+    return "unknown", "info", "", False
 
 def _analyze_embedded_frameworks(app_bundle: str, results: dict):
     frameworks_dir = os.path.join(app_bundle, "Frameworks")
@@ -1343,15 +2170,16 @@ def _analyze_embedded_frameworks(app_bundle: str, results: dict):
         try:
             for item in os.listdir(search_dir):
                 name = item.replace(".framework", "").replace(".appex", "")
-                info = _KNOWN_FRAMEWORKS.get(name)
+                category, severity, description, known = _classify_framework(name)
                 entry = {"name": name, "path": f"{os.path.basename(search_dir)}/{item}"}
-                if info:
-                    entry.update({"category": info[0], "severity": info[1], "description": info[2], "known": True})
-                else:
-                    entry.update({"category": "unknown", "severity": "info", "description": "", "known": False})
+                entry.update({"category": category, "severity": severity,
+                              "description": description, "known": known})
                 found.append(entry)
 
-                # Flag high-severity known frameworks as findings
+                # Flag high-severity known frameworks as findings. Every framework added in
+                # RUN 7 is severity "info" by design: categorising a dependency must not
+                # invent a finding about it.
+                info = _KNOWN_FRAMEWORKS.get(name)
                 if info and info[1] in ("high", "medium"):
                     results["findings"].append({
                         "rule_id":        "ios_third_party_framework",

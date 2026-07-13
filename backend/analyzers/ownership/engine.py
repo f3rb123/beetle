@@ -40,6 +40,21 @@ _ROOT_SEGMENTS = {
 _SMALI_CLASSES_RE = re.compile(r"^smali_classes\d+$")
 _FRAMEWORK_PATH_RE = re.compile(r"/([A-Za-z0-9_+\-]+)\.framework/", re.I)
 _POD_PATH_RE = re.compile(r"/Pods/([A-Za-z0-9_+\-]+)/", re.I)
+
+# iOS: file extensions scanned as TEXT (real, reviewable source). Anything else in
+# an .app bundle is a COMPILED binary whose reported "line" is a string-table offset,
+# not a source line — so a hash/crypto/code-pattern token there is an offset-only
+# match, not app source. Mirror of Android's libapp.so (Dart AOT) treatment.
+_IOS_TEXT_EXTS = frozenset({
+    ".swift", ".m", ".mm", ".h", ".c", ".cc", ".cpp", ".js", ".jsx", ".ts", ".tsx",
+    ".json", ".plist", ".xml", ".strings", ".txt", ".html", ".css", ".storyboard", ".xib",
+})
+# A binary string-scan evidence path may carry a trailing ":<offset>" ("Runner:7173",
+# "FirebaseCrashlytics:7173") — a string-table offset, not a source line.
+_OFFSET_SUFFIX_RE = re.compile(r":\d+$")
+# Dart AOT snapshot binaries (iOS Flutter): the app's compiled host executable and
+# the Dart/Flutter runtime dylibs. Names are matched case-insensitively.
+_IOS_AOT_BINARY_NAMES = frozenset({"libapp.dylib", "libflutter.dylib", "app"})
 # Trees that are never a Java/Kotlin package root (after source roots are stripped).
 # Deliberately does NOT include real package roots like "kotlin"/"okhttp3".
 _NON_PACKAGE_ROOTS = {"res", "assets", "lib", "meta-inf", "build", "fabric"}
@@ -155,7 +170,24 @@ def derive_signals(finding: CanonicalFinding) -> dict:
         "class_simple": class_simple,
         "file_path": fpath,
         "platform": (finding.platform or "unknown").lower(),
+        "evidence_type": str(finding.evidence_type or "").lower(),
     }
+
+
+# Evidence that is AUTHORITATIVE inside a compiled binary, so the compiled-binary demotion
+# below must not apply to it. Both members are STRUCTURAL FACTS read out of the Mach-O itself
+# — a dynamic-import-table entry proves the binary links that function; a protection flag is
+# read from the load commands / symbol table — not the offset-only string-table coincidence the
+# demotion exists to suppress.
+#
+# Deliberately keyed on the evidence KIND and nothing else. This is NOT "any high-confidence
+# binary finding": a code_pattern hit inside a Mach-O (the RUN 4 string-index class) is still
+# demoted, and test_exemption_is_narrow_not_confidence_based locks that.
+#
+# Safe for the Dart-AOT FP class because that class is suppressed BY CONTENT one layer earlier
+# (binary_protections keys on the _kDart*Snapshot* symbols), so no missing-canary/ARC finding is
+# ever emitted for App.framework/App to be re-promoted here.
+_AUTHORITATIVE_BINARY_EVIDENCE = frozenset({"imported_symbol", "binary_protection"})
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -257,6 +289,20 @@ class OwnershipEngine:
         path = sig["file_path"]
         if not path:
             return None
+        # iOS: a binary string-scan evidence path can be a BARE module name with an
+        # offset suffix ("FirebaseCrashlytics:7173") — it has no /Pods/ or .framework/
+        # context for the token matchers below. Synthesize the canonical Pods/<name>/
+        # form so a known pod/framework fingerprint (Firebase, …) still matches, and
+        # the generic pod fallback can name an otherwise-unknown bundled framework.
+        # iOS-only + only when the path is a bare name (no separators), so Android and
+        # real iOS paths are untouched.
+        if sig["platform"] == "ios" and "/" not in path and "\\" not in path:
+            bare = _OFFSET_SUFFIX_RE.sub("", path)
+            stem, bext = os.path.splitext(bare)
+            # Only a compiled/framework module normalizes to a pod — never a bare
+            # SOURCE file ("Crypto.swift"), which must keep its application ownership.
+            if stem and bext.lower() not in _IOS_TEXT_EXTS and stem.lower() not in ("app", "frameworks"):
+                path = f"/Pods/{stem}/"
         low = path.lower()
         for rec in self._path_records:
             if not self._platform_ok(rec["platform"], sig["platform"]):
@@ -289,6 +335,60 @@ class OwnershipEngine:
                 if _class_prefix_match(cls, pref):
                     return self._result_from_record(rec, signature=pref, stage=Stage.CLASS_SIGNATURE)
         return None
+
+    # ── stage 5.5: iOS Dart AOT / compiled-binary offset match ───────────────
+    @staticmethod
+    def _match_ios_binary(sig: dict) -> OwnershipResult | None:
+        """A hash/crypto/code-pattern hit inside a COMPILED binary in the app bundle
+        (the Dart AOT Mach-O — Payload/*.app/<exec>, libapp.dylib, App.framework/App —
+        or any bundled .dylib) is an offset-only string-table match, not reviewable
+        app source. Mirror Android's libapp.so treatment: classify it as a framework
+        so it is demoted (INFO/library), never a HIGH application finding.
+
+        Genuine app SOURCE (.swift/.m/.js/…) is NOT caught — it has a text extension
+        and falls through to the iOS application heuristic, keeping its ownership.
+        iOS-only; runs before the app-bundle heuristic. Android is never reached.
+        """
+        if sig["platform"] != "ios":
+            return None
+        # An imported-symbol hit is AUTHORITATIVE: the symbol is in the binary's dynamic
+        # import table, so the binary demonstrably links that function. That is not the
+        # offset-only string-table match this demotion targets, so it keeps its declared
+        # severity and app ownership. Everything else about a compiled binary — including
+        # the Dart-AOT protection-flag and string-index classes — still falls through and is
+        # demoted below. Narrow by design (see _AUTHORITATIVE_BINARY_EVIDENCE).
+        if sig.get("evidence_type") in _AUTHORITATIVE_BINARY_EVIDENCE:
+            return None
+        raw = sig["file_path"] or ""
+        if not raw:
+            return None
+        base = os.path.basename(_OFFSET_SUFFIX_RE.sub("", raw).replace("\\", "/"))
+        ext = os.path.splitext(base)[1].lower()
+        if ext in _IOS_TEXT_EXTS:
+            return None  # real, reviewable source/text → keep app ownership
+        low = raw.lower()
+        name = base.lower()
+        # Is this a compiled binary that lives in the app bundle / is a Dart-AOT dylib?
+        in_app_bundle = ".app/" in low or "/payload/" in low
+        is_dylib = ext in (".dylib", ".so", ".a")
+        is_aot_name = name in _IOS_AOT_BINARY_NAMES
+        if not (in_app_bundle or is_dylib or is_aot_name):
+            return None
+        aot = is_aot_name or is_dylib or "/frameworks/" in low
+        owner_name = "Flutter (Dart AOT snapshot)" if (is_aot_name or "libapp" in name) \
+            else ("Compiled binary" if not aot else "Bundled framework binary")
+        return OwnershipResult(
+            owner_type=OwnerType.OPEN_SOURCE_LIBRARY,
+            owner_name=owner_name,
+            owner_confidence=Confidence.EMBEDDED,
+            owner_reason=("Offset-only match inside a compiled Mach-O/AOT binary "
+                          "(no reviewable app source line); treated as framework, "
+                          "not an application finding — mirrors the Android libapp.so "
+                          "(Dart AOT) treatment."),
+            matched_rule="ios_compiled_binary",
+            matched_signature=base,
+            classification_stage=Stage.EMBEDDED_FRAMEWORK,
+            framework_name=owner_name)
 
     # ── stage 6: iOS application heuristic ───────────────────────────────────
     @staticmethod
@@ -346,6 +446,7 @@ class OwnershipEngine:
             lambda: self._match_application(sig, finding, ctx),
             lambda: self._match_path(sig),
             lambda: self._match_class(sig),
+            lambda: self._match_ios_binary(sig),
             lambda: self._match_ios_app(sig),
         ):
             res = stage()

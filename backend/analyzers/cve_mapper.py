@@ -767,6 +767,86 @@ def analyze_native_libs(binary_paths: Iterable[str]) -> dict:
     return out
 
 
+# ── Coverage assessment (RUN 14) ─────────────────────────────────────────────
+# "0 CVEs" is only a real negative if the scanner could actually have found one. Two ways it
+# silently cannot:
+#
+#   1. THE ECOSYSTEM IS NOT IN OSV. Every dependency in a Flutter/iOS app is a CocoaPod, and OSV
+#      has no CocoaPods ecosystem — so all 39 queries return empty BY CONSTRUCTION. Reporting
+#      that as "no known vulnerabilities" is a clean bill of health the scan never earned.
+#   2. THE VERSION IS A PLACEHOLDER. A Flutter plugin's framework Info.plist carries
+#      CFBundleShortVersionString "0.0.1", not its real pub version, so even a supported
+#      ecosystem could not match it.
+#
+# Rather than trust a hardcoded list of OSV ecosystems (which drifts, and which I would be
+# asserting from memory), this CANARY-TESTS each ecosystem at scan time: query a package/version
+# that is KNOWN to have advisories. If the canary comes back empty, that ecosystem is not
+# answering, and every 0 from it is UNASSESSABLE — not a negative.
+_OSV_CANARIES = {
+    "npm":       ("lodash", "4.17.15"),
+    "PyPI":      ("django", "2.2.0"),
+    "Pub":       ("http", "0.13.0"),
+    "Maven":     ("org.apache.logging.log4j:log4j-core", "2.14.1"),
+    "Go":        ("github.com/gin-gonic/gin", "1.6.0"),
+    "CocoaPods": ("Alamofire", "4.0.0"),
+    "":          ("openssl", "1.0.2"),          # generic / no-ecosystem search
+}
+_PLACEHOLDER_VERSIONS = frozenset({"0.0.1", "0.0.0", "1.0", "1.0.0", "", "unknown"})
+
+
+def ecosystem_answers(ecosystem: str) -> bool:
+    """True when OSV returns real advisories for a KNOWN-vulnerable canary in this ecosystem.
+
+    Cached like any other OSV query, so this costs one request per ecosystem per 24h.
+    """
+    canary = _OSV_CANARIES.get(ecosystem)
+    if not canary:
+        return False
+    try:
+        return bool(_query_osv(canary[0], canary[1], ecosystem))
+    except Exception:
+        return False
+
+
+def assess_coverage(components: list[dict]) -> dict:
+    """Is this scan's "0 CVEs" a real negative, or an empty pass? Say so explicitly."""
+    ecosystems: dict[str, dict] = {}
+    placeholder = 0
+    for c in components or []:
+        eco = str(c.get("ecosystem") or "")
+        row = ecosystems.setdefault(eco, {"components": 0, "placeholder_versions": 0})
+        row["components"] += 1
+        if str(c.get("version") or "").strip() in _PLACEHOLDER_VERSIONS:
+            row["placeholder_versions"] += 1
+            placeholder += 1
+
+    assessable = 0
+    for eco, row in ecosystems.items():
+        answers = ecosystem_answers(eco)
+        row["osv_answers"] = answers
+        # A component is assessable only if its ecosystem answers AND its version is real.
+        row["assessable"] = (row["components"] - row["placeholder_versions"]) if answers else 0
+        row["reason"] = ("" if answers else
+                         f"OSV returned no advisories for a known-vulnerable canary in "
+                         f"'{eco or 'generic'}' — this ecosystem is not covered, so a zero "
+                         f"result here is NOT a clean bill of health.")
+        assessable += row["assessable"]
+
+    total = sum(r["components"] for r in ecosystems.values())
+    return {
+        "components_total": total,
+        "assessable": assessable,
+        "unassessable": total - assessable,
+        "placeholder_versions": placeholder,
+        "ecosystems": ecosystems,
+        "verdict": (
+            "no_coverage" if total and not assessable else
+            "partial" if assessable < total else
+            "full" if total else "no_components"
+        ),
+    }
+
+
 def analyze_packages(components: list[dict]) -> dict:
     """
     Look up CVEs for already-extracted ecosystem packages (Maven AARs, CocoaPods

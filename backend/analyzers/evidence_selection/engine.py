@@ -133,6 +133,14 @@ def _candidates_from_finding(f: dict, platform: str = "android",
         mname = _manifest_filename(platform)
         if not any(c.file_path.replace("\\", "/").lower().endswith(mname.lower()) for c in out):
             add(mname, f.get("line") or 0, f.get("snippet") or "", "manifest")
+    # Deterministic candidate order (L4). file_evidence / merged_locations arrive in a
+    # nondeterministic order (built from sets upstream), and the selection sort in select() is
+    # STABLE and does NOT tiebreak on line — so two candidates in the same file differing only
+    # by line (e.g. ViewPager2.java 428 vs 429) kept their nondeterministic input order, making
+    # evidence_selection.rejected/supporting change run-to-run. Sorting here by (file, line)
+    # makes the stable sort's output reproducible. Does not change WHICH candidates exist, and
+    # never overrides a real score difference — only resolves exact ties deterministically.
+    out.sort(key=lambda c: (c.file_path.replace("\\", "/").lower(), _int(c.line)))
     return out
 
 
@@ -322,6 +330,39 @@ def _selection_reason(primary: Candidate, n: int) -> str:
 
 
 # ── pipeline integration ──────────────────────────────────────────────────────
+def _collapse_posture_finding(f: dict, sel: dict) -> None:
+    """Collapse a whole-app posture finding to its single selected representative location.
+
+    Called AFTER ``select`` has scored every candidate and chosen the primary, so the best
+    (app-owned) proof is preserved. Drops the supporting/rejected candidates and re-points the
+    finding's ``file_evidence``/``files``/``file_count`` at the one primary. Purely a de-duplication
+    of an app-wide signal — the primary proof does not change."""
+    prim = (sel or {}).get("primary") or {}
+    if not prim.get("file_path"):
+        return
+    sel["supporting"] = []
+    sel["rejected"] = []
+    sel["candidate_count"] = 1
+    sel["reason"] = ("Whole-app posture signal — one representative location is shown; "
+                     "the same signal recurs across the app.")
+    line = prim.get("line") or 0
+    f["file_evidence"] = [{"path": prim["file_path"],
+                           "lines": [line] if line else [],
+                           "snippet": prim.get("snippet", "")}]
+    f["files"] = [prim["file_path"]]
+    f["file_count"] = 1
+    # The fusion engine also recorded every (file,line) in merged_locations — this is the exact
+    # field the RUN 19 audit named ("not accrue 125 merged_locations") and the one that carried the
+    # L4 jadx line-drift (a library candidate's line flips 428/429 run-to-run). Point it at the one
+    # representative too. Only the WHERE fields are touched — detection_count / evidence_count /
+    # fusion score are left as-is so the finding's strength and the app score do not move.
+    one_loc = [{"file_path": prim["file_path"], "line": line}]
+    f["merged_locations"] = list(one_loc)
+    fus = f.get("fusion")
+    if isinstance(fus, dict) and fus.get("merged_locations"):
+        fus["merged_locations"] = list(one_loc)
+
+
 def annotate(results: dict, *, platform: str | None = None) -> dict:
     """Attach ``evidence_selection`` to every finding (additive, non-destructive).
 
@@ -339,6 +380,10 @@ def annotate(results: dict, *, platform: str | None = None) -> dict:
                                bundle_ids=ctx.bundle_ids, app_modules=ctx.app_modules,
                                app_name=ctx.app_name)
     bb = bug_bounty_enabled(results)
+    # Content-detected binary-format files (Mach-O / bplist) recorded during the iOS scan.
+    # Their "line" is a strings index or a parse artifact, never a source line.
+    _binary_files = {str(p).replace("\\", "/").lower()
+                     for p in (results.get("binary_evidence_files") or [])}
     already: set = set()
     # Resource-ID constant classes (recorded during the secret walk) are never a
     # valid proof location — exclude them so no secret/chain evidence points at an
@@ -365,7 +410,16 @@ def annotate(results: dict, *, platform: str | None = None) -> dict:
         # is preserved under f["detected_location"].
         if _promote_primary(f, sel):
             corrected += 1
-        f["evidence_view"] = build_evidence_view(f)
+        # RUN 23: whole-app posture findings (e.g. android_obfuscation_missing) carry one signal
+        # spread over many identical locations. Selection has now scored the full candidate set and
+        # picked the best (app-owned) primary; collapse the finding to that single representative so
+        # the report shows ONE proof, not 100+ duplicates. This also retires the L4 residual: the
+        # drift lived only in the rejected library candidates (ViewPager2.java 428/429), which no
+        # longer exist once the set is collapsed. The primary is untouched, so no evidence moves.
+        if f.get("posture"):
+            _collapse_posture_finding(f, sel)
+        f["evidence_view"] = build_evidence_view(f, platform=ctx.platform,
+                                                 binary_files=_binary_files)
         annotated += 1
         if sel.get("candidate_count", 0) > 1:
             multi += 1

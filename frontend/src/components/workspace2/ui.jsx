@@ -177,6 +177,18 @@ export function buildEvidence(finding) {
   // 3. Top-level finding location.
   const p = f.file_path || f.full_path
   if (p) push({ path: p, lineStart: f.line || f.line_number, lineEnd: f.line || f.line_number, snippet: f.snippet || f.code_context, source: 'finding location' })
+
+  // RUN 28 / BUG 1: mark a Mach-O evidence entry with its symbol + strings index so "View Code"
+  // shows the matched symbol and the surrounding strings at that index (a strings listing scrolled
+  // to string #N) instead of a generic protections card. Data comes from the precomputed
+  // evidence_view.primary (which the finding drawer already renders correctly).
+  const bp = (f.evidence_view || {}).primary || {}
+  if (bp.binary && out.length) {
+    const target = out.find(e => e.path === bp.file) || out[0]
+    target.binary = true
+    target.symbol = bp.symbol || ''
+    target.stringsIndex = bp.string_index || target.line || null
+  }
   return out
 }
 

@@ -38,8 +38,22 @@ export const PANELS = [
   { id: 'certificate', label: 'Certificates', group: 'Investigation', icon: 'Fingerprint', status: STATUS_READY },
   { id: 'components', label: 'Application Components', group: 'Investigation', icon: 'Boxes', status: STATUS_READY },
   { id: 'androidapis', label: 'Android APIs', group: 'Investigation', icon: 'Cpu', status: STATUS_READY },
-  { id: 'manifest', label: 'Manifest', group: 'Investigation', icon: 'ScrollText', status: STATUS_READY },
+  // iOS has no manifest: the equivalent surface is Info.plist + entitlements. Android's
+  // label is deliberately left as-is so its UI does not change.
+  { id: 'manifest', label: 'Manifest', labelByPlatform: { ios: 'Info.plist & Entitlements' },
+    group: 'Investigation', icon: 'ScrollText', status: STATUS_READY },
   { id: 'malware', label: 'Malware Analysis', group: 'Investigation', icon: 'Bug', status: STATUS_READY },
+  // iOS-only: App Transport Security is an Info.plist concept with no Android equivalent
+  // (Android's counterpart is the Network Security Config, shown in the Network panel).
+  { id: 'ats', label: 'App Transport Security', group: 'Investigation', icon: 'ShieldHalf',
+    status: STATUS_READY, platforms: ['ios'] },
+  // iOS-only: property lists have no Android equivalent (Android's config surface is the
+  // manifest + resources, already covered by the Manifest panel).
+  { id: 'plists', label: 'Property Lists', group: 'Investigation', icon: 'FileCode2',
+    status: STATUS_READY, platforms: ['ios'] },
+  // BOTH platforms (no platforms gate): every app has a string table.
+  { id: 'strings', label: 'Strings', group: 'Investigation', icon: 'Binary',
+    status: STATUS_READY },
 
   // ── Static Analysis — derived posture & coverage ────────────────────────────
   { id: 'masvs', label: 'MASVS Coverage', group: 'Static Analysis', icon: 'ShieldCheck', status: STATUS_READY, count: 'masvs' },
@@ -80,10 +94,27 @@ export function isPlanned(id) { return _byId[id]?.status === STATUS_PLANNED }
 
 // Nav groups in GROUP_ORDER. `includePlanned` controls whether roadmap panels show
 // (as disabled "soon" items). Empty groups are dropped.
-export function navGroups({ includePlanned = true } = {}) {
+// A panel's label for the platform under analysis. Falls back to the default label, so
+// any platform without an override (i.e. Android) renders exactly as before.
+export function panelLabel(panel, platform) {
+  if (!panel) return ''
+  return (panel.labelByPlatform && panel.labelByPlatform[platform]) || panel.label
+}
+
+// A panel with a `platforms` list only appears for those platforms. Panels without one are
+// platform-neutral and appear everywhere, so Android's nav is unchanged.
+export function panelAppliesTo(panel, platform) {
+  if (!panel.platforms) return true
+  if (!platform) return true          // unknown platform: show everything rather than hide
+  return panel.platforms.includes(platform)
+}
+
+export function navGroups({ includePlanned = true, platform = '' } = {}) {
   const groups = GROUP_ORDER.map(label => ({
     label,
-    items: PANELS.filter(p => p.group === label && (includePlanned || p.status === STATUS_READY)),
+    items: PANELS.filter(p => p.group === label && (includePlanned || p.status === STATUS_READY))
+      .filter(p => panelAppliesTo(p, platform))
+      .map(p => ({ ...p, label: panelLabel(p, platform) })),
   })).filter(g => g.items.length)
   return groups
 }

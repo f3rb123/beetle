@@ -71,6 +71,7 @@ export function inferLanguage(filePath = '', fallback = 'txt') {
 export default function CodeBlockViewer({
   title,
   content = '',
+  rawContent = null,
   binaryInfo = null,
   language = 'txt',
   highlightedLines = [],
@@ -88,6 +89,9 @@ export default function CodeBlockViewer({
   const [copied, setCopied] = useState(false)
   const [search, setSearch] = useState('')
   const [activeMatchIndex, setActiveMatchIndex] = useState(0)
+  // RUN 29 / BUG 3: `content` is ALREADY display-ready (openCode pretty-prints JSON before
+  // resolving the focus line, so the rendered rows and the scroll target agree). The Copy button
+  // yields the original bytes via `rawContent` (falls back to content when not supplied).
   const lines = useMemo(() => String(content || '').split('\n'), [content])
   const highlightSet = useMemo(() => new Set(highlightedLines || []), [highlightedLines])
   const rowRefs = useRef(new Map())
@@ -122,16 +126,28 @@ export default function CodeBlockViewer({
     const targetLine = currentSearchLine || primaryFocusLine
     if (!targetLine) return undefined
 
-    const timer = window.setTimeout(() => {
-      rowRefs.current.get(targetLine)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    }, 120)
-
-    return () => window.clearTimeout(timer)
+    // RUN 29 / BUG 1: scroll RELIABLY, including huge listings (an 11k-line Mach-O strings dump).
+    // The old 120ms + behavior:'smooth' fired before the big table finished laying out and a smooth
+    // scroll to a far row would under-shoot / get interrupted — the focus row never reached view.
+    // Wait for layout via rAF, use an INSTANT scroll, then re-assert once more after late paint.
+    let raf1 = 0, raf2 = 0, timer = 0
+    const doScroll = () => rowRefs.current.get(targetLine)?.scrollIntoView({ block: 'center', inline: 'nearest' })
+    raf1 = window.requestAnimationFrame(() => {
+      raf2 = window.requestAnimationFrame(() => {
+        doScroll()
+        timer = window.setTimeout(doScroll, 200)
+      })
+    })
+    return () => {
+      window.cancelAnimationFrame(raf1)
+      window.cancelAnimationFrame(raf2)
+      window.clearTimeout(timer)
+    }
   }, [currentSearchLine, error, lines.length, loading, primaryFocusLine])
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(content || '')
+      await navigator.clipboard.writeText(rawContent ?? content ?? '')
       setCopied(true)
     } catch {
       setCopied(false)

@@ -24,8 +24,7 @@ import {
   CertificatePanel, NetworkPanel, ManifestPanel, ComponentsPanel, AndroidApiPanel,
   MalwarePanel, ComparePanel, AiAssistantPanel,
   PermissionsPanel, AndroidPosturePanel, TaintFlowPanel,
-  CisoSummaryPanel, DeveloperGuidePanel, AskAiPanel,
-} from './panels2.jsx'
+  CisoSummaryPanel, DeveloperGuidePanel, AskAiPanel, AtsPanel, PropertyListsPanel, StringsPanel } from './panels2.jsx'
 import { SourceExplorerPanel } from './SourceExplorer.jsx'
 import { findingPath, useEscape } from './ui.jsx'
 import { useCollab, canManage, SHARE_MODES } from '../../lib/collab.js'
@@ -45,12 +44,12 @@ const iconFor = name => ICON_MAP[name] || ShieldAlert
 // Build the sidebar groups straight from the registry (single source of truth —
 // Phase 2.5.8 folded the old hardcoded Deep Analysis list into the registry, so the
 // whole workflow hierarchy lives in workspace-registry.js).
-function useNavGroups() {
-  return useMemo(() => navGroups({ includePlanned: true }).map(g => ({
+function useNavGroups(platform) {
+  return useMemo(() => navGroups({ includePlanned: true, platform }).map(g => ({
     label: g.label,
     items: g.items.map(p => ({ id: p.id, label: p.label, icon: iconFor(p.icon),
       count: p.count, planned: p.status === 'planned' })),
-  })), [])
+  })), [platform])
 }
 
 // Roadmap placeholder for a planned panel — proves routing reaches it before the
@@ -127,7 +126,7 @@ function WorkspaceShell({ results, scanId, actions, deepLink }) {
   const [searchOpen, setSearchOpen] = useState(false)
   const scrollRef = useRef(null)
   const collab = useCollab(scanId)
-  const groups = useNavGroups()
+  const groups = useNavGroups(results.platform)
 
   useEffect(() => {
     const h = e => {
@@ -190,6 +189,9 @@ function WorkspaceShell({ results, scanId, actions, deepLink }) {
       case 'files': return <FilesPanel results={results} onOpenCode={onOpenCode} />
       case 'exports': return <ExportsPanel actions={actions} results={results} />
       case 'manifest': return <ManifestPanel results={results} />
+      case 'ats': return <AtsPanel results={results} />
+      case 'plists': return <PropertyListsPanel results={results} />
+      case 'strings': return <StringsPanel results={results} />
       case 'permissions': return <PermissionsPanel results={results} onOpenCode={onOpenCode} />
       case 'network': return <NetworkPanel results={results} />
       case 'certificate': return <CertificatePanel results={results} />

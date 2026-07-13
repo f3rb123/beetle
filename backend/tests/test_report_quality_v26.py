@@ -21,32 +21,44 @@ if _BACKEND not in sys.path:
 
 # ── #1 score-table cap honesty ───────────────────────────────────────────────
 
-def test_capped_row_carries_flag_and_raw_total():
+def test_discounted_row_carries_flag_and_raw_total():
+    # RUN 15.1 replaced the flat 3x cliff with a harmonic diminishing-marginal curve. 10 mediums
+    # no longer flatten to exactly 9: each still deducts weight/i (3 + 1.5 + 1 + 0.75 + …).
     from analyzers import scoring
     r = {"findings": [{"severity": "medium"}] * 10, "secrets": [], "platform": "android"}
     s = scoring.calculate_score(r)
     row = s["deductions"]["medium"]
     assert row["count"] == 10 and row["per_item"] == 3
-    assert row["capped"] is True
-    assert row["raw_total"] == 30 and row["total"] == 9  # capped at 3x weight
-    assert row["cap"] == 9
+    assert row["raw_total"] == 30                       # count x per_item, for reference
+    expected = scoring.graduated_deduction(3, 10)
+    assert row["total"] == round(expected, 2)
+    assert row["capped"] is True                        # discounted below raw
+    assert row["total"] < 30                            # discounted below the flat product
+    # Every one of the 10 still contributes (unlike the old cliff, where 4..10 gave nothing):
+    assert row["total"] > scoring.graduated_deduction(3, 3)   # 10 mediums > 3 mediums
 
 
-def test_uncapped_row_is_not_flagged():
+def test_row_at_full_weight_is_not_flagged_as_discounted():
+    # A single finding pays full weight, so nothing is discounted.
     from analyzers import scoring
-    r = {"findings": [{"severity": "high"}, {"severity": "high"}], "secrets": [], "platform": "android"}
+    r = {"findings": [{"severity": "high"}], "secrets": [], "platform": "android"}
     s = scoring.calculate_score(r)
     row = s["deductions"]["high"]
     assert row["capped"] is False
-    assert row["total"] == row["raw_total"] == 16  # 2 x 8, under the 3x cap
+    assert row["total"] == row["raw_total"] == 8
+
+    # Two highs: the 2nd is discounted (8 + 4 = 12, not 16).
+    r2 = {"findings": [{"severity": "high"}] * 2, "secrets": [], "platform": "android"}
+    row2 = scoring.calculate_score(r2)["deductions"]["high"]
+    assert row2["total"] == 12 and row2["raw_total"] == 16 and row2["capped"] is True
 
 
 def test_pdf_labels_capped_rows():
     pg = pytest.importorskip("report.pdf_generator")
-    # The renderer must add the "capped at 3x" label so count x per_item never invites
-    # wrong arithmetic. (Smoke: the helper text is present in the module's logic.)
+    # The renderer must label a discounted row so count x per_item never invites wrong
+    # arithmetic. RUN 15.1 replaced the flat cap with a diminishing-returns curve.
     src = open(pg.__file__, encoding="utf-8").read()
-    assert "capped at 3x" in src
+    assert "diminishing returns" in src
 
 
 # ── #2 glyph coverage (no black boxes) ───────────────────────────────────────

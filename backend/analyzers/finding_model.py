@@ -1053,7 +1053,13 @@ _HIGH_VALUE_TAINT_SINKS = {
 }
 # Sinks whose risk depends on the data: logging to logcat, intent redirects, and
 # prefs writes are low value unless the source is genuinely sensitive PII.
-_LOW_VALUE_TAINT_SINKS = {"logging", "intent", "storage"}
+# RUN 17 (Android 5.1b): a taint flow that PERSISTS user-controlled data to on-device storage
+# (SharedPrefs) is a real data-handling / privacy signal worth surfacing — it is exactly what
+# MASVS-STORAGE reviews, even when the source is not classified PII. So "storage" is no longer
+# treated as a low-value sink: such flows now SURFACE, at their existing calibrated severity
+# (LOW here — the taint calibration is deliberately unchanged). Logging (logcat, local) and
+# Intent (redirection) with non-PII input remain low-signal noise and stay suppressed.
+_LOW_VALUE_TAINT_SINKS = {"logging", "intent"}
 # PII / privileged sources that justify keeping even a low-value sink flow.
 _PII_TAINT_SOURCES = {
     "location", "sms", "accounts", "camera", "microphone", "clipboard",

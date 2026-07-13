@@ -241,8 +241,14 @@ export function AndroidPosturePanel({ results }) {
 // ───────────────────────────── Taint Flows ───────────────────────────────
 export function TaintFlowPanel({ results, onOpenCode }) {
   // Prefer taint_graph (carries file/line/risk); fall back to taint_flows.
+  // The card severity MUST be the CALIBRATED risk (flow.risk), so it agrees with the finding
+  // severity a reader is verifying against — calibrate_flow_severity is explicit that every
+  // consumer reads flow.risk, never the raw sink severity. The old `sink_sev || risk` inverted
+  // this: e.g. getString->startActivity is sink_sev=medium but calibrated risk=low, so the card
+  // showed MEDIUM while the model says LOW. Prefer the calibrated value; sink_sev is only a
+  // last-resort fallback for a legacy flow that lacks risk.
   const graph = results.taint_graph || []
-  const flat = (results.taint_flows || []).map(t => ({ ...t, risk: t.sink_sev || t.risk }))
+  const flat = (results.taint_flows || []).map(t => ({ ...t, risk: t.risk || t.sink_sev }))
   const flows = graph.length ? graph : flat
   const [q, setQ] = useState('')
   const [risk, setRisk] = useState('all')
@@ -743,7 +749,379 @@ export function NetworkPanel({ results }) {
 }
 
 // ───────────────────────────── Manifest ──────────────────────────────────
+// iOS "manifest" equivalent — the Info.plist / entitlements / URL-schemes view.
+// Data is parsed by ios_analyzer (_analyze_info_plist + _analyze_entitlements) into
+// results.app_info / results.entitlements / results.attack_surface; the workspace2
+// ManifestPanel previously rendered only the Android manifest, so on iOS this section
+// showed Android-only rows. Platform-guarded: Android rendering is untouched.
+function IosApplicationConfig({ results }) {
+  const info = results.app_info || {}
+  const surface = results.attack_surface || {}
+  const ats = info.ats || {}
+  const atsState = info.ats_state || {}
+  const ents = results.entitlements || {}
+  const entKeys = Object.keys(ents)
+  const urlSchemes = surface.url_schemes || []
+  const universalLinks = surface.universal_links || []
+  const perms = (results.permissions || {}).dangerous || []
+
+  // ATS posture: NSAllowsArbitraryLoads=true disables ATS globally (cleartext allowed).
+  const arbitraryLoads = ats.NSAllowsArbitraryLoads === true
+  const exceptionDomains = Object.keys(ats.NSExceptionDomains || {})
+
+  const fmtVal = (v) => Array.isArray(v) ? (v.length ? v.join(', ') : '—')
+    : (v && typeof v === 'object' ? JSON.stringify(v) : (v === true ? 'Yes' : v === false ? 'No' : String(v ?? '—')))
+
+  return (
+    <div>
+      <div className="ws-section__head"><h1>Info.plist &amp; Entitlements</h1><span className="ws-muted">Info.plist · entitlements · URL schemes</span></div>
+      <div className="ws-metrics ws-section">
+        <Metric label="Bundle ID" value={info.bundle_id || '—'} />
+        <Metric label="Version" value={info.version || '—'} sub={info.build ? `build ${info.build}` : ''} />
+        <Metric label="Min iOS" value={info.min_ios || '—'} />
+        <Metric label="URL Schemes" value={urlSchemes.length} />
+        <Metric label="Entitlements" value={entKeys.length} />
+      </div>
+
+      <div className="ws-card ws-card--pad ws-section">
+        <h2>App Transport Security</h2>
+        {/* An ABSENT NSAppTransportSecurity key is not the same as one set to false: iOS
+            enforces ATS by default, so "not declared" is the secure state. Say which it is
+            rather than implying the app configured something it never configured. */}
+        <div className="ws-assess">
+          <FlagRow label="NSAllowsArbitraryLoads (cleartext)" {...resolveFlag(arbitraryLoads, false)} danger />
+        </div>
+        <p className="ws-muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+          {atsState.summary || (exceptionDomains.length
+            ? `ATS exception domains: ${exceptionDomains.join(', ')}`
+            : 'No per-domain ATS exceptions declared.')}
+        </p>
+      </div>
+
+      {urlSchemes.length || universalLinks.length ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>URL Handling</h2>
+          {urlSchemes.length ? (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontWeight: 620, marginBottom: 6 }}>Custom URL Schemes <span className="ws-muted">· {urlSchemes.length}</span></div>
+              <div className="ws-scroll">
+                {urlSchemes.map((s, i) => <div key={i} className="ws-mcontrol" title={`${s}://`}>{s}://</div>)}
+              </div>
+            </div>
+          ) : null}
+          {universalLinks.length ? (
+            <div>
+              <div style={{ fontWeight: 620, marginBottom: 6 }}>Associated Domains (Universal Links) <span className="ws-muted">· {universalLinks.length}</span></div>
+              <div className="ws-scroll">
+                {universalLinks.map((d, i) => <div key={i} className="ws-mcontrol" title={d}>{d}</div>)}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="ws-card ws-card--pad ws-section">
+        <h2>Entitlements <span className="ws-muted">· {entKeys.length}</span></h2>
+        {entKeys.length ? (
+          <div className="ios-entitlements-list">
+            {entKeys.map((k) => (
+              <div key={k} className="ws-kv" style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '4px 0', borderBottom: '1px solid var(--ws-border, #2a2a2a)' }}>
+                <span className="ws-mono" style={{ fontSize: 12.5, wordBreak: 'break-all' }}>{k}</span>
+                <span className="ws-muted ws-mono" style={{ fontSize: 12.5, textAlign: 'right', wordBreak: 'break-all' }}>{fmtVal(ents[k])}</span>
+              </div>
+            ))}
+          </div>
+        ) : <p className="ws-muted" style={{ fontSize: 12.5 }}>No entitlements parsed (embedded.mobileprovision / .xcent absent).</p>}
+      </div>
+
+      {perms.length ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>Privacy Usage Descriptions <span className="ws-muted">· {perms.length}</span></h2>
+          {/* Show the developer's OWN purpose string from Info.plist, not just Beetle's
+              capability label — that reason is what an analyst (and MobSF) reviews. */}
+          <div className="ios-usage-list">
+            {perms.map((p, i) => (
+              <div key={i} className="ios-usage" style={{ padding: '8px 0', borderBottom: '1px solid var(--ws-border, #2a2a2a)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <SeverityTag severity={normSev(p.severity)} compact />
+                  <span className="ws-mono" style={{ fontSize: 12.5 }}>{p.permission}</span>
+                  <span className="ws-muted" style={{ fontSize: 12.5 }}>· {p.description}</span>
+                </div>
+                <div style={{ fontSize: 12.5, marginTop: 4 }}>
+                  {p.usage_description
+                    ? <>“{p.usage_description}”</>
+                    : <span className="ws-muted">No purpose string declared — the user is shown no reason for {p.short_name || 'this'} access.</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+// ───────────────────────── App Transport Security ─────────────────────────
+// iOS-only. ATS is enforced by iOS BY DEFAULT: an app that never declares
+// NSAppTransportSecurity is in the SECURE state, not an unconfigured one. Saying "no ATS
+// config found" (MobSF shows an empty table) reads like a gap when it is the opposite, so
+// this section states the posture plainly and names which door is open when one is.
+export function AtsPanel({ results }) {
+  const ats = (results.app_info || {}).ats_state || {}
+  const flags = ats.global_flags || []
+  const domains = ats.domains || []
+  const enforced = !!ats.enforced
+
+  return (
+    <div>
+      <div className="ws-section__head">
+        <h1>App Transport Security</h1>
+        <span className="ws-muted">Info.plist · NSAppTransportSecurity</span>
+      </div>
+
+      <div className={`ws-card ws-card--pad ws-section ws-ats ws-ats--${enforced ? 'ok' : 'risk'}`}>
+        <div className="ws-ats__verdict">
+          {enforced ? <ShieldCheck size={20} /> : <ShieldAlert size={20} />}
+          <div>
+            <div className="ws-ats__posture">{ats.posture || (enforced ? 'ATS enforced' : 'ATS weakened')}</div>
+            <div className="ws-muted" style={{ fontSize: 12.5 }}>
+              {ats.summary || 'No App Transport Security configuration parsed.'}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="ws-card ws-card--pad ws-section">
+        <h2>Global Settings</h2>
+        <div className="ios-usage-list">
+          {flags.length ? flags.map((f, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', borderBottom: '1px solid var(--ws-border, #2a2a2a)' }}>
+              <SeverityTag severity={normSev(f.value ? f.severity : 'info')} compact />
+              <span className="ws-mono" style={{ fontSize: 12.5, minWidth: 260 }}>{f.key}</span>
+              <span className="ws-mono" style={{ fontSize: 12.5, fontWeight: 700 }}>{f.value ? 'true' : 'not set'}</span>
+              <span className="ws-muted" style={{ fontSize: 12.5 }}>{f.meaning}</span>
+            </div>
+          )) : <p className="ws-muted" style={{ fontSize: 12.5 }}>No ATS keys declared — iOS enforces ATS by default.</p>}
+        </div>
+      </div>
+
+      <div className="ws-card ws-card--pad ws-section">
+        <h2>Exception Domains <span className="ws-muted">· {domains.length}</span></h2>
+        {domains.length ? (
+          <div className="ios-usage-list">
+            {domains.map((d, i) => (
+              <div key={i} style={{ padding: '8px 0', borderBottom: '1px solid var(--ws-border, #2a2a2a)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <SeverityTag severity={normSev(d.severity)} compact />
+                  <span className="ws-mono" style={{ fontSize: 12.5 }}>{d.domain}</span>
+                  {d.includes_subdomains ? <span className="ws-badge">+ subdomains</span> : null}
+                  <span className="ws-muted" style={{ fontSize: 12.5 }}>min TLS {d.minimum_tls}</span>
+                  {d.requires_forward_secrecy ? null : <span className="ws-badge">no forward secrecy</span>}
+                </div>
+                <div style={{ fontSize: 12.5, marginTop: 3 }}>{d.why}</div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="ws-muted" style={{ fontSize: 12.5 }}>
+            No per-domain exceptions declared — every connection must satisfy ATS.
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ───────────────────────────── Property Lists ─────────────────────────────
+// iOS-only enumeration surface. It REPORTS NOTHING NEW: ATS lives in its own section, the
+// Firebase keys are already INFO secrets, and the usage descriptions are in Info.plist &
+// Entitlements. This lists every plist (67 of 69 are BINARY in a typical bundle, decoded via
+// plistlib) and cross-links the security-relevant keys to where they are already reported.
+export function PropertyListsPanel({ results }) {
+  const pl = results.property_lists || {}
+  const plists = pl.plists || []
+  const pm = pl.privacy_manifests || {}
+  const [q, setQ] = useState('')
+  const withKeys = plists.filter(p => (p.security_keys || []).length)
+  const rows = plists.filter(p => !q || p.path.toLowerCase().includes(q.toLowerCase()))
+
+  if (!plists.length) return <EmptyState title="No property lists" body="No .plist files were found in this bundle." />
+
+  return (
+    <div>
+      <div className="ws-section__head">
+        <h1>Property Lists</h1>
+        <span className="ws-muted">every .plist in the bundle · binary and XML</span>
+      </div>
+
+      <div className="ws-metrics ws-section">
+        <Metric label="Property Lists" value={pl.count ?? 0} />
+        <Metric label="Binary (bplist00)" value={pl.binary_count ?? 0} sub="decoded, not read as text" />
+        <Metric label="With security keys" value={pl.with_security_keys ?? 0} />
+        <Metric label="Privacy Manifests" value={pm.count ?? 0} sub=".xcprivacy" />
+      </div>
+
+      {withKeys.length ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>Security-Relevant Keys</h2>
+          <div className="ios-usage-list">
+            {withKeys.map((p, i) => (
+              <div key={i} style={{ padding: '8px 0', borderBottom: '1px solid var(--ws-border, #2a2a2a)' }}>
+                <div className="ws-mono" style={{ fontSize: 12.5, fontWeight: 650 }}>{p.path}</div>
+                {(p.security_keys || []).map((k, j) => (
+                  <div key={j} style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'baseline', marginTop: 4 }}>
+                    <span className="ws-badge">{k.category}</span>
+                    <span className="ws-mono" style={{ fontSize: 12.5 }}>{k.key}</span>
+                    <span className="ws-mono ws-muted" style={{ fontSize: 12.5 }}>= {k.value}</span>
+                    <span className="ws-muted" style={{ fontSize: 12 }}>· {k.note}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>Security-Relevant Keys</h2>
+          <p className="ws-muted" style={{ fontSize: 12.5 }}>
+            No ATS config, custom URL schemes, or file-sharing keys declared in any plist.
+          </p>
+        </div>
+      )}
+
+      {pm.count ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>Privacy Manifests <span className="ws-muted">· {pm.count} .xcprivacy</span></h2>
+          <div style={{ fontSize: 12.5, marginBottom: 8 }}>
+            Declares tracking: <b>{pm.declares_tracking ? 'yes' : 'no'}</b>
+            {' · '}Tracking domains: <b>{(pm.tracking_domains || []).length || 'none declared'}</b>
+          </div>
+          <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ fontWeight: 620, fontSize: 12.5, marginBottom: 4 }}>Accessed API categories</div>
+              {(pm.accessed_api_types || []).map(([name, n], i) => (
+                <div key={i} className="ws-mono ws-muted" style={{ fontSize: 12 }}>{n}× {name.replace('NSPrivacyAccessedAPICategory', '')}</div>
+              ))}
+            </div>
+            <div>
+              <div style={{ fontWeight: 620, fontSize: 12.5, marginBottom: 4 }}>Collected data types</div>
+              {(pm.collected_data_types || []).map(([name, n], i) => (
+                <div key={i} className="ws-mono ws-muted" style={{ fontSize: 12 }}>{n}× {name.replace('NSPrivacyCollectedDataType', '')}</div>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="ws-card ws-card--pad ws-section">
+        <h2>All Property Lists <span className="ws-muted">· {plists.length}</span></h2>
+        <input className="ws-input" placeholder="Filter by path…" value={q} onChange={e => setQ(e.target.value)} style={{ marginBottom: 10 }} />
+        <div className="ws-scroll" style={{ maxHeight: 460, overflowY: 'auto' }}>
+          {rows.map((p, i) => (
+            <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '5px 0', borderBottom: '1px solid var(--ws-border, #2a2a2a)' }}>
+              <span className="ws-badge">{p.format}</span>
+              <span className="ws-mono" style={{ fontSize: 12.5, flex: 1, wordBreak: 'break-all' }}>{p.path}</span>
+              <span className="ws-muted" style={{ fontSize: 12 }}>{p.key_count} keys</span>
+              {(p.security_keys || []).length ? <span className="ws-badge">{p.security_keys.length} sec</span> : null}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ───────────────────────────────── Strings ─────────────────────────────────
+// Both platforms. EVERY value here has already passed the backend's secret-redaction gate
+// (strings_section.redact -> secret_intel.mask_value), so a credential in the string table is
+// shown MASKED, never raw — a Strings section that printed an API key would be a leak, not a
+// feature. Masked values are badged so the analyst knows why they are seeing dots.
+export function StringsPanel({ results }) {
+  const s = results.strings || {}
+  const cats = s.categories || []
+  const [q, setQ] = useState('')
+  const ql = q.trim().toLowerCase()
+
+  if (!cats.length && !(s.urls || []).length && !(s.emails || []).length) {
+    return <EmptyState title="No strings extracted" body="No categorized strings were found in this app." />
+  }
+  const match = v => !ql || String(v).toLowerCase().includes(ql)
+
+  return (
+    <div>
+      <div className="ws-section__head">
+        <h1>Strings</h1>
+        <span className="ws-muted">categorized string table · secrets shown masked</span>
+      </div>
+
+      <div className="ws-metrics ws-section">
+        <Metric label="Categories" value={s.category_count ?? cats.length} />
+        <Metric label="Matches" value={s.total_matches ?? 0} />
+        <Metric label="Masked secrets" value={s.masked_count ?? 0} sub="never shown raw" />
+        <Metric label="Emails" value={(s.emails || []).length} sub={`${s.emails_rejected ?? 0} FPs dropped`} />
+      </div>
+
+      <input className="ws-input ws-section" placeholder="Filter strings…" value={q} onChange={e => setQ(e.target.value)} />
+
+      {(s.emails || []).length || s.emails_rejected ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>Emails <span className="ws-muted">· {(s.emails || []).length}</span></h2>
+          {(s.emails || []).length ? (
+            <div className="ws-scroll">
+              {(s.emails || []).filter(match).map((e, i) => <div key={i} className="ws-mcontrol ws-mono">{e}</div>)}
+            </div>
+          ) : <p className="ws-muted" style={{ fontSize: 12.5 }}>No real addresses found.</p>}
+          {s.emails_rejected ? (
+            <p className="ws-muted" style={{ fontSize: 12, marginTop: 8 }}>
+              {s.emails_rejected} false positive{s.emails_rejected === 1 ? '' : 's'} dropped
+              (Dart runtime symbols, format-string hosts, library-internal addresses)
+              {(s.emails_rejected_sample || []).length ? <> — e.g. <code className="ws-mono">{s.emails_rejected_sample[0]}</code></> : null}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {cats.map((c, i) => {
+        const rows = (c.matches || []).filter(m => match(m.value))
+        if (!rows.length) return null
+        return (
+          <div key={i} className="ws-card ws-card--pad ws-section">
+            <h2>{c.name} <span className="ws-muted">· {c.count}</span></h2>
+            {c.description ? <p className="ws-muted" style={{ fontSize: 12.5, marginTop: -6, marginBottom: 8 }}>{c.description}</p> : null}
+            <div className="ws-scroll" style={{ maxHeight: 320, overflowY: 'auto' }}>
+              {rows.map((m, j) => (
+                <div key={j} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '4px 0' }}>
+                  {m.masked ? <span className="ws-badge" title="Masked: this string is a credential">masked</span> : null}
+                  <code className="ws-mono" style={{ fontSize: 12.5, wordBreak: 'break-all' }}>{m.value}</code>
+                  {(m.files || []).length ? <span className="ws-muted ws-mono" style={{ fontSize: 11.5, marginLeft: 'auto' }}>{m.files[0]}</span> : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })}
+
+      {(s.urls || []).length ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>URLs <span className="ws-muted">· {(s.urls || []).length}</span></h2>
+          <div className="ws-scroll" style={{ maxHeight: 300, overflowY: 'auto' }}>
+            {(s.urls || []).filter(match).map((u, i) => <div key={i} className="ws-mono" style={{ fontSize: 12.5, padding: '3px 0', wordBreak: 'break-all' }}>{u}</div>)}
+          </div>
+        </div>
+      ) : null}
+
+      {(s.ips || []).length ? (
+        <div className="ws-card ws-card--pad ws-section">
+          <h2>IP Addresses <span className="ws-muted">· {(s.ips || []).length}</span></h2>
+          {(s.ips || []).filter(match).map((ip, i) => <div key={i} className="ws-mono" style={{ fontSize: 12.5 }}>{ip}</div>)}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export function ManifestPanel({ results }) {
+  if (results.platform === 'ios') return <IosApplicationConfig results={results} />
   const info = results.app_info || {}
   const ms = results.manifest_security || {}
   const surface = results.attack_surface || {}

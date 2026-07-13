@@ -134,13 +134,13 @@ _TEMPLATES: dict[str, dict] = {
         "masvs": "MASVS-CODE-4", "owasp": "M7",
     },
     "FILE_STORAGE": {
-        "why_it_matters": "Sensitive data written to world-readable or external storage can be read by other apps or recovered from backups, bypassing the app sandbox.",
-        "attack_scenario": "Another app (or an attacker with backup/USB access) reads files the app wrote to external/shared storage or to MODE_WORLD_READABLE locations.",
-        "prerequisites": ["Sensitive data is written to external/shared/world-readable storage", "Another app or backup channel can read that location"],
-        "impact": "Disclosure of tokens, PII, or other sensitive data stored outside the sandbox.",
-        "remediation_summary": "Store sensitive data in app-internal storage with Keystore/Keychain-backed encryption; never use external/world-readable storage or plaintext SharedPreferences for secrets.",
-        "references": ["OWASP MASVS-STORAGE-1", "CWE-922"],
-        "false_positive_notes": "Non-sensitive caches/media on external storage are expected. The finding matters only when the data written is sensitive.",
+        "why_it_matters": "Sensitive data stored unencrypted at rest — an unencrypted local database, plain preferences/NSUserDefaults, or world-readable/external storage — can be recovered by anyone with device, backup, or (on shared storage) other-app access, bypassing the app sandbox.",
+        "attack_scenario": "An attacker with physical/backup/USB access (or, for shared/world-readable storage, another app) reads the app's unencrypted database, preferences, or files and recovers the sensitive data.",
+        "prerequisites": ["Sensitive data is written to unencrypted local storage or to external/shared/world-readable storage", "An attacker can reach that location via device/backup access or another app"],
+        "impact": "Disclosure of tokens, PII, or other sensitive data stored unencrypted or outside the sandbox.",
+        "remediation_summary": "Encrypt sensitive data at rest (Realm encryptionKey, SQLCipher, or Keystore/Keychain-backed encryption) and keep it in app-internal storage; never store secrets in plaintext preferences/NSUserDefaults or external/world-readable storage.",
+        "references": ["OWASP MASVS-STORAGE-1", "CWE-922", "CWE-312"],
+        "false_positive_notes": "Non-sensitive caches/media are expected. The finding matters only when the data stored is sensitive.",
         "masvs": "MASVS-STORAGE-1", "owasp": "M9",
     },
     "GENERIC": {
@@ -157,42 +157,81 @@ _TEMPLATES: dict[str, dict] = {
 
 
 # ─── Category detection ──────────────────────────────────────────────────────
-def _text(finding: dict) -> str:
+# RUN 29 / BUG 3: categorize on the finding's OWN IDENTITY only — rule_id, category, cwe, title.
+# The old matcher also folded in description + "name", which carry INCIDENTAL evidence like the
+# framework a symbol lives in ("FirebaseCrashlytics", "webview_flutter_wkwebview"). That made a
+# stack-canary / malloc / NSUserDefaults finding on a Firebase framework wrongly render "Permissive
+# Firebase rules expose the database", and Realm-in-a-webview-framework render WebView text. A wrong
+# narrative is worse than none, so anything that does not confidently match returns GENERIC (neutral).
+def _identity_text(finding: dict) -> str:
+    """rule_id + category + cwe + title, lowercased. NEVER description/evidence/symbols."""
     return " ".join(str(finding.get(k, "")) for k in (
-        "title", "category", "description", "rule_id", "cwe", "name")).lower()
+        "rule_id", "category", "cwe", "title")).lower()
+
+# Back-compat shim (kept in case other modules import it) — now identity-only, not the evidence blob.
+_text = _identity_text
 
 
 def categorize(finding: dict) -> str:
-    """Map a finding to a template category. First match wins (ordered)."""
-    t = _text(finding)
-    cwe = str(finding.get("cwe", "")).upper()
-
-    if finding.get("is_attack_chain") or finding.get("is_cloud_chain"):
+    """Map a finding to a template category from its OWN identity, with the AUTHORITATIVE signals
+    first (rule_id + category field + cwe) and the free-text TITLE only as a last resort. The title
+    can carry an incidental component name (e.g. a deep-link finding titled "… -> WebViewActivity"),
+    so matching it early would mis-categorize; anything unconfident returns GENERIC (neutral)."""
+    if finding.get("is_attack_chain") or finding.get("is_cloud_chain") \
+            or str(finding.get("rule_id", "")).lower().startswith("chain"):
         return "GENERIC"  # chains get their own explainer
-    if "webview" in t:
-        return "WEBVIEW"
-    if "sql" in t or cwe == "CWE-89":
-        return "SQL_INJECTION"
-    if "firebase" in t:
-        return "FIREBASE"
-    if "s3" in t or "bucket" in t:
-        return "S3"
-    if "deeplink" in t or "deep link" in t or "app link" in t or "applinks" in t or cwe == "CWE-939":
-        return "DEEP_LINKS"
-    if ("intent" in t and ("inject" in t or "redirect" in t or "export" in t)) or "exported component" in t or cwe in ("CWE-926", "CWE-927"):
-        return "INTENT_INJECTION"
-    if "root detection" in t or "security control" in t or finding.get("security_control"):
-        return "ROOT_DETECTION"
-    if "certificate" in t or finding.get("category") == "Certificate" or cwe == "CWE-295":
-        return "CERTIFICATE"
-    if any(w in t for w in ("cipher", "encrypt", "decrypt", "crypto", "md5", "sha-1", "sha1", "ecb", "insecure random")) or cwe in ("CWE-327", "CWE-328", "CWE-326", "CWE-330"):
-        return "CRYPTO"
-    if any(w in t for w in ("secret", "api key", "api_key", "token", "password", "credential", "private key")) or cwe in ("CWE-798", "CWE-321", "CWE-522"):
-        return "SECRETS"
-    if any(w in t for w in ("cleartext", "http traffic", "tls", "ssl", "hostname", "trustmanager", "network security")) or cwe == "CWE-319":
-        return "NETWORK"
-    if any(w in t for w in ("external storage", "world-readable", "world readable", "shared pref", "file storage", "mode_world")) or cwe == "CWE-922":
+    rid = str(finding.get("rule_id", "")).lower()
+    cat = str(finding.get("category", "")).lower()
+    cwe = str(finding.get("cwe", "")).upper()
+    title = str(finding.get("title", "")).lower()
+
+    # ── Authoritative: rule_id + category FIELD + cwe (the title is NOT consulted here) ──────────
+    ident = f"{rid} {cat}"
+    def has(*ws):
+        return any(w in ident for w in ws)
+
+    # Data-at-rest / storage first, so "Database Without Encryption" (Realm, NSUserDefaults) is
+    # storage, not crypto.
+    if has("realm", "nsuserdefault", "sharedpref", "shared_pref", "external_storage",
+           "world_readable", "insecure_storage", "plaintext", "file_storage") \
+            or "storage" in cat or cwe in ("CWE-922", "CWE-312"):
         return "FILE_STORAGE"
+    if has("webview", "web_view") or "webview" in cat:
+        return "WEBVIEW"
+    if has("sql") or cwe == "CWE-89":
+        return "SQL_INJECTION"
+    if has("firebase"):
+        return "FIREBASE"
+    if (has("s3", "bucket") and not has("firebase")):
+        return "S3"
+    if has("deeplink", "deep_link", "app_link", "applink") or "deeplink" in cat or cwe == "CWE-939":
+        return "DEEP_LINKS"
+    if has("exported", "pending_intent", "pendingintent", "implicit_intent", "intent_redirect") \
+            or ("intent" in ident and has("inject", "redirect", "export", "implicit")) \
+            or cwe in ("CWE-926", "CWE-927"):
+        return "INTENT_INJECTION"
+    if has("root_detection", "jailbreak", "frida", "security_control") or finding.get("security_control"):
+        return "ROOT_DETECTION"
+    if has("cert", "certificate", "signing", "signature") or "certificate" in cat or cwe == "CWE-295":
+        return "CERTIFICATE"
+    # NOTE: "_des" is deliberately absent — it matches "_deserialization". DES ciphers are caught
+    # by "cipher"/"weak_cipher"/"3des"/"desede".
+    if has("md5", "sha1", "sha_1", "cipher", "_ecb", "3des", "desede", "rc4", "weak_hash",
+           "weak_cipher", "insecure_random", "weak_random", "crypto") \
+            or "crypto" in cat or cwe in ("CWE-327", "CWE-328", "CWE-326", "CWE-330"):
+        return "CRYPTO"
+    if has("secret", "api_key", "hardcoded", "credential", "private_key") \
+            or cwe in ("CWE-798", "CWE-321", "CWE-522"):
+        return "SECRETS"
+    if has("cleartext", "http", "tls", "_ssl", "app_transport", "network", "socket") \
+            or "network" in cat or cwe == "CWE-319":
+        return "NETWORK"
+
+    # ── Last resort: TITLE substring only (nothing authoritative matched) ───────────────────────
+    if "webview" in title:
+        return "WEBVIEW"
+    if "sql injection" in title:
+        return "SQL_INJECTION"
     return "GENERIC"
 
 
@@ -287,9 +326,9 @@ _DETAIL = {
         "code_example": "db.rawQuery(\"SELECT * FROM t WHERE id = ?\", new String[]{ userId });",
     },
     "FILE_STORAGE": {
-        "why_dangerous": "Sensitive data on external/world-readable storage can be read by other apps or backups.",
-        "developer_fix": "Use app-internal storage with Keystore-backed encryption (EncryptedFile / EncryptedSharedPreferences).",
-        "code_example": "EncryptedSharedPreferences.create(ctx, \"secret\", masterKey,\n  PrefKeyEncryptionScheme.AES256_SIV, PrefValueEncryptionScheme.AES256_GCM);",
+        "why_dangerous": "Sensitive data stored unencrypted at rest — an unencrypted database, plain preferences/NSUserDefaults, or world-readable/external storage — can be recovered from the device, a backup, or (on shared storage) by another app.",
+        "developer_fix": "Encrypt data at rest (Realm encryptionKey / SQLCipher, or Keystore/Keychain-backed encryption) and keep it in app-internal storage; never store secrets in plaintext preferences/NSUserDefaults or external storage.",
+        "code_example": "// Realm at rest — require an encryption key:\nlet key = /* 64 bytes from the Keychain */\nlet cfg = Realm.Configuration(encryptionKey: key)\nlet realm = try Realm(configuration: cfg)",
     },
     "GENERIC": {
         "why_dangerous": "An attacker who reaches this code path can leverage the weakness toward data access or control.",

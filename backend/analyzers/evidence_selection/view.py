@@ -146,6 +146,102 @@ def _certificate_view(finding: dict) -> dict:
     }
 
 
+BINARY_EVIDENCE_LANG = "Mach-O Binary"
+
+
+def _is_ios_binary_path(path: str) -> bool:
+    """True for a Mach-O in the .app bundle (main executable, *.framework/*, *.dylib).
+
+    These are extension-less or framework binaries, and the SAST does not read them as
+    source: ``code_analyzer._collect_ios_files`` replaces their content with
+    ``_extract_strings(raw)`` — printable runs joined by newlines. So a rule "match" on
+    such a file carries the INDEX OF A STRING in that synthetic listing, which is neither
+    a source line nor a byte address. Callers must never render it as a source line.
+    """
+    p = (path or "").replace("\\", "/").strip()
+    if not p:
+        return False
+    low = p.lower()
+    if low.endswith(".dylib") or ".framework/" in low:
+        return True
+    base = p.rsplit("/", 1)[-1]
+    if low.startswith("payload/"):
+        return "." not in base          # Payload/Runner.app/Runner — extension-less Mach-O
+    return "/" not in p and "." not in base and bool(base)   # bare executable name
+
+
+BPLIST_EVIDENCE_LANG = "Binary Property List"
+
+# Android compiled binaries + their printable-strings dumps. A rule/secret match on one
+# carries an INDEX into the extracted-strings listing (string_analyzer/scan_storage dump raw
+# .dex/.so strings when no decompiled source exists), NOT a source line — the exact Android twin
+# of an iOS Mach-O match. RUN 26 (L1): carding these was previously iOS-only, so an Android
+# binary-primary finding rendered its string index as a misleading file:line.
+_ANDROID_BINARY_SUFFIXES = (
+    ".dex", ".so", ".arsc", ".odex", ".vdex", ".oat",
+    ".dex.txt", ".so.txt", ".arsc.txt",
+)
+
+
+def _is_android_binary_path(path: str) -> bool:
+    """True for an Android compiled binary (or its strings dump) whose match 'line' is a
+    string index, not a source line."""
+    return (path or "").replace("\\", "/").lower().endswith(_ANDROID_BINARY_SUFFIXES)
+
+
+def _is_binary_evidence(path: str, binary_files: set | None, platform: str | None = None) -> bool:
+    """True when the primary's file is binary-format — its match 'line' indexes an extracted-
+    strings listing, not source. Prefers the scan's content-detected set (Mach-O magic / bplist00,
+    recorded by ios_analyzer._record_binary_format_files); otherwise uses platform path shapes:
+    iOS Mach-O/framework shapes, or Android .dex/.so/.arsc binaries (RUN 26)."""
+    if not path:
+        return False
+    if binary_files and path.replace("\\", "/").lower() in binary_files:
+        return True
+    if platform == "android":
+        return _is_android_binary_path(path)
+    if platform == "ios":
+        return _is_ios_binary_path(path)
+    # Unknown platform: be conservative and recognise either shape family.
+    return _is_ios_binary_path(path) or _is_android_binary_path(path)
+
+
+def _as_binary_evidence(view: dict, is_plist: bool = False) -> dict:
+    """Re-render a view whose primary is a binary file as BINARY evidence.
+
+    A compiled binary has no source line. For a Mach-O, the SAST's "line" indexes the
+    extracted-strings listing; for a binary plist there are no text lines at all (the
+    scanner reports e.g. line 3 with an empty snippet). Either way the number must never be
+    shown as a source line, so it moves into string_index and ``line`` is zeroed. Sets
+    artifact=True, which the UI already uses to hide View Source / View Smali — so no one is
+    sent to a source line that does not exist. iOS only.
+    """
+    prim = view.get("primary") or {}
+    idx = prim.get("line") or 0
+    symbol = (prim.get("snippet") or "").strip()
+    prim["string_index"] = int(idx) if idx else 0
+    prim["symbol"] = symbol
+    prim["line"] = 0                     # NOT a source line — never render it as one
+    prim["artifact"] = True
+    prim["binary"] = True
+    prim["language"] = BPLIST_EVIDENCE_LANG if is_plist else BINARY_EVIDENCE_LANG
+    where = prim.get("file") or "the binary"
+    if is_plist:
+        reason = (f"Binary evidence — {where} is a binary property list with no text lines; "
+                  "the proof is the decoded key, not a source line.")
+    else:
+        reason = (f"Binary evidence — the symbol/string {symbol!r} was matched in the "
+                  f"extracted strings of {where}"
+                  + (f" (string #{prim['string_index']} of the strings listing, "
+                     "not a source line)." if prim["string_index"] else "."))
+    prim["reasons"] = list(prim.get("reasons") or []) + [reason]
+    view["primary"] = prim
+    view["artifact"] = True
+    view["binary"] = True
+    view["selection_reason"] = reason
+    return view
+
+
 def primary_location(finding: dict) -> tuple[str, int, str]:
     """The (file, line, snippet) every renderer should show — the selected primary,
     falling back to the legacy fields when selection did not run."""
@@ -197,9 +293,14 @@ def _fallback_view(finding: dict) -> dict:
     }
 
 
-def build_evidence_view(finding: dict) -> dict:
+def build_evidence_view(finding: dict, platform: str | None = None,
+                        binary_files: set | None = None) -> dict:
     """The single rendering model for a finding. Reads evidence_selection; falls
-    back to legacy fields. Pure — does not mutate the finding."""
+    back to legacy fields. Pure — does not mutate the finding.
+
+    ``platform`` and ``binary_files`` are optional and only gate iOS binary-evidence
+    rendering; omitting them reproduces the previous behaviour exactly (Android unaffected).
+    """
     if not isinstance(finding, dict):
         return _fallback_view({})
     # Certificate / signing findings have no source file — render the real artifact
@@ -208,7 +309,11 @@ def build_evidence_view(finding: dict) -> dict:
         return _certificate_view(finding)
     sel = finding.get("evidence_selection")
     if not isinstance(sel, dict) or not sel.get("primary"):
-        return _fallback_view(finding)
+        view = _fallback_view(finding)
+        fp = (view.get("primary") or {}).get("file")
+        if _is_binary_evidence(fp, binary_files, platform):
+            return _as_binary_evidence(view, is_plist=str(fp).lower().endswith(".plist"))
+        return view
 
     primary = _proof(sel["primary"])
     # Focus manifest evidence to the EXACT triggering android:* attribute.
@@ -232,7 +337,7 @@ def build_evidence_view(finding: dict) -> dict:
         else:
             additional.append(_proof(e))
 
-    return {
+    view = {
         "primary": primary,
         "supporting": supporting,
         "additional_references": additional,
@@ -254,3 +359,10 @@ def build_evidence_view(finding: dict) -> dict:
         "framework_only": bool(sel.get("framework_only")),
         "fallback": False,
     }
+    # A binary primary (iOS Mach-O / bplist, or an Android .dex/.so/.arsc) carries a strings
+    # index / parse artifact, not a source line — render it as binary evidence so no consumer
+    # prints file:line. RUN 26: Android is now covered too (was iOS-only, the L1 gap).
+    fp = primary.get("file")
+    if _is_binary_evidence(fp, binary_files, platform):
+        return _as_binary_evidence(view, is_plist=str(fp).lower().endswith(".plist"))
+    return view
