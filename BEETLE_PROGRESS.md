@@ -1503,7 +1503,30 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       912 tests pass (8 new). Android Source Explorer / scroll / JSON unaffected (verified).
     Files: backend/main.py, backend/analyzers/analyst_intel.py, backend/tests/test_analyst_categorize.py,
       frontend/src/pages/Results.jsx, frontend/src/components/CodeBlockViewer.jsx.
-    Commit-ready: Y  (do NOT push until human confirms the both-platform table + real-UI verification)
+    Commit-ready: Y  (committed 722c8a2; pushed to origin/v1.3-dev)
+
+[x] RUN 30 — L6 DURABLE FIX: real-UI Playwright e2e smoke test committed to the repo  DONE
+    The reason RUN 24/28 shipped broken UI is there was NO automated real-render check — unit tests
+    and HTTP passed while the screen was wrong. RUN 29 proved a headless-browser render catches it;
+    RUN 30 makes that permanent. Added frontend/e2e/smoke.spec.mjs (+ playwright.config.mjs, README),
+    @playwright/test devDep, `npm run test:e2e`. The tests drive a RUNNING instance with headless
+    Chromium and assert the RENDERED DOM (not HTTP):
+      1. view-code scrolls the evidence line INTO the code viewport (geometry check — the exact RUN 29
+         regression: a focus row that renders but sits below the scroll body).
+      2. a Mach-O opens to its searchable extracted STRINGS, not a dead "no source" card.
+      3. the finding drawer renders a Why-Dangerous narrative and a non-firebase finding never borrows
+         the "Permissive Firebase rules" text (the RUN 29 categorizer false-match symptom).
+    Robust: the suite SKIPS cleanly when no stack/scan is reachable (health check + env gating:
+    E2E_BASE_URL / E2E_SCAN / E2E_IPA), so it never fails a build spuriously.
+    ACTUALLY RUN (not just written): against a live iOS scan -> 3/3 PASS; against a live Android scan
+    -> 2 PASS + 1 SKIP (the Mach-O test correctly N/A for Android); with the stack down -> 3 SKIP.
+    L6 status: was "frontend view-code/scroll has NO regression test". NOW: a real e2e harness exists
+    and is wired to `npm run test:e2e`. L6 -> substantially CLOSED for the view-code/strings/narrative
+    surface; broader component coverage remains optional.
+    No app code changed — presentation/test tooling only. iOS 14/92/B, Android 47/34/F unaffected.
+    Files: frontend/e2e/smoke.spec.mjs, frontend/e2e/README.md, frontend/playwright.config.mjs,
+      frontend/package.json, frontend/package-lock.json, frontend/.gitignore.
+    Commit-ready: Y
 
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
