@@ -1385,6 +1385,39 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       it only fires when there is no source. Live repro deferred, same blocker class as L2.
     Commit-ready: Y  (committed b870836; pushed to origin/v1.3-dev)
 
+[x] RUN 27 — iOS Source Explorer file-click shows cards / empty tree (SEPARATE from view-code)  DONE
+    VERIFIED FIRST against the REAL endpoints (not simulation — the user noted sims passed while the
+    UI failed). Traced the Source Explorer click: SourceExplorerPanel.open -> onOpenCode -> the SAME
+    openCode -> /api/scans/{id}/file -> inspect_file. Probed inspect_file on every iOS file: it is
+    CORRECT (all plists -> decoded XML text; Runner/frameworks/embedded.mobileprovision -> binary
+    card). So the file-server was NOT the bug (consumer-field rule again).
+    *** ROOT CAUSE: the file-TREE, not the file-server. /api/scans/{id}/files -> list_source_files
+        (decompiler.py) enumerated jadx/apktool/apk_extract/repo but NEVER ipa_extract (where iOS
+        bundles are persisted). Confirmed live: the endpoint returned {} for the iOS scan. The iOS
+        Source Explorer tree therefore fell back to sparse finding-evidence paths — mostly Mach-O
+        framework binaries that correctly card — so viewable bundle files (plists/JSON/config) were
+        simply MISSING and the tree looked like "everything is a card." ***
+    FIX (decompiler.py list_source_files only): added an ipa_extract branch listing VIEWABLE files
+      (.plist/.strings/.json/.txt/.xml/.html/.js/.css/.md/.mobileconfig/.entitlements/.xcconfig/
+      .properties/.yaml/.cfg/.config/.storyboard/.modulemap). Compiled binaries (Mach-O, .dylib,
+      embedded.mobileprovision, .car) are EXCLUDED — they only card. Paths are served exactly like
+      Android's (flattenManifest prefixes "ipa_extract/…"; resolve_source_path already resolves it).
+      No frontend change needed — the frontend was already correct (Android proves it); the bug was
+      the empty backend manifest.
+    VERIFIED IN THE REAL UI PATH (the exact HTTP calls the UI makes):
+      /files: iOS tree 0 -> 80 viewable files (69 plists, 8 JSON incl. login_config.json/app_settings.json,
+        css, js, modulemap, storyboard Info.plists, AssetManifest.json).
+      /file on the PREFIXED tree path ("ipa_extract/Payload/…"): ALL 80 files -> CONTENT (plists
+        decode to XML), 0 cards, 0 errors. Mach-O Runner + embedded.mobileprovision (finding paths)
+        -> CARD, correct and untouched.
+    NO REGRESSION: Android /files still {jadx:2222, apktool:464, apk_extract:955}, NO ipa_extract key;
+      Android Source Explorer unchanged. Findings/score unchanged (list_source_files is only hit by
+      the on-demand /files endpoint, never the analysis pipeline): iOS 14/92/B, Android 47/34/F.
+      904 tests pass (NEW test_ios_source_explorer_listing.py: ipa_extract lists viewable + excludes
+      binaries; an Android-shaped scan has no ipa_extract key).
+    Files: backend/decompiler.py; NEW backend/tests/test_ios_source_explorer_listing.py.
+    Commit-ready: Y  (do NOT push until human confirms the enumerated-file-type table)
+
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
 - 2026-07-12  Plan created. Nothing run yet. Next: RUN 1.

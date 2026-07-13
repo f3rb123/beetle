@@ -567,6 +567,29 @@ def list_source_files(scan_id: str, max_files: int = 10000) -> dict:
         if files:
             result["apk_extract"] = sorted(files)
 
+    # ipa_extract - iOS bundle content. RUN 27: the iOS Source Explorer tree was EMPTY because
+    # this subdir was never enumerated (only jadx/apktool/apk_extract/repo were), so the tree fell
+    # back to sparse finding-evidence paths (mostly Mach-O framework binaries that correctly card).
+    # List the VIEWABLE bundle files (plists — bplist or XML, both decode to readable XML via
+    # inspect_file — plus text/config/JSON). Compiled binaries (Mach-O executables, .dylib,
+    # frameworks, .car, embedded.mobileprovision) are intentionally EXCLUDED: they have no source
+    # and would only render as binary cards. A path here is served like Android's: flattenManifest
+    # prefixes the subdir ("ipa_extract/…") and resolve_source_path resolves it under scan_work.
+    ipa_ext_base = scan_work / "ipa_extract"
+    if ipa_ext_base.exists():
+        files = []
+        for path in ipa_ext_base.rglob("*"):
+            if path.is_file() and len(files) < max_files:
+                rel = str(path.relative_to(ipa_ext_base))
+                ext = path.suffix.lower()
+                if ext in (".plist", ".strings", ".json", ".txt", ".xml", ".html", ".js",
+                           ".css", ".md", ".mobileconfig", ".entitlements", ".xcconfig",
+                           ".properties", ".yaml", ".yml", ".cfg", ".config", ".storyboard",
+                           ".modulemap", ".nib.txt"):
+                    files.append(rel)
+        if files:
+            result["ipa_extract"] = sorted(files)
+
     # repo - CI/CD repository scan (pipeline + source files, incl. extensionless
     # well-known files like Jenkinsfile / Dockerfile that have no suffix).
     repo_base = scan_work / "repo"
