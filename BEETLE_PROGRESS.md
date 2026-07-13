@@ -1379,7 +1379,11 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       repro on a real no-source APK. Same blocker class as L2. Offer: full validation if a
       packed/obfuscated Android sample is provided. L1 status -> FIXED (code+test), live-repro DEFERRED.
     Files: backend/analyzers/evidence_selection/view.py; NEW backend/tests/test_android_binary_evidence_carding.py.
-    Commit-ready: Y  (do NOT push until human confirms the verified-not-live-reproduced caveat)
+    L1 STATUS: FIXED (code trace + unit test + zero-regression on both apps); NOT live-validated
+      (no packed/no-source Android APK in the corpus). "Verified correct, not verified live." The
+      carding being DORMANT on InsecureShop (which has source) is itself evidence the gate is right —
+      it only fires when there is no source. Live repro deferred, same blocker class as L2.
+    Commit-ready: Y  (committed b870836; pushed to origin/v1.3-dev)
 
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
