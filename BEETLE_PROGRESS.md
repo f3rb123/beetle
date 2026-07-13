@@ -1416,7 +1416,54 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       904 tests pass (NEW test_ios_source_explorer_listing.py: ipa_extract lists viewable + excludes
       binaries; an Android-shaped scan has no ipa_extract key).
     Files: backend/decompiler.py; NEW backend/tests/test_ios_source_explorer_listing.py.
-    Commit-ready: Y  (do NOT push until human confirms the enumerated-file-type table)
+    Commit-ready: Y  (superseded/refined by RUN 28 — see below; committed as part of RUN 28)
+
+[x] RUN 28 — three live iOS UI bugs (binary view-code / Security-Explorer count / JSON) + 2 verifies  DONE
+    VERIFIED EACH against the REAL endpoints (L6 discipline — sims passed while UI failed before).
+    BUG 1 — binary-finding "View Code" showed a GENERIC protections card, never the matched symbol.
+      Root: the finding row/drawer "View Code" fetched /file?path=Runner -> inspect_file -> generic
+      describe() card, discarding the finding's own evidence (evidence_view.primary already had
+      symbol=_CC_MD5, string_index=8731). FIX: /file gains an optional strings_index; when a binary
+      FINDING passes it, the server returns the Mach-O's extracted-strings listing (decompiler.
+      binary_strings_listing, reproduced with the SAME 5 MiB read + _extract_strings the SAST used,
+      so the index matches) and the viewer scrolls to the symbol. A bare tree browse (no index)
+      still returns the generic card — the two paths are NOT collapsed (VERIFY 4). Frontend:
+      buildEvidence marks the binary entry with symbol+stringsIndex; openEvidence/openCode pass
+      strings_index; new "View Strings" button on the drawer; fixed a p.stringIndex->p.string_index
+      typo. VERIFIED: GET /file?path=Runner&strings_index=8731 -> text listing whose line 8731 is
+      exactly "_CC_MD5" (surrounded by _CC_SHA1/_CCRandomGenerateBytes); no-index -> {binary:true}.
+    BUG 2 — Security Explorer "secrets 4" then "No files in the secrets category". Two causes:
+      (a) PATH MISMATCH: tree paths are "ipa_extract/Payload/Runner.app/…" but the overlay's
+          finding/secret paths are "Runner.app/…"; normalizePath stripped only ONE prefix, leaving
+          "Payload/…" on one side. FIX: normalizePath now strips prefix segments REPEATEDLY
+          (ipa_extract/ + Payload/) so both sides reduce to "Runner.app/…".
+      (b) COUNT vs LIST from different sources: count = securityIndex[id].length, list = tree ∩
+          category. FIX: the category COUNT is now derived from the SAME tree-intersection as the
+          list (filterFileCount), so count === list by construction, every category, both platforms.
+      VERIFIED (real security_index + real /files, run through the ACTUAL model.js functions):
+      iOS secrets 4==4, crypto 3==3, network 1==1, authorization 1==1 — count==list for all. Android
+      count==list too (this also fixed a latent Android count!=list where a file in jadx+apk_extract
+      was listed but under-counted). Android findings/score 47/34/F unchanged.
+    BUG 3 — minified JSON (AssetManifest.json) rendered as one line. FIX: CodeBlockViewer pretty-
+      prints JSON for DISPLAY only (JSON.stringify(JSON.parse(raw),null,2)); parse-fail falls back to
+      raw; Copy still uses the original `content`. VERIFIED: AssetManifest.json raw 1 line (8469 chars)
+      -> 368 indented lines; Copy path untouched.
+    TREE REFINEMENT (enables VERIFY 4 + BUG 2 "list it"): RUN 27 listed only VIEWABLE ipa_extract
+      files, so binaries weren't browsable and iOS security categories on Mach-O (crypto/secrets)
+      showed 0. RUN 28 browses the WHOLE bundle — viewable->content, binary->card, binary finding->
+      strings — skipping only pure media/assets (.png/.svg/.ttf/.car/…). iOS tree 80 -> 209 files;
+      probed ALL 209 through the real /file: 164 content + 45 card, 0 errors, 0 media.
+    VERIFY 4 (CORRECT, untouched): Runner + embedded.mobileprovision now in the tree; a bare browse
+      (no finding context) returns the generic binary card. CONFIRMED via GET /file (no strings_index).
+    VERIFY 5 (CORRECT, untouched): 67 Info.plist files across the bundle are ALL distinct on disk
+      (distinct md5); each .framework has its own. The server serves each file's real bytes. No bug.
+    DISCIPLINE: presentation/explorer only — iOS 14/92/B, Android 47/34/F unchanged. Android tree
+      (/files: jadx/apktool/apk_extract, no ipa_extract) + Android Security Explorer unchanged.
+      904 tests pass (RUN 27 listing test updated: binaries now listed, media excluded).
+    Files: backend/main.py, backend/decompiler.py, backend/tests/test_ios_source_explorer_listing.py,
+      frontend/src/pages/Results.jsx, frontend/src/components/CodeBlockViewer.jsx,
+      frontend/src/components/workspace2/{SourceExplorer.jsx, source-explorer-model.js, ui.jsx, panels.jsx}.
+    Commit-ready: Y  (committed 597a59a; pushed to origin/v1.3-dev)
 
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)

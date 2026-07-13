@@ -1036,7 +1036,11 @@ export default function Results() {
     setCodeState({ ...base, content: '', binaryInfo: null, loading: true, error: '', meta: 'Loading source…' })
 
     try {
-      const response = await apiFetch(`/api/scans/${scanId}/file?path=${encodeURIComponent(path)}`)
+      // RUN 28 / BUG 1: a binary FINDING passes its Mach-O string index — ask the server for the
+      // extracted-strings listing (text) so we scroll to the matched symbol instead of showing a
+      // generic protections card. A plain tree browse (no index) still gets the card.
+      const stringsQ = opts.stringsIndex ? `&strings_index=${encodeURIComponent(opts.stringsIndex)}` : ''
+      const response = await apiFetch(`/api/scans/${scanId}/file?path=${encodeURIComponent(path)}${stringsQ}`)
       if (!response.ok) throw new Error(response.status === 404 ? 'Source file not available for this scan.' : 'Unable to open source file.')
 
       // Compiled artifacts come back as a JSON envelope — render a binary card,
@@ -1068,6 +1072,11 @@ export default function Results() {
       })
 
       const span = r.lines.length > 1 ? `${r.lines[0]}–${r.lines[r.lines.length - 1]}` : `${r.lines[0]}`
+      // RUN 28 / BUG 1: strings-listing view for a binary finding — label it with the matched
+      // symbol + string index so it reads as evidence, not a random source file.
+      const meta = opts.stringsIndex
+        ? `Extracted strings${opts.symbol ? ` · ${opts.symbol}` : ''} · string #${opts.stringsIndex}`
+        : `${r.approximate ? '≈ lines' : 'Lines'} ${span}${opts.source ? ` · ${opts.source}` : ''}${r.approximate ? ` · ${r.strategy}` : ''}`
       setCodeState({
         ...base,
         lines: r.lines,
@@ -1076,7 +1085,7 @@ export default function Results() {
         content,
         loading: false,
         error: '',
-        meta: `${r.approximate ? '≈ lines' : 'Lines'} ${span}${opts.source ? ` · ${opts.source}` : ''}${r.approximate ? ` · ${r.strategy}` : ''}`,
+        meta,
       })
     } catch (openError) {
       setCodeState({

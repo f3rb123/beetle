@@ -16,7 +16,14 @@ export const SEV_COLOR = {
 const _PREFIX_RE = /^(?:jadx|apktool|apk_extract|ipa_extract|payload)\//i
 
 export function normalizePath(p) {
-  return String(p || '').replace(/\\/g, '/').replace(_PREFIX_RE, '')
+  // Strip prefix segments REPEATEDLY. iOS manifest paths carry a compound prefix
+  // ("ipa_extract/Payload/…") while the overlay's finding/secret paths are relative to the
+  // app bundle ("Runner.app/…"); stripping only once left "Payload/…" on one side and not the
+  // other, so the Security Explorer category list never matched its count (RUN 28 / BUG 2).
+  let s = String(p || '').replace(/\\/g, '/')
+  let prev
+  do { prev = s; s = s.replace(_PREFIX_RE, '') } while (s !== prev)
+  return s
 }
 
 export function basename(p) {

@@ -1480,6 +1480,9 @@ async def list_files(scan_id: str, _user: dict = Depends(_require_auth)):
 async def get_file(
     scan_id: str,
     path: str = Query(..., description="Relative file path within decompiled output"),
+    strings_index: int | None = Query(
+        None, description="For a binary FINDING's view-code: the Mach-O string index to show "
+                          "the matched symbol + surrounding strings, instead of the generic card."),
     _user: dict = Depends(_require_auth),
 ):
     # Defense-in-depth: decode, normalize, and block any path that tries to
@@ -1515,6 +1518,15 @@ async def get_file(
         raise HTTPException(404, detail="File not found")
 
     if payload.get("kind") == "binary":
+        # RUN 28 / BUG 1: a FINDING's view-code on a binary passes its string index — return the
+        # extracted-strings listing (text) so the viewer shows the matched symbol + the surrounding
+        # strings and scrolls to that index. A bare file-tree browse (no index) still gets the
+        # generic binary card, so the two paths are NOT collapsed.
+        if strings_index is not None:
+            from decompiler import binary_strings_listing
+            listing = binary_strings_listing(scan_id, normalized)
+            if listing:
+                return PlainTextResponse(content=listing)
         return JSONResponse(content={"binary": True, "info": payload["info"]})
 
     return PlainTextResponse(content=payload.get("content", ""))

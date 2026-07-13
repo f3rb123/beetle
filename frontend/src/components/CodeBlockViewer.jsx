@@ -88,7 +88,16 @@ export default function CodeBlockViewer({
   const [copied, setCopied] = useState(false)
   const [search, setSearch] = useState('')
   const [activeMatchIndex, setActiveMatchIndex] = useState(0)
-  const lines = useMemo(() => String(content || '').split('\n'), [content])
+  // RUN 28 / BUG 3: pretty-print minified JSON for DISPLAY only (AssetManifest.json and friends
+  // arrive as one unreadable line). The Copy button still yields the original bytes (handleCopy
+  // uses `content`). Non-JSON, or JSON that fails to parse, falls back to the raw content verbatim.
+  const displayContent = useMemo(() => {
+    if (language !== 'json') return content
+    const raw = String(content || '')
+    if (!raw.trim()) return content
+    try { return JSON.stringify(JSON.parse(raw), null, 2) } catch { return content }
+  }, [content, language])
+  const lines = useMemo(() => String(displayContent || '').split('\n'), [displayContent])
   const highlightSet = useMemo(() => new Set(highlightedLines || []), [highlightedLines])
   const rowRefs = useRef(new Map())
   const codeBodyRef = useRef(null)
