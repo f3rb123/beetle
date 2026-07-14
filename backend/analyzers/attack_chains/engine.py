@@ -171,6 +171,24 @@ _CERT_BYPASS_TOKENS = (
 )
 
 
+# RUN 35 (R35-A): capability tags must key on a finding's IDENTITY (rule_id / category / taint
+# sink category), NEVER a bare prose substring in its title/description. A finding that merely
+# MENTIONS "reflection" or "webview" in prose is not a reflection/webview finding and must not earn
+# CODE_LOADING/WEBVIEW. Two shipped bugs came from the old prose match: RUN 32 (StrandHogg's
+# "reflection-based task hijacking" -> bogus Reflection RCE chain) and RUN 34 (a low-minSdk note
+# naming "WebView"/"addJavascriptInterface" -> bogus WebView Bridge RCE chain). Both were worked
+# around by rewording the findings; this closes the root cause so the mislabel cannot recur.
+#
+# The genuine reflection/code-loading RULES (which legitimately drive InsecureShop's RUN 25 chain)
+# are enumerated here, so removing the prose match keeps every true positive.
+_CODE_LOADING_RULE_IDS = frozenset((
+    "android_reflection",                    # code_rules: "Java Reflection Usage"
+    "android_dex_class_loader",              # code_rules: "Dynamic Code Loading — DexClassLoader"
+    "behavior_dynamic_class_and_dexloading", # behavior: "Dynamic Code Loading Detected"
+))
+_WEBVIEW_RULE_PREFIXES = ("android_webview", "ios_webview", "ios_wkwebview")
+
+
 def tag_capabilities(f: dict, results: dict | None = None) -> set:
     """Deterministic capability tags for a finding (the chaining vocabulary).
 
@@ -192,8 +210,10 @@ def tag_capabilities(f: dict, results: dict | None = None) -> set:
         caps.add("DEEPLINK")
     if "content provider" in blob or "contentprovider" in blob:
         caps.add("EXPORTED_PROVIDER")
-    # WebView
-    if cat == "webview" or "webview" in blob:
+    # WebView — identity only (category / webview rule / taint sink), never a prose "webview"
+    # mention. The sub-caps below stay prose-driven, but they are now reached ONLY for a genuine
+    # WebView finding, whose own text legitimately describes its configuration.
+    if cat == "webview" or sink == "webview" or rule_id.startswith(_WEBVIEW_RULE_PREFIXES):
         caps.add("WEBVIEW")
         if "javascript" in blob or "setjavascriptenabled" in blob:
             caps.add("WEBVIEW_JS")
@@ -210,8 +230,12 @@ def tag_capabilities(f: dict, results: dict | None = None) -> set:
         caps.add("CMD_SINK")
     if sink in ("filesystem", "file") or "path traversal" in blob:
         caps.add("FILE_SINK")
-    if sink in ("reflection", "dynamicloading", "dynamic_loading") or "dexclassloader" in blob \
-            or "dynamic code" in blob or "reflection" in blob:
+    # CODE_LOADING — identity only (taint sink / a dedicated reflection·dexload rule / the dedicated
+    # "Dynamic Code Loading" category), never a bare "reflection"/"dynamic code"/"dexclassloader"
+    # prose mention (that mislabel built the RUN 32 / RUN 34 bogus chains).
+    if (sink in ("reflection", "dynamicloading", "dynamic_loading")
+            or rule_id in _CODE_LOADING_RULE_IDS
+            or cat == "dynamic code loading"):
         caps.add("CODE_LOADING")
     if src in ("user input", "intent", "contentprovider", "content provider"):
         caps.add("EXTERNAL_INPUT")
