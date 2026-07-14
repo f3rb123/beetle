@@ -1,4 +1,4 @@
-.claude/
+﻿.claude/
 .codex
 node_modules/
 venv/
@@ -14,10 +14,10 @@ coverage/
 .vscode/
 .idea/
 
-# Phase 9.1.5 secret-safety validation scratch (jadx binary + decompiled APKs)
+# Secret-safety validation scratch (jadx binary + decompiled APKs)
 .tools/
 
-# Validation / review scratch artifacts (never commit — may contain tokens)
+# Validation / review scratch artifacts (never commit -- may contain tokens)
 .val_token
 .val_ids
 .val*
@@ -25,27 +25,26 @@ coverage/
 .uireview/
 frontend/preview-live/
 frontend/public/render-ws.html
+
+# Test / app binaries (never commit large app files)
 *.apk
 *.ipa
+*.zip
+*.pdf
+testapps/
 uploads/
 reports/
 tmp/
-*.zip 
- 
-*.pdf
-internal/MISSING_FEATURES.md
 
-# Beetle production-run planning docs (local working files, static)
-CLAUDE.md
-BEETLE_PROMPTS.md
-# BEETLE_PROGRESS.md is deliberately TRACKED — it is the crash-recovery / cross-session
-# resume record, which only works if it survives in version history.
-
-# Test binaries (never commit large app files)
-testapps/
-*.apk
-*.ipa
-
-# RUN 31+ — scan artifacts used for before/after report diffing (large, regenerable)
+# Scan artifacts used for before/after report diffing (large, regenerable)
 baseline/
 after_*/
+
+# Internal working / planning / audit notes -- never publish
+CLAUDE.md
+BEETLE_PROMPTS.md
+BEETLE_PROGRESS.md
+RUN*.md
+docs/RUN*.md
+internal/MISSING_FEATURES.md
+internal/
