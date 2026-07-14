@@ -1630,7 +1630,69 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       NEW backend/tests/test_taint_const_arg_guard.py (12 tests, BOTH directions),
       backend/tests/test_chain_reachability.py (2 tests re-locked to the honest contract).
     Tests: 924 passed, 11 skipped (was 912).
-    Commit-ready: Y  (nothing staged — human commits)
+    Commit-ready: Y  (committed 688060f on main — human confirmed; a stray `@` from a PowerShell
+      here-string leaked into the first commit message and was amended out.)
+
+[x] RUN 32 — StrandHogg 2.0 (platform-gated) with calibrated severity + grouping (ANDROID)  DONE
+    HOUSEKEEPING carried from RUN 31: baseline/ + after_run31/ added to .gitignore (scan artifacts,
+      regenerable, large). Did not commit them.
+    CONFIRM-GATE — verified before edit:
+      - Detector at _process_component (android_analyzer.py:1527); StrandHogg 1.0 block at :1765 fires
+        only on non_default_affinity or risky_launch. On IB2, ZERO such findings in baseline — 1.0 is
+        correctly silent, so a 2.0 rule is purely additive.
+      - target_sdk is reachable: _parse_manifest (sets app_info.target_sdk) runs at :423, BEFORE
+        _analyze_components at :424. IB2 target_sdk=22 (<29).
+      - is_launcher + label are LOCALS in _process_component, NOT in comp_info — a post-loop grouped
+        pass can't see them. Persisted is_launcher into comp_info (1 line).
+    *** THE PROMPT CONTRADICTED ITSELF — reported, owner adjudicated before edit. ***
+      Real manifest: IB2 has 5 exported activities (LoginActivity is exported-BY-DEFAULT via its
+      MAIN/LAUNCHER filter; the other 4 are exported="true"). Prompt said "4 rows" — a miscount.
+      Applying the FIX's OWN keyword rule {login,auth,payment,transfer,pin} OR launcher to the real
+      names gives the OPPOSITE of the prompt's VERIFY table for two activities: DoTransfer=HIGH (via
+      'transfer', not MEDIUM) and ChangePassword=MEDIUM ('password'/'change' are NOT in the set, not
+      HIGH). Owner ruling: SCOPE = all 5 (incl. launcher — StrandHogg 2.0 applies to any exported
+      activity; the launcher is a prime overlay target). SEVERITY = keep the keyword rule as written;
+      do NOT edit the list to match the (erroneous) VERIFY table. Rule-derived result:
+        LoginActivity HIGH(launcher) · PostLogin HIGH(login) · DoTransfer HIGH(transfer) ·
+        ViewStatement MEDIUM · ChangePassword MEDIUM   -> 5 rows, 3 HIGH / 2 MEDIUM.
+    FIX: new _detect_strandhogg2(results), called once after the component loop in _analyze_components.
+      Gate: target_sdk parsed via _sdk_int(); fires only when known AND <29 (unknown/'?' never fires —
+      absence of evidence, not vulnerability). Iterates attack_surface.activities, keeps exported,
+      computes per-row severity (sensitive-name OR launcher -> HIGH), emits ONE grouped finding
+      (rule_id manifest_strandhogg2) with N rows in strandhogg2_activities + the enumerated
+      description. cwe CWE-926 / masvs MASVS-PLATFORM-1 / owasp M1 / cve CVE-2020-0096; remediation
+      "Set targetSdkVersion >= 29". Evidence anchored via manifest_evidence_spec {targetSdkVersion:22}
+      -> resolves to AndroidManifest.xml line 2 (the exact attribute the fix changes). Kept the 1.0
+      rule untouched (separate, and it does not fire here anyway); the 2.0 keyword set is a NEW local
+      constant, so 1.0 behaviour on other apps is unchanged.
+    *** ARTIFACT VERIFICATION CAUGHT AN FP I INTRODUCED — then fixed it. *** First regenerated IB2
+      showed +2 findings: the StrandHogg finding (expected) AND a bogus CRITICAL-class attack chain
+      "Dynamic Code Loading / Reflection RCE". Proven deterministic (two rescans identical) and traced
+      to MY finding: the chain's required_findings was my StrandHogg finding's canonical_id. ROOT CAUSE
+      — attack_chains/engine.py:213-214 tags CODE_LOADING on a BARE PROSE SUBSTRING ("reflection" in
+      blob), and my description said "reflection-based task hijacking". StrandHogg 2.0 is task hijacking,
+      NOT code loading -> category-error chain. FIX (scoped to my new finding, zero regression risk):
+      reworded the description to drop the "reflection" token ("hijack the task and overlay..."). The
+      shared tagger's over-broad prose match is a REAL latent bug but out of scope here (a shared-engine
+      change needs its own both-directions proof vs InsecureShop's legit RUN 25 Reflection chain) —
+      LOGGED FOR RUN 35 (mislabel sweep). Added a regression test asserting the StrandHogg finding is
+      NOT tagged CODE_LOADING, so the FP cannot silently return.
+    ARTIFACT (final, VT off both sides — same env-confound control as RUN 31):
+      InsecureBankv2  53 -> 54 findings (+1: ONLY the grouped StrandHogg HIGH). ADDED: nothing else.
+        REMOVED: nothing. Chains IDENTICAL to RUN 31 (4 -> 4; the bogus chain is gone). Severity
+        H7 -> H8, all other counts unchanged. Score 35 -> 34 (F held), fully attributed: high
+        deduction 20.74 -> 21.74 (+1.00), chain_penalty 20 -> 20, bonuses identical. 5-row card:
+        LoginActivity/PostLogin/DoTransfer HIGH, ViewStatement/ChangePassword MEDIUM; evidence on
+        AndroidManifest.xml:2; remediation cites targetSdk>=29 + CVE-2020-0096.
+      InsecureShop (NEGATIVE GATE)  targetSdk=29 -> StrandHogg does NOT fire. 47 findings / 34 F —
+        BYTE-IDENTICAL, delta NONE. Gate proven both ways.
+      testapp.ipa  targetSdk=None (iOS) -> does not fire. 14 findings / 92 B — IDENTICAL, delta NONE.
+    Files changed: backend/analyzers/android_analyzer.py (persist is_launcher into comp_info; new
+      _STRANDHOGG2_* constants, _sdk_int(), _detect_strandhogg2(); call after the component loop);
+      NEW backend/tests/test_strandhogg2.py (11 tests: both gate directions + calibration + the
+      CODE_LOADING FP guard).
+    Tests: 935 passed, 11 skipped (was 924).
+    Commit-ready: Y
 
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
@@ -1701,3 +1763,14 @@ NO code change and show the order moves on its own). Only then is it safe to pas
   testapp.ipa (92/B) byte-stable. Caught + neutralized a VirusTotal env confound (baseline had no VT
   key; recreated container did) by re-scanning with VT off. 924 tests pass. Next: human confirms the
   diff -> commit -> RUN 32 (StrandHogg 2.0).
+- 2026-07-14  RUN 31 committed (688060f, main; message amended to drop a stray here-string '@').
+  baseline/ + after_run31/ gitignored. RUN 32 DONE (not committed): StrandHogg 2.0 (CVE-2020-0096)
+  platform-gated detector. CONFIRM-GATE found the prompt self-contradicted (4 vs 5 exported activities;
+  the FIX keyword rule inverts the VERIFY table for DoTransfer + ChangePassword) — reported, owner ruled
+  all-5 scope + keep-the-rule severity (3 HIGH / 2 MEDIUM). ARTIFACT VERIFICATION caught a self-inflicted
+  FP: my "reflection-based" wording tripped the chain tagger's bare "reflection" substring match and
+  assembled a bogus "Dynamic Code Loading / Reflection RCE" chain with my finding as its required member;
+  reworded to drop the token (scoped, zero-regression), added a CODE_LOADING guard test, logged the shared
+  tagger over-match for RUN 35. Final artifact clean: IB2 53->54 (only the grouped StrandHogg HIGH),
+  chains identical, score 35->34/F fully attributed; InsecureShop negative gate silent (targetSdk 29),
+  byte-identical; iOS 92/B untouched. 935 tests pass. Next: human confirm -> commit -> RUN 33 (trackers).

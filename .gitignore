@@ -46,6 +46,6 @@ testapps/
 *.apk
 *.ipa
 
-# RUN 31 — scan artifacts used for before/after report diffing (large, regenerable)
+# RUN 31+ — scan artifacts used for before/after report diffing (large, regenerable)
 baseline/
-after_run31/
+after_run*/

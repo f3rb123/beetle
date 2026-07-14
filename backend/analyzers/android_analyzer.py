@@ -1472,6 +1472,98 @@ def _analyze_components(apk, tmpdir, results):
         for elem in app_elem.iter(comp_type):
             _process_component(elem, comp_type, pkg, results)
 
+    # RUN 32 — StrandHogg 2.0 is a WHOLE-APP posture (targetSdk-gated), so it runs
+    # once here over the collected activities rather than per component.
+    _detect_strandhogg2(results)
+
+
+# RUN 32 — StrandHogg 2.0 (CVE-2020-0096). Any EXPORTED activity on targetSdk < 29 is
+# vulnerable regardless of launchMode/taskAffinity (unlike StrandHogg 1.0, which needs a
+# risky launchMode or non-default affinity). It is a PLATFORM gate, not a per-component
+# manifest flaw, so it is detected once over all activities and grouped into ONE finding.
+_STRANDHOGG2_FIXED_SDK = 29
+# Sensitive-flow keywords (matched on the activity CLASS name). A sensitive activity OR
+# the launcher is HIGH (a spoofable login/payment/transfer overlay, or the app's front
+# door); any other exported activity is MEDIUM. Deliberately NOT blanket-HIGH like MobSF.
+_STRANDHOGG2_SENSITIVE = ("login", "auth", "payment", "transfer", "pin")
+
+
+def _sdk_int(value) -> int | None:
+    """Parse a target/min SDK value to int; None when unknown ('?', '', non-numeric)."""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _detect_strandhogg2(results: dict) -> None:
+    """Emit ONE grouped StrandHogg 2.0 finding when targetSdk < 29 and exported
+    activities exist. Conservative gate: an unknown targetSdk never fires (absence of
+    evidence, not evidence of vulnerability)."""
+    target_sdk = _sdk_int(results.get("app_info", {}).get("target_sdk"))
+    if target_sdk is None or target_sdk >= _STRANDHOGG2_FIXED_SDK:
+        return  # patched platform, or targetSdk unknown → do not claim vulnerability
+
+    activities = results.get("attack_surface", {}).get("activities", []) or []
+    rows: list[dict] = []
+    for a in activities:
+        if not a.get("exported"):
+            continue
+        short = a.get("short_name") or (a.get("name") or "").split(".")[-1]
+        is_launcher = bool(a.get("is_launcher"))
+        matched = [kw for kw in _STRANDHOGG2_SENSITIVE if kw in short.lower()]
+        sensitive = bool(matched)
+        sev = "high" if (sensitive or is_launcher) else "medium"
+        if is_launcher:
+            reason = "launcher/main activity — the app's front door and a prime overlay target"
+        elif sensitive:
+            reason = f"security-sensitive flow (name matches '{matched[0]}')"
+        else:
+            reason = "exported activity"
+        rows.append({"name": a.get("name") or short, "short_name": short,
+                     "severity": sev, "reason": reason,
+                     "launcher": is_launcher, "sensitive": sensitive})
+
+    if not rows:
+        return
+
+    overall = "high" if any(r["severity"] == "high" for r in rows) else "medium"
+    high_names = [r["short_name"] for r in rows if r["severity"] == "high"]
+    n = len(rows)
+    row_lines = "\n".join(
+        f"  • {r['short_name']} — {r['severity'].upper()} ({r['reason']})" for r in rows)
+    description = (
+        f"The app targets API {target_sdk} (< {_STRANDHOGG2_FIXED_SDK}), so it is exposed to "
+        f"StrandHogg 2.0 (CVE-2020-0096). On targetSdk < {_STRANDHOGG2_FIXED_SDK} a malicious "
+        "app can hijack the task and overlay ANY exported activity — no risky launchMode or "
+        "taskAffinity is required (unlike StrandHogg 1.0). "
+        f"{n} exported activit{'y is' if n == 1 else 'ies are'} affected:\n{row_lines}")
+
+    results["findings"].append({
+        "rule_id":        "manifest_strandhogg2",
+        "title":          "StrandHogg 2.0 Task Hijacking (targetSdk < 29)",
+        "severity":       overall,
+        "category":       "Attack Surface",
+        "description":    description,
+        "impact":         ("Task-injection overlay lets an attacker present a spoofed screen over a "
+                           "real activity to phish credentials, capture input, or hijack the UI flow "
+                           + (f"(highest risk on the sensitive/front-door activit"
+                              f"{'y' if len(high_names) == 1 else 'ies'} {', '.join(high_names)})."
+                              if high_names else "of any exported activity.")),
+        "recommendation": (f"Set android:targetSdkVersion to {_STRANDHOGG2_FIXED_SDK} or higher — the "
+                           "platform-level StrandHogg 2.0 mitigation. Additionally set "
+                           'android:exported="false" on activities that do not need external launch.'),
+        "cwe":            "CWE-926",
+        "masvs":          "MASVS-PLATFORM-1",
+        "owasp":          "M1",
+        "cve":            "CVE-2020-0096",
+        "target_sdk":     target_sdk,
+        "strandhogg2_activities": rows,
+        # Anchor evidence on the ROOT CAUSE — the targetSdkVersion line — so View Code opens
+        # the exact attribute the remediation changes. Must resolve or the finding is dropped.
+        "manifest_evidence_spec": {"attr": "targetSdkVersion", "value": str(target_sdk)},
+    })
+
 
 # Relative strength of a resolved protectionLevel — a HIGHER number is a stronger
 # access boundary. Used to detect a <path-permission> that RELAXES a provider's own
@@ -1619,6 +1711,7 @@ def _process_component(elem, comp_type, pkg, results):
         "deeplinks":  deeplinks,
         "deep_links": deep_links,   # structured scheme→host→path + BROWSABLE/autoVerify
         "browsable":  browsable,
+        "is_launcher": is_launcher,  # RUN 32: needed by the post-loop StrandHogg 2.0 pass
     }
 
     # Add to attack surface
