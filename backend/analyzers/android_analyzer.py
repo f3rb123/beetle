@@ -1254,10 +1254,17 @@ def _parse_manifest(apk, results):
                 "title":          "Low Minimum SDK Version",
                 "severity":       "medium",
                 "category":       "Configuration",
-                "description":    f"minSdkVersion is {min_sdk} (Android {_sdk_to_version(min_sdk)}). "
-                                  "Devices running this version lack modern security controls "
-                                  "(full-disk encryption, SELinux enforcing, etc.).",
-                "impact":         "App can be installed on devices with known OS-level vulnerabilities.",
+                "description":    (f"minSdkVersion is {min_sdk} (Android {_sdk_to_version(min_sdk)}). "
+                                  "Concrete OS-level exposures on the supported pre-5.0 devices: the "
+                                  "system browser/rendering engine is part of the OS image and is NOT "
+                                  "updatable through the Play Store, so browser-engine remote-code-"
+                                  "execution bugs fixed in later Android versions remain exploitable; "
+                                  "no SELinux enforcing and no default full-disk encryption; no runtime "
+                                  "permission model (all permissions are granted at install time); APK "
+                                  "Signature Scheme v2 is unavailable, so the app can only be v1-signed "
+                                  "(Janus-exploitable, see the signing finding); and TLS 1.2 is not "
+                                  "enabled by default."),
+                "impact":         "App can be installed on devices with known, unpatchable OS-level vulnerabilities (browser-engine RCE, no full-disk encryption, install-time permissions).",
                 "recommendation": "Raise minSdkVersion to at least 23 (Android 6.0) to enforce runtime permissions.",
             })
         elif 0 < min_sdk < 24:

@@ -42,6 +42,38 @@ def _format_signature_algorithm(hash_name: str, key_class_name: str) -> str:
     return f"{(hash_name or '').upper()}with{key_algo}"
 
 
+# Janus (CVE-2017-13156) affects Android 5.0–8.0 (API 21–26); the OS-level fix shipped in 8.1
+# (API 27). A v1-only APK is exploitable on any device in that range, so exposure depends on
+# whether the app's supported range REACHES it — i.e. minSdk <= 26. (RUN 34 context gate.)
+_JANUS_FIXED_API = 27
+
+
+def _janus_severity(results: dict) -> tuple[str, str]:
+    """(severity, justification) for a v1-only APK, gated on whether minSdk reaches the
+    Janus-vulnerable OS range (API 21–26). HIGH when it does (or minSdk is unknown — a v1-only
+    build almost always supports old devices, and under-calling a real tamper vector is worse
+    than over-calling); MEDIUM when the app only runs on the patched 8.1+ range."""
+    raw = str(results.get("app_info", {}).get("min_sdk", "")).strip()
+    try:
+        min_sdk = int(raw)
+    except (TypeError, ValueError):
+        min_sdk = None
+
+    if min_sdk is None:
+        return ("high",
+                "minSdkVersion is unknown; a v1-only build almost certainly supports the "
+                f"Janus-vulnerable range (Android 5.0–8.0 / API 21–26), so this is rated HIGH.")
+    if min_sdk < _JANUS_FIXED_API:
+        return ("high",
+                f"minSdkVersion is {min_sdk}, so the app installs on devices in the Janus-vulnerable "
+                "range (Android 5.0–8.0 / API 21–26, fixed in 8.1/API 27). On those devices the "
+                "v1-only signature can be defeated to inject a malicious DEX — rated HIGH.")
+    return ("medium",
+            f"minSdkVersion is {min_sdk} (Android 8.1+/API 27+), which is beyond the Janus-vulnerable "
+            "range (fixed in API 27), so the tamper path does not reach a supported device — rated "
+            "MEDIUM. v1-only signing is still weak (no full-content integrity) and should be fixed.")
+
+
 def analyze_certificate(apk_path: str, results: dict):
     """Extract and analyze APK signing certificate."""
     cert_info = {
@@ -273,13 +305,18 @@ def analyze_certificate(apk_path: str, results: dict):
         })
 
     if "v1" in cert_info["scheme"] and "v2" not in cert_info["scheme"]:
+        janus_sev, janus_reason = _janus_severity(results)
         results["findings"].append({
             "rule_id":        "cert_v1_signature_only",
             "title":          "Only APK Signature Scheme v1 Used",
-            "severity":       "medium",
+            "severity":       janus_sev,
             "category":       "Certificate",
-            "description":    "APK uses only v1 (JAR) signatures. v1 does not protect all APK content and is vulnerable to Janus vulnerability (CVE-2017-13156).",
+            "description":    ("APK uses only v1 (JAR) signatures. v1 does not protect all APK content "
+                              "and is vulnerable to the Janus vulnerability (CVE-2017-13156), which "
+                              "lets an attacker prepend a malicious DEX to the APK while keeping the "
+                              "original v1 signature valid. " + janus_reason),
             "recommendation": "Enable both v1 and v2 signature schemes. v2 is mandatory for Android 7.0+.",
+            "severity_reason": janus_reason,
             "masvs":          "MASVS-CODE-4",
             "owasp":          "M7",
         })

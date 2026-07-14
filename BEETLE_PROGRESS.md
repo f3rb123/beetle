@@ -1765,6 +1765,58 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       NEW backend/tests/test_tracker_class_matching.py (11 tests: surface fix, tiering, no-FP,
       determinism, iOS-guard).
     Tests: 946 passed, 11 skipped (was 935). Frontend build OK.
+    Commit-ready: Y  (committed 69197a5 on main; axis correction committed a29347d.)
+
+[x] RUN 34 — APKID parity + context-aware Janus severity (ANDROID)  DONE — SHIPPED PART B ONLY
+    *** THE PROMPT'S PART A PREMISE WAS FALSE, AND "MATCHING MobSF" WOULD HAVE IMPORTED AN FP. ***
+    CONFIRM-GATE + investigation (all verified against live source + the real DEX/jadx):
+      - apkid is NOT installable here (host py3.14 has no yara-python-dex wheel; the report container
+        is read-only and apkid is intentionally not a baked dep). So a real-apkid CLI path could never
+        be verified on an artifact — an unverifiable liability.
+      - "Beetle has no packer/anti-analysis layer" is FALSE. api_analyzer.py:225 detect_apkid_features
+        is an existing regex "Mimics APKiD behaviour without requiring the tool" that already populates
+        results["apkid"] (anti-VM Build.* / anti-debug / packer / compiler) on every Android scan
+        (wired at android_analyzer.py:606). The data was just never rendered or turned into findings.
+      - So the apparent gap was "surface the data", not "add an engine". I built that (build_apkid_
+        findings + PDF section) — then the REAL ARTIFACT killed it:
+      - *** MobSF's anti-VM on IB2 is a LIBRARY-CODE OVER-MATCH. *** Ground truth: IB2 references
+        Build.MODEL/MANUFACTURER/DEVICE, but in ZERO app-owned files — every hit is in bundled
+        play-services/AndroidX. InsecureShop the same (Build.* only in Material/Glide). NEITHER app
+        has emulator-telltale strings (goldfish/ranchu/qemu/google_sdk = 0 in both). So neither app's
+        OWN code does anti-VM; both just let libraries read device info. Emitting an anti-VM finding
+        (even hedged INFO) would flag LIBRARY behaviour as app behaviour — a false positive by Beetle's
+        own ownership discipline (RUN 8/9/25), and exactly the "copy MobSF's FP-driven output" the
+        project forbids. The existing results["apkid"] on this corpus is entirely library-owned or
+        noise (the "R8" label is itself an FP — no R8 marker in IB2's dex, confirmed).
+      DECISION (human-ratified): SHIP PART B ONLY. Drop Part A entirely — do NOT ship the surfacing
+      (would import the FP) and do NOT ship dormant app-owned-restricted plumbing (verified only by
+      "it correctly emitted nothing" = the tests-not-artifact trap). Reverted apkid_engine.py,
+      build_apkid_findings, the PDF _apkid_section, and all wiring. detect_apkid_features itself was
+      never modified.
+    PART B — CONTEXT-AWARE JANUS SEVERITY (shipped, verified on the real artifact):
+      cert_analyzer.py cert_v1_signature_only: was blanket MEDIUM. Now gated via _janus_severity() on
+      whether minSdk reaches the Janus-vulnerable OS range (Android 5.0–8.0 / API 21–26, fixed in
+      8.1/API 27): minSdk <= 26 (or unknown) -> HIGH; minSdk >= 27 -> MEDIUM. Each carries a
+      severity_reason naming the concrete range + value. IB2 minSdk=15 -> HIGH (justified). Neither
+      MobSF's blanket-HIGH nor Beetle's old blanket-MEDIUM; more correct than both.
+      low_min_sdk enrichment: kept MEDIUM, named the concrete pre-5.0 OS risks (unpatchable browser-
+      engine RCE, no SELinux/FDE, install-time permissions, v1/Janus, weak TLS). REWORDED to drop the
+      literal "WebView"/"addJavascriptInterface" tokens — my first draft of that text tripped the
+      chain capability tagger (the RUN 32 keyword-contamination class) and spawned a bogus "WebView
+      JavaScript Bridge RCE" chain with low_min_sdk as a required member. Reword removed it.
+    ARTIFACT (VT off both sides):
+      InsecureBankv2  findings 54->54, score 34/F held. ONLY delta: Janus MEDIUM->HIGH (severity
+        H8->H9, M13->M12). ADDED/REMOVED findings: NONE. Chains IDENTICAL to RUN 33 (WebView chain did
+        NOT appear — reword worked). No APKID findings, no APKID section (Part A dropped).
+      InsecureShop  47 findings / 34 F — byte-stable. No Janus finding (v2-signed, gate doesn't fire).
+        low_min_sdk reworded (no WebView token); chains IDENTICAL (no spurious chain here either).
+      testapp.ipa  14 / 92 B — unchanged (cert_analyzer + low_min_sdk are Android-only).
+    COMPARISON DATA POINT (for the MobSF write-up): "MobSF flags anti-VM on IB2 by matching library
+      Build.* access; Beetle's ownership filter is correctly silent — MobSF FPs, Beetle is precise."
+    Files changed: backend/analyzers/cert_analyzer.py (_janus_severity + gated finding),
+      backend/analyzers/android_analyzer.py (low_min_sdk enriched+reworded description),
+      NEW backend/tests/test_janus_context_severity.py (6 tests: range gate both directions + reason).
+    Tests: 951 passed, 11 skipped.
     Commit-ready: Y
 
 ═══════════════ RUN 35 BACKLOG (deferred mislabel/FP items — address in the sweep) ═══════════════
@@ -1782,6 +1834,13 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Identity/App Updates/Background Work/ML-AI = bundled SDK) and render the split in frontend
     panels2.jsx + PDF _trackers_section (separate counts/sections). Shared-surface; keep iOS trackers
     byte-stable. Data is already correct; this is presentation + a kind tag.
+
+═══════════════ FUTURE RUNS (gated on new corpus / out of current scope) ═══════════════
+[ ] FUT-1  APKID app-owned surfacing. RUN 34 proved detect_apkid_features already collects anti-VM/
+    packer data but it's all LIBRARY-owned on the current corpus, so surfacing it = FPs. Building the
+    app-owned-restricted emitter is only worth it with a corpus that has REAL app-owned anti-analysis
+    (a packed/protected/anti-emulator APK), so it can be verified on a live artifact — not shipped as
+    "correctly emitted nothing here" plumbing. Gate this run on acquiring such a sample.
 
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
@@ -1878,3 +1937,17 @@ NO code change and show the order moves on its own). Only then is it safe to pas
   but the real classes.dex has none — Material UI + Gson only; correct no-FP result). iOS trackers
   BYTE-IDENTICAL (9, 92/B). 946 tests pass, frontend builds. Next: human confirm -> commit -> RUN 34
   (APKID anti-VM/packer/compiler).
+- 2026-07-14  RUN 33 committed (69197a5) + axis correction (a29347d). RUN 34 DONE — SHIPPED PART B
+  ONLY. Investigation flipped the run: the prompt's "Beetle has no packer layer" was false
+  (detect_apkid_features already collects anti-VM/packer data, just unrendered), and — decisively —
+  MobSF's anti-VM on IB2 is a LIBRARY-CODE over-match: Build.* appears in ZERO app-owned files in
+  either test app, and neither has emulator-telltale strings, so surfacing it would import MobSF's FP
+  (violates Beetle's ownership discipline). Human ratified: drop Part A entirely (reverted apkid_engine
+  + build_apkid_findings + PDF section + wiring), ship only Part B. Part B = context-aware Janus
+  severity (v1-only signing gated on minSdk reaching the Janus API 21-26 range; IB2 minSdk 15 ->
+  MEDIUM->HIGH with justification) + low_min_sdk concrete-OS-risk enrichment (reworded to avoid the
+  RUN 32 keyword-contamination class after a first draft spawned a bogus WebView chain). ARTIFACT: IB2
+  only delta = Janus MEDIUM->HIGH, no new findings/chains, 34/F held; InsecureShop + iOS byte-stable.
+  951 tests pass. Logged: MobSF-anti-VM-FP comparison data point; FUT-1 (APKID app-owned surfacing,
+  gated on a packed-APK corpus). Next: human confirm -> commit -> RUN 35 (FP/mislabel sweep, incl.
+  R35-A/R35-B).
