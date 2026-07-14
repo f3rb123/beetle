@@ -1819,13 +1819,37 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Tests: 951 passed, 11 skipped.
     Commit-ready: Y
 
-═══════════════ RUN 35 BACKLOG (deferred mislabel/FP items — address in the sweep) ═══════════════
-[ ] R35-A  Chain tagger prose over-match. attack_chains/engine.py:213-214 tags CODE_LOADING on a bare
-    "reflection"/"dynamic code" substring anywhere in a finding's title/description/snippet. RUN 32
-    hit this (StrandHogg "reflection-based" -> bogus Reflection RCE chain) and worked around it by
-    rewording the finding. The shared tagger is still over-broad: any future finding that mentions
-    those words in prose will mis-tag. Fix needs both-directions proof vs InsecureShop's legit RUN 25
-    Reflection RCE chain (must NOT regress it). Same class likely affects other keyword caps.
+═══════════════ RUN 35 — FP/mislabel sweep (R35-A done; T1–T3 + R35-B pending) ═══════════════
+[x] R35-A  Chain tagger prose over-match — FIXED (own commit).  ANDROID+shared (iOS proven no-drift).
+    ROOT CAUSE (confirmed): tag_capabilities (attack_chains/engine.py) added WEBVIEW on
+    `"webview" in blob` and CODE_LOADING on `"dexclassloader"/"dynamic code"/"reflection" in blob` —
+    bare prose substrings of a finding's title/description. RUN 32 (StrandHogg "reflection-based" ->
+    Reflection RCE) and RUN 34 (low-minSdk naming "WebView"/"addJavascriptInterface" -> WebView Bridge
+    RCE) both formed bogus chains this way; both had been worked around by rewording, leaving the root
+    cause live.
+    BOTH-DIRECTIONS TENSION (the user flagged, confirmed real): InsecureShop's legit RUN 25 chain
+    requires android_reflection ("Java Reflection Usage") — which has NO reflection taint-sink and
+    category "Code Quality", so it earned CODE_LOADING ONLY via the prose "reflection" match. Deleting
+    the prose match naively would have killed the true positive.
+    FIX: tag by IDENTITY, not prose. CODE_LOADING now requires a taint sink in
+    {reflection,dynamicloading} OR rule_id in {android_reflection, android_dex_class_loader,
+    behavior_dynamic_class_and_dexloading} OR category "Dynamic Code Loading". WEBVIEW now requires
+    category "webview" OR a webview rule_id prefix (android_webview/ios_webview/ios_wkwebview) OR a
+    WebView taint sink. android_insecure_deserialization (adjacent in the rule table) is explicitly
+    NOT swept in. The genuine reflection/webview RULES keep the capability; a prose-only mention never
+    earns it.
+    VERIFY (both directions, real artifacts):
+      InsecureShop: chains BYTE-IDENTICAL — "Dynamic Code Loading / Reflection RCE" AND "Deep Link to
+        WebView File Disclosure" both SURVIVE (android_reflection tags by rule_id; webview by category).
+        47 findings / 34 F unchanged.
+      InsecureBankv2: chains identical, no bogus Reflection/WebView chain, 54 findings / 34 F unchanged.
+      testapp.ipa: chains identical, 92/B — no iOS drift (shared engine).
+      Unit tests lock the mechanism so the FP CANNOT recur: a StrandHogg-like ("reflection-based" prose,
+      manifest_strandhogg2 rule) and a low-minSdk-like ("WebView/addJavascriptInterface" prose,
+      manifest_low_min_sdk rule) earn NO CODE_LOADING/WEBVIEW; the genuine rules still do.
+    Files: backend/analyzers/attack_chains/engine.py (tag_capabilities + 2 identity constants),
+      NEW backend/tests/test_capability_tagger_identity.py (12 tests, both directions).
+    Tests: 962 passed, 11 skipped. Commit-ready: Y.
 [ ] R35-B  Tracker vs bundled-SDK label split. RUN 33's detect_trackers returns bundled functional
     SDKs (Google Maps SDK, Google Sign-In) alongside true Exodus trackers (AdMob/Analytics/Tag
     Manager). All are real detections, but the REPORT must distinguish "tracker (Exodus)" from
