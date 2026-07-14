@@ -837,7 +837,13 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
     # ── NEW: Tracker Detection ────────────────────────────────────────────────
     tracker_started = time.perf_counter()
     package_hints = set(results.get("app_info", {}).get("package_hints", []))
-    results["trackers"] = detect_trackers(package_hints) if package_hints else []
+    # RUN 33 — match against the full DEX class inventory (pop the transient so it never
+    # serializes) + observed endpoints for confidence tiering. Falls back to prefix-only when
+    # the inventory is unavailable (androguard missing / parse failure).
+    dex_classes = results.pop("_dex_classes", None) or set()
+    results["trackers"] = detect_trackers(
+        package_hints, class_names=dex_classes, endpoints=results.get("endpoints")
+    ) if (package_hints or dex_classes) else []
     _record_module_metric(results, "tracker_detection", tracker_started, trackers=len(results.get("trackers", [])))
 
     # ── NEW: Malware Permission Analysis ──────────────────────────────────────
@@ -1163,6 +1169,10 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
 
     results["scan_metrics"]["summary"]["total_duration_ms"] = int((time.perf_counter() - overall_started) * 1000)
     results["scan_metrics"]["summary"]["module_count"] = len(results.get("scan_metrics", {}).get("modules", {}))
+
+    # RUN 33 — defensive: drop the transient class inventory if the tracker pass never popped it
+    # (e.g. an early error skipped line ~845), so 6k class names never bloat the serialized report.
+    results.pop("_dex_classes", None)
 
     return results
 
@@ -1995,6 +2005,10 @@ def _detect_sdks(apk, tmpdir, results):
     seen = set()
     all_packages = _collect_package_hints(apk, tmpdir, results)
     results["app_info"]["package_hints"] = sorted(all_packages)
+    # RUN 33 — full DEX class inventory for tracker matching (statically-linked SDKs that never
+    # appear in the manifest). Stashed transiently; the primary tracker pass pop()s it later.
+    dex_classes = _collect_dex_classes(apk)
+    results["_dex_classes"] = dex_classes
     try:
         for pkg_prefix, (sdk_name, category, sev) in SDK_SIGNATURES.items():
             if any(p.startswith(pkg_prefix) for p in all_packages):
@@ -2019,7 +2033,8 @@ def _detect_sdks(apk, tmpdir, results):
     except Exception:
         pass
 
-    tracker_hits = detect_trackers(all_packages)
+    tracker_hits = detect_trackers(all_packages, class_names=dex_classes,
+                                   endpoints=results.get("endpoints"))
     for tracker in tracker_hits:
         key = tracker.get("name")
         if key and key not in seen:
@@ -2102,6 +2117,37 @@ def _collect_package_hints(apk, tmpdir: str, results: dict) -> set[str]:
                 packages.add(".".join(cleaned[:i]))
 
     return {value for value in packages if "." in value}
+
+
+def _collect_dex_classes(apk) -> set[str]:
+    """Full dotted class-name inventory from the DEX class table (RUN 33 tracker surface).
+
+    This is a class-TABLE read of the DEX bytes the APK object already holds — NOT a decompile
+    or an AnalyzeAPK cross-ref pass. It exists because the manifest-derived package hints miss
+    statically-linked SDKs (Google Analytics / Tag Manager ship classes that are never declared
+    in the manifest). Best-effort: any failure yields an empty set and detection degrades to the
+    manifest-prefix path."""
+    names: set[str] = set()
+    if apk is None:
+        return names
+    try:
+        from androguard.core.dex import DEX
+    except Exception:
+        return names
+    try:
+        for dex_bytes in apk.get_all_dex():
+            try:
+                for raw in DEX(dex_bytes).get_classes_names():
+                    # androguard yields "Lcom/foo/Bar;" — normalize to dotted "com.foo.Bar".
+                    n = raw
+                    if n.startswith("L") and n.endswith(";"):
+                        n = n[1:-1]
+                    names.add(n.replace("/", "."))
+            except Exception:
+                continue
+    except Exception:
+        return names
+    return names
 
 
 def _detect_session_recording_sdk_issues(tmpdir: str, all_packages: set[str], tracker_hits: list, results: dict):

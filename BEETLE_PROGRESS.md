@@ -1692,6 +1692,69 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       NEW backend/tests/test_strandhogg2.py (11 tests: both gate directions + calibration + the
       CODE_LOADING FP guard).
     Tests: 935 passed, 11 skipped (was 924).
+    Commit-ready: Y  (committed dc1bf87 on main; message written via file to avoid the here-string
+      `@` pitfall from RUN 31.)
+
+[x] RUN 33 — Trackers: class-inventory matching surface + confidence tiers (ANDROID)  DONE
+    CONFIRM-GATE — the prompt's root-cause description was PARTLY WRONG; verified against live source:
+      - Two callers of detect_trackers: android_analyzer.py:840 (primary results["trackers"]) and
+        :2022 (SDK list). iOS uses detect_trackers_ios (untouched) — scope boundary confirmed.
+      - The matched set is NOT a "pre-categorized SDK set": it is package_hints from
+        _collect_package_hints (2070), which is MANIFEST/component-derived. On IB2 it has 44 entries,
+        ALL from the manifest — AdMob matched ONLY because AdActivity is manifest-declared.
+      - There is NO existing full class inventory and NO dx.get_classes() on the Android path (only
+        taint_analyzer has its own AnalyzeAPK). The prompt's "a full class list already exists" is
+        inaccurate. Proven with androguard on the real APK: IB2's DEX has 118 analytics + 193
+        tagmanager classes that package_hints entirely misses (they are statically linked, never
+        declared) — THAT is why Beetle found 1, MobSF 3.
+      - jadx DID decompile analytics/tagmanager dirs, but the tree-walk that would harvest them never
+        contributed (package_hints was manifest-only for IB2) — so the fix must read the DEX, not rely
+        on the walk.
+    FIX (three parts, Android path only):
+      1. tracker_db.py — schema gains optional code_signature (regex on dotted class name) + domain.
+         Added Google Analytics + Google Tag Manager signatures; added domains to AdMob / Firebase
+         Analytics / Crashlytics / Facebook. TODO left for full 432-entry Exodus ingest.
+      2. detect_trackers(package_names, class_names=None, endpoints=None): matches signature pkg
+         (and code_signature) against the FULL DEX class inventory, keeping the manifest-prefix path
+         as fallback. Backward compatible (both new args optional; iOS unaffected).
+      3. Confidence tiering: code-class match + domain seen in results["endpoints"] => "confirmed";
+         class/prefix only => "likely". matched_class + domain attached as evidence (list of {type}).
+      Inventory sourced by _collect_dex_classes(apk) in android_analyzer.py — a DEX class-TABLE read
+      (androguard DEX.get_classes_names on apk.get_all_dex bytes), ~2s, NOT a decompile/AnalyzeAPK
+      pass. Stashed transiently as results["_dex_classes"]; the primary caller pop()s it and a
+      defensive pop at finalize guarantees it never serializes (would be 6.5k class names).
+      Rendering: PDF _trackers_section Linkage column falls back to the confidence tier when
+      statically_linked is absent (iOS keeps statically_linked -> byte-unchanged). Frontend
+      panels2.jsx tracker row shows a colored confidence badge + the matched class.
+    *** DETERMINISM BUG CAUGHT IN VERIFICATION *** The first matched_class was `next(c for c in
+      class_names ...)` over a SET — non-deterministic order, so matched_class drifted run-to-run
+      (e.g. ...analytics.internal.zzw vs ...AnalyticsReceiver) and would break the Android byte-stable
+      guard. Fixed to min() over ALL matches: deterministic AND surfaces a clean public class. Proven:
+      two consecutive IB2 scans now produce BYTE-IDENTICAL tracker output. Locked with a test.
+    ARTIFACT (VT off both sides):
+      InsecureBankv2  trackers 1 -> 5: Google AdMob, Google Analytics, Google Tag Manager, Google
+        Maps SDK, Google Sign-In. SPOT-CHECKED each in the DEX (analytics 118 / tagmanager 193 /
+        ads 288 / maps 275 / auth 55 classes) — all TRUE positives (IB2 statically links the
+        monolithic play-services). Beats MobSF's 3, no FP. All "likely" (IB2 has 0 endpoints, so no
+        domain corroboration is possible — the honest tier). findings 54->54, score 34->34 (trackers
+        emit no findings — no regression). SDK list caller consistent: same 4 new real SDKs added.
+      InsecureShop (NEGATIVE / no-FP direction)  trackers 0 -> 0. *** PROMPT EXPECTATION WRONG: it
+        said "expect Firebase/Crashlytics". The real classes.dex has NEITHER — its com.google.* is
+        Material UI (517) + Gson (128); zero firebase/gms/crashlytics/facebook. detect_trackers on the
+        real inventory returns [] — CORRECT no-FP behavior, not a miss. findings/score byte-identical.
+      testapp.ipa  iOS trackers BYTE-IDENTICAL (9->9), findings 14->14, score 92/B. iOS uses
+        detect_trackers_ios (untouched) — unchanged by construction and in fact.
+    HONEST GAP: the "confirmed" tier is not exercised by a live artifact on this corpus (IB2 has 0
+      endpoints; InsecureShop has no trackers). It is unit-tested. Re-check on an app that both
+      bundles a tracker SDK and emits its domain as an endpoint.
+    Files changed: backend/analyzers/tracker_db.py (import re; GA/TagManager sigs + domains; rewritten
+      detect_trackers with class/endpoint args + tiering + deterministic min match),
+      backend/analyzers/android_analyzer.py (_collect_dex_classes; stash/pop transient; both callers),
+      backend/report/pdf_generator.py (Linkage confidence fallback),
+      frontend/src/components/workspace2/panels2.jsx (confidence badge + matched class),
+      NEW backend/tests/test_tracker_class_matching.py (11 tests: surface fix, tiering, no-FP,
+      determinism, iOS-guard).
+    Tests: 946 passed, 11 skipped (was 935). Frontend build OK.
     Commit-ready: Y
 
 ═══════════════ SESSION LOG ═══════════════
@@ -1774,3 +1837,16 @@ NO code change and show the order moves on its own). Only then is it safe to pas
   tagger over-match for RUN 35. Final artifact clean: IB2 53->54 (only the grouped StrandHogg HIGH),
   chains identical, score 35->34/F fully attributed; InsecureShop negative gate silent (targetSdk 29),
   byte-identical; iOS 92/B untouched. 935 tests pass. Next: human confirm -> commit -> RUN 33 (trackers).
+- 2026-07-14  RUN 32 committed (dc1bf87, main). RUN 33 DONE (not committed): tracker class-inventory
+  matching + confidence tiers. CONFIRM-GATE found the prompt's root cause partly wrong — package_hints
+  is manifest-derived (not a pre-categorized SDK set) and there is NO existing full class list; proved
+  with androguard that IB2's DEX carries 118 analytics + 193 tagmanager classes the manifest misses.
+  Added GA + Tag Manager signatures + domains, a code_signature/domain schema, and rewrote
+  detect_trackers to match the FULL DEX class inventory (cheap DEX class-table read, not a decompile)
+  with confirmed/likely tiering. Caught a determinism bug in verification (matched_class picked from a
+  set via next() -> drifts run-to-run) and fixed to min() -> two IB2 scans now byte-identical.
+  ARTIFACT: IB2 trackers 1->5 (AdMob/Analytics/TagManager/Maps/Sign-In, all spot-checked real in DEX,
+  beats MobSF's 3), findings/score unchanged. InsecureShop 0->0 (prompt expected Firebase/Crashlytics
+  but the real classes.dex has none — Material UI + Gson only; correct no-FP result). iOS trackers
+  BYTE-IDENTICAL (9, 92/B). 946 tests pass, frontend builds. Next: human confirm -> commit -> RUN 34
+  (APKID anti-VM/packer/compiler).

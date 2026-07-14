@@ -1867,7 +1867,13 @@ def _trackers_section(story, results, T, styles):
     rows = [["Tracker", "Category", "Evidence", "Linkage"]]
     for t in trackers:
         ev = ", ".join(sorted({e.get("type", "") for e in (t.get("evidence") or [])}))
-        linkage = "statically linked" if t.get("statically_linked") else "framework in bundle"
+        # iOS trackers carry statically_linked; Android (RUN 33) carries a confidence tier.
+        if t.get("statically_linked"):
+            linkage = "statically linked"
+        elif t.get("confidence"):
+            linkage = t.get("confidence")            # "confirmed" | "likely"
+        else:
+            linkage = "framework in bundle"
         rows.append([
             Paragraph(_safe(t.get("name", "")), styles["table_cell"]),
             Paragraph(_safe(t.get("category", "")), styles["table_cell"]),
