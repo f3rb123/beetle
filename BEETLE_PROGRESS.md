@@ -1886,14 +1886,29 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       (parameterized-SQL SQL_SINK guard), NEW backend/tests/test_run35_fp_sweep.py (10 tests).
     Tests: 972 passed, 11 skipped. Commit-ready: Y.
 
-[ ] R35-B  Tracker vs bundled-SDK label split. RUN 33's detect_trackers returns bundled functional
-    SDKs (Google Maps SDK, Google Sign-In) alongside true Exodus trackers (AdMob/Analytics/Tag
-    Manager). All are real detections, but the REPORT must distinguish "tracker (Exodus)" from
-    "bundled SDK" so the tracker count reads as 3 (= MobSF), not 5. Derive kind from category
-    (Analytics/Advertising/Attribution/Crash Reporting/Session Replay/Social/Push = tracker; Maps/
-    Identity/App Updates/Background Work/ML-AI = bundled SDK) and render the split in frontend
-    panels2.jsx + PDF _trackers_section (separate counts/sections). Shared-surface; keep iOS trackers
-    byte-stable. Data is already correct; this is presentation + a kind tag.
+[x] R35-B  Tracker vs bundled-SDK label split — DONE (own commit).  ANDROID data + shared render;
+    iOS byte-stable.
+    detect_trackers now stamps each hit with kind = classify_tracker_kind(category): "tracker" for
+    behavioural/analytics/ad/crash/attribution/session/social/push/tag-management categories, "sdk"
+    for functional SDKs (Maps, Identity/Sign-In, Payments, App Updates, Background Work, ML/AI, Debug).
+    Frontend panels2.jsx + PDF _trackers_section render the split: the "Trackers" count/section shows
+    only kind=tracker; a "Bundled SDKs (detected, not trackers)" subsection lists the rest with a note.
+    iOS trackers (from detect_trackers_ios, untouched) carry NO kind -> treated as trackers -> iOS
+    output byte-unchanged by construction.
+    ARTIFACT (VT off):
+      InsecureBankv2  trackers now read 3 (Google Analytics, Tag Manager, AdMob) + 2 bundled SDKs
+        (Google Sign-In, Google Maps SDK) — the count reads 3 (= MobSF's tracker axis), no longer the
+        misleading 5. All 5 still detected and shown; only the labelling/count changed.
+      testapp.ipa  iOS trackers BYTE-IDENTICAL (no kind field), 14 / 92 B unchanged.
+      InsecureShop  0 trackers, 47 / 34 F unchanged.
+    Files: backend/analyzers/tracker_db.py (classify_tracker_kind + kind on each hit),
+      frontend/src/components/workspace2/panels2.jsx (split render + tracker-count metric),
+      backend/report/pdf_generator.py (_trackers_section split), backend/tests/test_tracker_class_matching.py
+      (+2 tests: classifier + IB2 3-vs-2 split).
+    Tests: 974 passed, 11 skipped; frontend build OK. Commit-ready: Y.
+    NOTE (L6): the frontend split is verified by build + the data-level 3/2 split, not by an automated
+    render test — same standing frontend-test gap. The Playwright smoke suite (RUN 30) could gain a
+    tracker-count assertion in a future pass.
 
 ═══════════════ FUTURE RUNS (gated on new corpus / out of current scope) ═══════════════
 [ ] FUT-1  APKID app-owned surfacing. RUN 34 proved detect_apkid_features already collects anti-VM/
@@ -2011,3 +2026,11 @@ NO code change and show the order moves on its own). Only then is it safe to pas
   951 tests pass. Logged: MobSF-anti-VM-FP comparison data point; FUT-1 (APKID app-owned surfacing,
   gated on a packed-APK corpus). Next: human confirm -> commit -> RUN 35 (FP/mislabel sweep, incl.
   R35-A/R35-B).
+- 2026-07-14  RUN 35 executed in 3 commits (sequenced per human): R35-A (d590d42) capability tagger
+  keys on identity not prose — killed the RUN 32/34 prose-coincidence chains at the root while
+  PRESERVING InsecureShop's legit RUN 25 Reflection chain (both directions proven on real artifacts).
+  T1-T3 (3241067) crypto/SQLi FP sweep: crypto taint HIGH->LOW context, hardcoded-key evidence
+  repointed to the key literal (CryptoClass:21, masked), SQLi chain no longer built on a proven-
+  parameterized step; IB2 54->53 / 34->40 F fully FP-attributed, InsecureShop + iOS untouched. R35-B
+  (this commit) tracker vs bundled-SDK kind split: IB2 reads 3 trackers + 2 SDKs (= MobSF axis), iOS
+  byte-stable. 974 tests pass. Next: human confirm -> RUN 36 (self-audit + discovery).
