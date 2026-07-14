@@ -476,9 +476,12 @@ def _ciso_summary_section(story, results, T, styles):
 # (heuristic) chain must be visually distinct so a reader never mistakes an
 # unproven chain for a proven one.
 _PROOF_BADGE = {
-    "proven":        ("PROVEN",  HexColor("#16A34A")),   # taint-linked, full trust
-    "heuristic":     ("HEURISTIC", HexColor("#D97706")), # co-occurrence, capped
-    "manifest-only": ("MANIFEST", HexColor("#0284C7")),  # structural, no dataflow claim
+    "proven":           ("PROVEN",  HexColor("#16A34A")),    # def-use proven (not emitted yet — RUN 31)
+    # RUN 31 — a taint flow proves a CALL PATH, not that the tainted value reaches the sink.
+    # It reads as "reachable", never "proven", so nobody mistakes it for a demonstrated exploit.
+    "method-reachable": ("REACHABLE", HexColor("#D97706")),  # call-graph path, dataflow unproven
+    "heuristic":        ("HEURISTIC", HexColor("#D97706")),  # co-occurrence, capped
+    "manifest-only":    ("MANIFEST", HexColor("#0284C7")),   # structural, no dataflow claim
 }
 
 

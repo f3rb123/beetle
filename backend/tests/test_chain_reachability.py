@@ -133,9 +133,15 @@ def test_androidx_only_surface_yields_no_external_chain_entry():
 # ════════════════════════════════════════════════════════════════════════════
 # FLAW B — WITH a real intent->sqlite taint flow in an Application-owned class.
 # ════════════════════════════════════════════════════════════════════════════
-def test_intent_to_sqlite_taint_in_app_class_produces_proven_chain():
-    """A taint flow from external input to a SQL sink, in application code reachable
-    from an app-owned entry, yields a PROVEN chain at full severity."""
+def test_intent_to_sqlite_taint_in_app_class_produces_method_reachable_chain():
+    """RUN 31: a taint flow from external input to a SQL sink, in application code reachable
+    from an app-owned entry, yields a METHOD-REACHABLE chain — NOT a proven one.
+
+    The taint engine does a call-graph BFS with no def-use check, so it establishes that the
+    entry can REACH the sink, never that the tainted value arrives there. Labelling that
+    "proven" is what let root detection (exec on constant args) present as a CRITICAL command
+    injection. The chain is still real and must stay DISTINCT from bare co-occurrence
+    (heuristic) — but, like heuristic, its unproven data-flow caps it at MEDIUM."""
     taint = [{"source_cat": "User Input", "sink_cat": "SQLite",
               "class_name": "com.company.app.SearchDao", "method_name": "find"}]
     sqli_finding = _finding("Taint Flow: Intent.getStringExtra → rawQuery", "Taint Analysis", "taint-sqli",
@@ -148,14 +154,17 @@ def test_intent_to_sqlite_taint_in_app_class_produces_proven_chain():
     _check(sqli, f"expected a SQLi chain, got {[c['type'] for c in chains]}")
     c = sqli[0]
 
-    _check(c["reachability_proof"] == "proven",
-           f"taint-backed SQLi must be proven, got {c['reachability_proof']}")
-    _check(c["severity"] == "high",
-           f"proven SQLi keeps its full (sql_injection=high) severity, got {c['severity']}")
-    _check(c["overall_confidence"] >= 60,
-           f"proven chain confidence must not be capped, got {c['overall_confidence']}")
+    _check(c["reachability_proof"] == "method-reachable",
+           f"taint-backed SQLi is method-reachable, not proven, got {c['reachability_proof']}")
+    # It must NOT collapse into heuristic: a call-graph link is stronger than co-occurrence.
+    _check(c["reachability_proof"] != "heuristic",
+           "a taint-backed chain must stay distinct from a co-occurrence chain")
+    _check(c["severity"] == "medium",
+           f"unproven data-flow caps the chain at MEDIUM, got {c['severity']}")
+    _check(c["severity_reason"],
+           "a capped chain must explain WHY it was capped")
     _check("androidx" not in c["entry_point"].get("component", "").lower(),
-           "proven chain must still use the application-owned entry")
+           "chain must still use the application-owned entry")
     _check(c["entry_point"]["component"] == "com.company.app.ui.SearchActivity",
            f"entry should be the app activity, got {c['entry_point'].get('component')!r}")
 
@@ -227,7 +236,7 @@ def test_every_chain_has_a_reachability_proof():
     ]
     chains = ENGINE.build_chains(_results(findings, _APP_ACTIVITY, taint_flows=taint))
     _check(chains, "expected some chains")
-    valid = {"proven", "heuristic", "manifest-only"}
+    valid = {"proven", "method-reachable", "heuristic", "manifest-only"}
     for c in chains:
         _check(c["reachability_proof"] in valid,
                f"{c['type']} has bad proof {c['reachability_proof']!r}")

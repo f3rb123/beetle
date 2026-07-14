@@ -593,6 +593,9 @@ def is_cloud_path(chain: dict) -> bool:
 # Reachability-proof → the honest phrase used in the v2 confidence sentence.
 _PROOF_PHRASE = {
     "proven": "a taint flow links external input to the sink (data-flow proven)",
+    # RUN 31 — what the taint engine actually establishes: a call path, not a def-use link.
+    "method-reachable": "a taint flow shows the entry point can reach the sink, but the "
+                        "data-flow itself is not proven (call-graph reachability)",
     "heuristic": "reachability is heuristic — required capabilities co-occur but no "
                  "data-flow was proven",
     "manifest-only": "reachability rests on manifest/config declarations, not a "
@@ -668,6 +671,9 @@ def build_v2_chain_explanation(chain: dict) -> dict:
     proof = str(chain.get("reachability_proof") or "").lower()
     fp_note = {
         "proven": "Reachability is data-flow proven; this is a concrete path, not co-occurrence.",
+        "method-reachable": "A call path from the entry point to the sink exists, but the data-flow "
+                            "is NOT proven — the tainted value may never reach the sink (e.g. the "
+                            "sink runs on constant arguments). Confirm the path before reporting.",
         "heuristic": "Reachability is heuristic — the links co-occur but no data-flow was "
                      "proven; confirm the path before reporting.",
         "manifest-only": "Reachability is inferred from manifest/config only; verify the "

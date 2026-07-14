@@ -62,7 +62,22 @@ _SINK_CAP_TAINT_CATS = {
 # Taint source categories that count as attacker-controllable external input.
 _EXTERNAL_SOURCE_CATS = frozenset(("user input", "intent", "contentprovider", "content provider"))
 
-PROOF_PROVEN, PROOF_HEURISTIC, PROOF_MANIFEST = "proven", "heuristic", "manifest-only"
+# Reachability proof classes, strongest → weakest.
+#
+# RUN 31: PROOF_PROVEN is currently UNREACHABLE, and that is deliberate. It claims
+# data-flow proof, which no engine in Beetle can deliver today: taint_analyzer does a
+# call-graph BFS (source-calling method can reach a sink-calling method) with NO def-use
+# check, so a taint flow proves a CALL PATH exists, not that tainted data arrives at the
+# sink. Labelling that "PROVEN" is what let a root-detection exec() present as a CRITICAL
+# command injection. Such chains are now PROOF_REACHABLE — honest about what was shown —
+# and are capped like heuristic ones. PROOF_PROVEN is reserved for a future def-use pass;
+# it stays defined so the badge and the ranking survive that upgrade.
+PROOF_PROVEN, PROOF_REACHABLE, PROOF_HEURISTIC, PROOF_MANIFEST = (
+    "proven", "method-reachable", "heuristic", "manifest-only")
+
+# Proof classes that establish something short of data-flow: real signal, but the chain
+# must never present as a proven exploit.
+_UNPROVEN_DATAFLOW = frozenset((PROOF_REACHABLE, PROOF_HEURISTIC))
 
 _LAUNCHER_ACTION = "android.intent.action.main"
 _LAUNCHER_CATEGORY = "android.intent.category.launcher"
@@ -481,12 +496,20 @@ class ChainContext:
         return None
 
     def reachability_proof(self, template, entry: dict) -> str:
-        """proven | heuristic | manifest-only for `template` given `entry` (Flaw B).
+        """method-reachable | heuristic | manifest-only for `template` given `entry`.
 
         Non-injection templates make no dataflow claim → 'manifest-only'. An
-        injection/RCE template is 'proven' only when a taint flow links external
-        input to the template's sink category in an application-owned class;
-        otherwise 'heuristic'.
+        injection/RCE template is 'method-reachable' when a taint flow links external
+        input to the template's sink category in an application-owned class; otherwise
+        'heuristic' (capabilities merely co-occur).
+
+        RUN 31 — this returns 'method-reachable', NOT 'proven'. The taint engine
+        establishes call-graph reachability, not data-flow: it shows the source-calling
+        method can reach the sink-calling method, never that the tainted value is the one
+        that arrives at the sink. That distinction is the whole difference between a real
+        command injection and root detection running exec("which","su") in the same class.
+        A taint-linked chain is still stronger evidence than bare co-occurrence, so it
+        keeps its own class rather than collapsing into 'heuristic'.
         """
         gated = _template_sink_caps(template)
         if not gated:
@@ -498,7 +521,7 @@ class ChainContext:
             if (tf["source_cat"] in _EXTERNAL_SOURCE_CATS
                     and tf["sink_cat"] in wanted_sinks
                     and self._is_app_owned_class(tf["class"])):
-                return PROOF_PROVEN
+                return PROOF_REACHABLE
         return PROOF_HEURISTIC
 
     def _first_with_caps(self, caps: frozenset) -> dict | None:
@@ -940,17 +963,26 @@ class AttackChainEngine:
         # RUN 25: cap such a chain at MEDIUM. It is real and worth analyst review, but an unproven
         # dataflow must never present as a HIGH exploit ("real, worth investigating, not proven
         # exploitable" — same bar as canary/discrepancy MEDIUMs). This corrects a prior inversion
-        # that FORCED heuristic chains UP to HIGH. Only heuristic is touched: manifest-only
-        # (structural) and proven (taint-linked) chains keep their computed severity.
+        # that FORCED heuristic chains UP to HIGH.
+        # RUN 31: the cap now also covers method-reachable chains. A taint flow only shows the
+        # source-calling method can REACH the sink-calling method — no def-use link — so it is
+        # not data-flow proof either and must not drive a HIGH/CRITICAL exploit claim. Only
+        # manifest-only (a purely structural claim) is left uncapped here.
         proof = ctx.reachability_proof(tmpl, entry)
         severity_reason = ""
-        if proof == PROOF_HEURISTIC:
+        if proof in _UNPROVEN_DATAFLOW:
             # sev_rank is inverted (critical=0 … info=4): a rank BELOW medium's means MORE severe.
             if C.sev_rank(severity) < C.sev_rank("medium"):
                 severity = "medium"
-                severity_reason = ("Capabilities co-occur but reachability is not proven — heuristic "
-                                   "linkage (no taint dataflow from external input to the sink). Capped "
-                                   "at MEDIUM: real and worth investigating, not proven exploitable.")
+                severity_reason = (
+                    ("A taint flow shows the entry point can REACH this sink, but the data-flow "
+                     "that would prove the attacker's value arrives there is NOT demonstrated "
+                     "(call-graph reachability, not def-use). Capped at MEDIUM: real and worth "
+                     "investigating, not proven exploitable.")
+                    if proof == PROOF_REACHABLE else
+                    ("Capabilities co-occur but reachability is not proven — heuristic "
+                     "linkage (no taint dataflow from external input to the sink). Capped "
+                     "at MEDIUM: real and worth investigating, not proven exploitable."))
             confidence = min(confidence, C.HEURISTIC_CONFIDENCE_CAP)
             conf_expl = {**conf_expl, "reachability_cap": C.HEURISTIC_CONFIDENCE_CAP,
                          "reachability_proof": proof}
