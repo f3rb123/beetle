@@ -1543,7 +1543,8 @@ export function MalwarePanel({ results }) {
                   <Bug size={13} style={{ color: SEV_COLOR.medium }} />
                   <span style={{ fontWeight: 560, fontSize: 13 }}>{t.name}</span>
                   {t.category ? <SoftTag>{t.category}</SoftTag> : null}
-                  <span className="ws-file__path ws-mono ws-muted" title={t.pkg}>{t.pkg}</span>
+                  {t.confidence ? <span className="ws-tag" style={{ color: t.confidence === 'confirmed' ? SEV_COLOR.low : SEV_COLOR.medium, borderColor: 'currentColor' }} title={t.domain_observed ? `Corroborated by endpoint: ${t.domain}` : 'Code-class match only'}>{t.confidence}</span> : null}
+                  <span className="ws-file__path ws-mono ws-muted" title={t.matched_class || t.pkg}>{t.matched_class || t.pkg}</span>
                 </div>
               ))}
               {!trackerRows.length ? <p className="ws-muted" style={{ padding: 14 }}>No trackers match your search.</p> : null}

@@ -1,11 +1,28 @@
 # Cortex Tracker Detection
-# Based on Exodus Privacy tracker database (https://reports.exodus-privacy.eu.org)
+# Based on Exodus Privacy tracker database (https://reports.exodus-privacy.eu.org), CC0.
+import re
+
+#
+# Each signature: name / pkg (class-package prefix) / category / url, plus two OPTIONAL fields
+# added in RUN 33:
+#   "code_signature": a regex matched against the FULL dotted class inventory (dx-derived), for
+#       trackers whose classes are present in the DEX but NOT reflected in the manifest-derived
+#       package hints (e.g. Google Analytics / Tag Manager — statically linked, never declared).
+#   "domain": the tracker's network host. When it also appears in results["endpoints"], the match
+#       is upgraded from "likely" to "confirmed" (code + network agreement).
+# pkg-prefix matching now runs against BOTH the manifest package hints AND the full class
+# inventory, so most trackers gain the broader surface without needing an explicit code_signature.
+#
+# TODO(RUN 33+): ingest the full Exodus DB (432 signatures, CC0) via a structured loader; this
+# curated set (~74) plus the class-inventory surface already exceeds MobSF on the target corpus.
 
 TRACKER_SIGNATURES = [
     # Analytics
-    {"name": "Google Firebase Analytics",       "pkg": "com.google.firebase.analytics",     "category": "Analytics",        "url": "https://firebase.google.com"},
-    {"name": "Google Firebase Crashlytics",     "pkg": "com.google.firebase.crashlytics",  "category": "Crash Reporting",  "url": "https://firebase.google.com/crashlytics"},
+    {"name": "Google Firebase Analytics",       "pkg": "com.google.firebase.analytics",     "category": "Analytics",        "url": "https://firebase.google.com", "domain": "app-measurement.com"},
+    {"name": "Google Firebase Crashlytics",     "pkg": "com.google.firebase.crashlytics",  "category": "Crash Reporting",  "url": "https://firebase.google.com/crashlytics", "domain": "firebase-settings.crashlytics.com"},
     {"name": "Google Firebase",                 "pkg": "com.google.firebase",               "category": "Analytics/Backend","url": "https://firebase.google.com"},
+    {"name": "Google Analytics",                "pkg": "com.google.android.gms.analytics",  "category": "Analytics",        "url": "https://marketingplatform.google.com/about/analytics", "domain": "google-analytics.com", "code_signature": r"^com\.google\.android\.gms\.analytics\."},
+    {"name": "Google Tag Manager",              "pkg": "com.google.android.gms.tagmanager", "category": "Analytics/Tag Management", "url": "https://tagmanager.google.com", "domain": "googletagmanager.com", "code_signature": r"^com\.google\.android\.gms\.tagmanager\."},
     {"name": "Amplitude Analytics",             "pkg": "com.amplitude",                     "category": "Analytics",        "url": "https://amplitude.com"},
     {"name": "Mixpanel",                        "pkg": "com.mixpanel.android",              "category": "Analytics",        "url": "https://mixpanel.com"},
     {"name": "Segment",                         "pkg": "com.segment.analytics",             "category": "Analytics",        "url": "https://segment.com"},
@@ -36,7 +53,7 @@ TRACKER_SIGNATURES = [
     {"name": "Embrace",                         "pkg": "io.embrace.android",                "category": "Crash Reporting",  "url": "https://embrace.io"},
 
     # Advertising
-    {"name": "Google AdMob",                    "pkg": "com.google.android.gms.ads",        "category": "Advertising",      "url": "https://admob.google.com"},
+    {"name": "Google AdMob",                    "pkg": "com.google.android.gms.ads",        "category": "Advertising",      "url": "https://admob.google.com", "domain": "googleads.g.doubleclick.net"},
     {"name": "Facebook Audience Network",       "pkg": "com.facebook.ads",                  "category": "Advertising",      "url": "https://audiencenetwork.com"},
     {"name": "AppLovin",                        "pkg": "com.applovin",                      "category": "Advertising",      "url": "https://applovin.com"},
     {"name": "IronSource",                      "pkg": "com.ironsource",                    "category": "Advertising",      "url": "https://ironsource.com"},
@@ -60,7 +77,7 @@ TRACKER_SIGNATURES = [
     {"name": "Airship",                         "pkg": "com.urbanairship",                  "category": "Push/Marketing",   "url": "https://airship.com"},
 
     # Social
-    {"name": "Facebook SDK",                    "pkg": "com.facebook",                      "category": "Social",           "url": "https://developers.facebook.com"},
+    {"name": "Facebook SDK",                    "pkg": "com.facebook",                      "category": "Social",           "url": "https://developers.facebook.com", "domain": "graph.facebook.com"},
     {"name": "Twitter SDK",                     "pkg": "com.twitter",                       "category": "Social",           "url": "https://developer.twitter.com"},
     {"name": "Google Sign-In",                  "pkg": "com.google.android.gms.auth",       "category": "Identity",         "url": "https://developers.google.com/identity"},
     {"name": "Auth0",                           "pkg": "com.auth0.android",                 "category": "Identity",         "url": "https://auth0.com"},
@@ -197,17 +214,114 @@ ANDROID_API_CATEGORIES = {
 }
 
 
-def detect_trackers(package_names: set) -> list:
-    """Detect known trackers from package name set."""
+def _endpoint_hosts(endpoints) -> set:
+    """Lowercased host/authority tokens from results['endpoints'] for domain matching.
+    Endpoints may be plain strings or dicts ({'url'|'endpoint'|'host'|'domain': ...})."""
+    hosts: set = set()
+    for e in endpoints or []:
+        if isinstance(e, dict):
+            val = e.get("host") or e.get("domain") or e.get("url") or e.get("endpoint") or ""
+        else:
+            val = str(e or "")
+        val = val.lower()
+        # strip scheme + path so "https://google-analytics.com/collect" -> "google-analytics.com"
+        if "://" in val:
+            val = val.split("://", 1)[1]
+        val = val.split("/", 1)[0].split("?", 1)[0].split(":", 1)[0]
+        if val:
+            hosts.add(val)
+    return hosts
+
+
+def _domain_seen(domain: str, hosts: set) -> bool:
+    """True when the tracker domain matches an observed endpoint host (exact or subdomain)."""
+    d = (domain or "").lower()
+    if not d:
+        return False
+    return any(h == d or h.endswith("." + d) or d.endswith("." + h) for h in hosts)
+
+
+def detect_trackers(package_names: set, class_names=None, endpoints=None) -> list:
+    """Detect known trackers.
+
+    RUN 33 — three upgrades over the original manifest-prefix-only matcher:
+      * MATCHING SURFACE: signature packages are matched against the FULL dotted class
+        inventory (``class_names``, dx-derived) in addition to the manifest-derived
+        ``package_names``. Statically-linked SDKs whose classes never appear in the manifest
+        (Google Analytics, Tag Manager) were invisible before; now they are found.
+      * CODE SIGNATURE: an optional per-signature ``code_signature`` regex is matched against
+        the class inventory for renamed/edge cases.
+      * CONFIDENCE TIERING: a tracker found by a code class AND whose ``domain`` appears in
+        ``endpoints`` is "confirmed"; a class/prefix match with no network corroboration is
+        "likely". The matched class + domain are attached as evidence.
+
+    Backward compatible: with ``class_names``/``endpoints`` omitted it degrades to the old
+    manifest-prefix behavior (plus a "likely" tier). iOS uses ``detect_trackers_ios`` and is
+    unaffected.
+    """
+    package_names = package_names or set()
+    class_names = class_names or set()
+    hosts = _endpoint_hosts(endpoints)
+
     found = []
     seen = set()
     for tracker in TRACKER_SIGNATURES:
+        key = tracker["name"]
+        if key in seen:
+            continue
         pkg = tracker["pkg"]
-        if any(p.startswith(pkg) for p in package_names):
-            key = tracker["name"]
-            if key not in seen:
-                seen.add(key)
-                found.append(tracker.copy())
+        matched_class = None
+
+        # 1) code_signature regex against the full class inventory (strongest signal).
+        # Deterministic pick: min() over ALL matches (a set has no stable iteration order, so
+        # `next(...)` would vary run-to-run and break Android byte-stability). min() also tends to
+        # surface a clean public class (e.g. ...analytics.AnalyticsReceiver) over an obfuscated zz*.
+        code_sig = tracker.get("code_signature")
+        if code_sig and class_names:
+            try:
+                rx = re.compile(code_sig)
+            except re.error:
+                rx = None
+            if rx is not None:
+                cands = [c for c in class_names if rx.search(c)]
+                matched_class = min(cands) if cands else None
+
+        # 2) pkg-prefix against the class inventory (the core matching-surface fix).
+        if matched_class is None and class_names:
+            cands = [c for c in class_names if c.startswith(pkg)]
+            matched_class = min(cands) if cands else None
+
+        # 3) pkg-prefix against the manifest package hints (original fallback).
+        matched_prefix = matched_class is None and any(
+            p.startswith(pkg) for p in package_names)
+
+        if matched_class is None and not matched_prefix:
+            continue
+
+        seen.add(key)
+        domain = tracker.get("domain")
+        has_class = matched_class is not None
+        domain_seen = _domain_seen(domain, hosts)
+        # "confirmed" requires a concrete code-class match AND network corroboration.
+        confidence = "confirmed" if (has_class and domain_seen) else "likely"
+
+        evidence = []
+        if matched_class:
+            evidence.append({"type": "code class", "value": matched_class})
+        elif matched_prefix:
+            evidence.append({"type": "manifest package", "value": pkg})
+        if domain_seen:
+            evidence.append({"type": "network endpoint", "value": domain})
+
+        entry = tracker.copy()
+        entry.update({
+            "confidence":    confidence,
+            "matched_class": matched_class or "",
+            "match_surface": "code" if has_class else "manifest",
+            "domain_observed": domain_seen,
+            "evidence":      evidence,
+        })
+        found.append(entry)
     return found
 
 
