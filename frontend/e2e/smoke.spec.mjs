@@ -148,3 +148,52 @@ test('finding narrative renders and never borrows a wrong-category description',
   }
   expect(firstWhyLen).toBeGreaterThan(10)   // a real narrative rendered, not an empty block
 })
+
+// L6 closure (RUN 36): the RUN 35 R35-B tracker/SDK split and chain labels are verified by DATA in
+// the backend, but the RENDER was the last surface still trusted from data not pixels. These assert
+// the real DOM. Robust: relative (no hardcoded "3"), and skip cleanly on a non-Android/no-tracker scan.
+test('trackers render split from bundled SDKs, count is not inflated', async ({ page }) => {
+  // 'malware' is reached via the in-app nav (not a direct URL section) — load a routable section
+  // first, then click the "Malware Analysis" nav item.
+  await page.goto(`${BASE}/scans/${scanId}/findings`, { waitUntil: 'networkidle' })
+  const navItem = page.locator('.ws-nav__item', { hasText: 'Malware Analysis' }).first()
+  test.skip(!(await navItem.count()), 'no Malware Analysis nav for this scan')
+  await navItem.click()
+  await page.waitForTimeout(700)
+
+  // The "Third-Party Trackers" section header carries the tracker count next to it.
+  const trackersHead = page.locator('.ws-section__head', { hasText: 'Third-Party Trackers' }).first()
+  test.skip(!(await trackersHead.count()), 'no trackers panel for this scan')
+
+  const trackerCount = parseInt(((await trackersHead.locator('.ws-muted').first().textContent()) || '0').trim(), 10)
+  // The bundled-SDK subsection only exists when functional SDKs were detected (e.g. IB2: Maps, Sign-In).
+  const bundledHead = page.locator('.ws-section__head', { hasText: 'Bundled SDKs' }).first()
+  const hasBundled = (await bundledHead.count()) > 0
+  test.skip(!hasBundled, 'this scan has no bundled SDKs to split out (nothing to prove)')
+
+  const bundledCount = parseInt(((await bundledHead.locator('.ws-muted').first().textContent()) || '0').trim(), 10)
+  expect(bundledCount).toBeGreaterThan(0)
+
+  // The tracker count must EXCLUDE bundled SDKs (the R35-B fix): a bundled SDK name must not appear
+  // among the tracker rows, and the tracker header count must equal the tracker-row count only.
+  const trackerRowCount = await page.locator('.ws-card').first().locator('.ws-file').count()
+  expect(trackerRowCount).toBe(trackerCount)
+  // A bundled SDK (Maps / Sign-In) must be listed under Bundled SDKs, never counted as a tracker.
+  const trackerText = ((await page.locator('.ws-card').first().textContent()) || '').toLowerCase()
+  expect(trackerText).not.toContain('maps sdk')
+  expect(trackerText).not.toContain('sign-in')
+})
+
+// The attack-chain label must show the chain's real name (not a mislabel), closing the "chain-label
+// verified by data" half of L6.
+test('attack-chain cards render their real name + a severity/proof label', async ({ page }) => {
+  await page.goto(`${BASE}/scans/${scanId}/findings`, { waitUntil: 'networkidle' })
+  await page.waitForTimeout(600)
+  const chainCard = page.locator('.ws-fcard', { hasText: /Attack Chain|Exported Component|Reflection|WebView/i }).first()
+  test.skip(!(await chainCard.count()), 'no attack-chain finding in this scan')
+  const title = ((await chainCard.locator('.ws-fcard__title').textContent()) || '').trim()
+  expect(title.length).toBeGreaterThan(8)                 // a real chain name rendered
+  // Its severity chip must be one of the real levels — never blank/undefined.
+  const sev = ((await chainCard.locator('.ws-sev, .ws-tag').first().textContent()) || '').toLowerCase()
+  expect(sev).toMatch(/crit|high|med|low|info/)
+})

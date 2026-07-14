@@ -33,7 +33,7 @@ from .source_corpus import SourceCorpus
 from . import reachability_engine
 from . import trust_engine
 from . import finding_model
-from .code_analyzer import run_android_sast, resolve_sql_raw_query_severity, refine_hardcoded_key_evidence
+from .code_analyzer import run_android_sast, resolve_sql_raw_query_severity, refine_hardcoded_key_evidence, refine_credential_logging_severity
 from .semgrep_runner import run_semgrep, semgrep_available
 from .osv_scanner import scan_dependencies
 from .string_analyzer import analyze_strings, suppress_crypto_string_presence_duplicates
@@ -585,6 +585,12 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
             refine_hardcoded_key_evidence(results)
         except Exception:
             log.exception("[sast] hardcoded-key evidence repoint failed")
+
+        # RUN 36: bump plaintext-credential logging above the generic Log.d LOW.
+        try:
+            refine_credential_logging_severity(results)
+        except Exception:
+            log.exception("[sast] credential-logging severity refinement failed")
 
         # ── VirusTotal hash lookup ────────────────────────────────────────────
         vt_started = time.perf_counter()

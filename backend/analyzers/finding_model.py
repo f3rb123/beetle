@@ -1010,6 +1010,7 @@ _SINK_GROUP_TITLES = (
     ("network", "User-Controlled Data in Network Request"),
     ("crypto", "User-Controlled Data in Crypto Operation"),
     ("reflection", "User-Controlled Data in Reflection Call"),
+    ("smssend", "User-Controlled Data Sent via SMS"),
 )
 
 
@@ -1049,7 +1050,7 @@ def _is_taint(finding: dict) -> bool:
 # data's sensitivity — a tainted value reaching them is always worth surfacing.
 _HIGH_VALUE_TAINT_SINKS = {
     "webview", "filesystem", "crypto", "execution", "sqlite", "network",
-    "reflection", "dynamicloading", "dynamic_loading",
+    "reflection", "dynamicloading", "dynamic_loading", "smssend",
 }
 # Sinks whose risk depends on the data: logging to logcat, intent redirects, and
 # prefs writes are low value unless the source is genuinely sensitive PII.
