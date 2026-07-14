@@ -1732,12 +1732,22 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       guard. Fixed to min() over ALL matches: deterministic AND surfaces a clean public class. Proven:
       two consecutive IB2 scans now produce BYTE-IDENTICAL tracker output. Locked with a test.
     ARTIFACT (VT off both sides):
-      InsecureBankv2  trackers 1 -> 5: Google AdMob, Google Analytics, Google Tag Manager, Google
-        Maps SDK, Google Sign-In. SPOT-CHECKED each in the DEX (analytics 118 / tagmanager 193 /
-        ads 288 / maps 275 / auth 55 classes) — all TRUE positives (IB2 statically links the
-        monolithic play-services). Beats MobSF's 3, no FP. All "likely" (IB2 has 0 endpoints, so no
-        domain corroboration is possible — the honest tier). findings 54->54, score 34->34 (trackers
-        emit no findings — no regression). SDK list caller consistent: same 4 new real SDKs added.
+      InsecureBankv2  detect_trackers returns 5: Google AdMob, Google Analytics, Google Tag Manager,
+        Google Maps SDK, Google Sign-In. SPOT-CHECKED each in the DEX (analytics 118 / tagmanager 193 /
+        ads 288 / maps 275 / auth 55 classes) — all real classes (IB2 statically links the monolithic
+        play-services), so none is a false match.
+        *** AXIS CORRECTION (human, post-commit) — do NOT read this as "5 trackers beats MobSF's 3". ***
+        On the Exodus-comparable definition (analytics/advertising/attribution that phone home) Beetle
+        finds 3 — AdMob + Analytics + Tag Manager — which MATCHES MobSF's 3, plus confidence tiering
+        MobSF lacks. Google Maps SDK and Google Sign-In are BUNDLED FUNCTIONAL SDKs, not Exodus
+        trackers; counting them on the same axis inflates the number. They are correct SDK detections
+        (and the SDK-list caller rightly lists them), but the report must label "tracker (Exodus)" vs
+        "bundled SDK" so the tracker count reads as 3, not 5. That label/rendering split is a
+        shared-surface change (frontend panels2 + PDF) -> DEFERRED TO RUN 35 (mislabel sweep). See the
+        RUN 35 TODO below.
+        All 5 are "likely" (IB2 has 0 endpoints, so no domain corroboration is possible — the honest
+        tier). findings 54->54, score 34->34 (trackers emit no findings — no regression). SDK list
+        caller consistent: same 4 new real SDKs added.
       InsecureShop (NEGATIVE / no-FP direction)  trackers 0 -> 0. *** PROMPT EXPECTATION WRONG: it
         said "expect Firebase/Crashlytics". The real classes.dex has NEITHER — its com.google.* is
         Material UI (517) + Gson (128); zero firebase/gms/crashlytics/facebook. detect_trackers on the
@@ -1756,6 +1766,22 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       determinism, iOS-guard).
     Tests: 946 passed, 11 skipped (was 935). Frontend build OK.
     Commit-ready: Y
+
+═══════════════ RUN 35 BACKLOG (deferred mislabel/FP items — address in the sweep) ═══════════════
+[ ] R35-A  Chain tagger prose over-match. attack_chains/engine.py:213-214 tags CODE_LOADING on a bare
+    "reflection"/"dynamic code" substring anywhere in a finding's title/description/snippet. RUN 32
+    hit this (StrandHogg "reflection-based" -> bogus Reflection RCE chain) and worked around it by
+    rewording the finding. The shared tagger is still over-broad: any future finding that mentions
+    those words in prose will mis-tag. Fix needs both-directions proof vs InsecureShop's legit RUN 25
+    Reflection RCE chain (must NOT regress it). Same class likely affects other keyword caps.
+[ ] R35-B  Tracker vs bundled-SDK label split. RUN 33's detect_trackers returns bundled functional
+    SDKs (Google Maps SDK, Google Sign-In) alongside true Exodus trackers (AdMob/Analytics/Tag
+    Manager). All are real detections, but the REPORT must distinguish "tracker (Exodus)" from
+    "bundled SDK" so the tracker count reads as 3 (= MobSF), not 5. Derive kind from category
+    (Analytics/Advertising/Attribution/Crash Reporting/Session Replay/Social/Push = tracker; Maps/
+    Identity/App Updates/Background Work/ML-AI = bundled SDK) and render the split in frontend
+    panels2.jsx + PDF _trackers_section (separate counts/sections). Shared-surface; keep iOS trackers
+    byte-stable. Data is already correct; this is presentation + a kind tag.
 
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
@@ -1845,8 +1871,10 @@ NO code change and show the order moves on its own). Only then is it safe to pas
   detect_trackers to match the FULL DEX class inventory (cheap DEX class-table read, not a decompile)
   with confirmed/likely tiering. Caught a determinism bug in verification (matched_class picked from a
   set via next() -> drifts run-to-run) and fixed to min() -> two IB2 scans now byte-identical.
-  ARTIFACT: IB2 trackers 1->5 (AdMob/Analytics/TagManager/Maps/Sign-In, all spot-checked real in DEX,
-  beats MobSF's 3), findings/score unchanged. InsecureShop 0->0 (prompt expected Firebase/Crashlytics
+  ARTIFACT: IB2 detect_trackers 1->5 (AdMob/Analytics/TagManager/Maps/Sign-In, all spot-checked real
+  in DEX). AXIS NOTE (human correction): on the Exodus definition that's 3 real trackers = MATCHES
+  MobSF (Maps + Sign-In are bundled SDKs, not trackers); tracker-vs-SDK label split deferred to RUN 35.
+  findings/score unchanged. InsecureShop 0->0 (prompt expected Firebase/Crashlytics
   but the real classes.dex has none — Material UI + Gson only; correct no-FP result). iOS trackers
   BYTE-IDENTICAL (9, 92/B). 946 tests pass, frontend builds. Next: human confirm -> commit -> RUN 34
   (APKID anti-VM/packer/compiler).
