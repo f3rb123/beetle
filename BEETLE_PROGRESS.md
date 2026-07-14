@@ -1528,6 +1528,110 @@ NO code change and show the order moves on its own). Only then is it safe to pas
       frontend/package.json, frontend/package-lock.json, frontend/.gitignore.
     Commit-ready: Y
 
+═══════════════ TIER 3 — MobSF PARITY · FP ELIMINATION (RUN 31–36) ═══════════════
+
+[x] RUN 31 — Kill the command-injection FP + taint label honesty (ANDROID)  DONE
+    HOUSEKEEPING (a) — NO-OP, the prompt's premise was stale: there is NO 0-byte
+      checkin-ios-normal.ipa. Not on disk, never in git history, and zero references in
+      backend/ frontend/ scripts/ *.md *.json. The only two hits in the repo are the
+      housekeeping instruction inside BEETLE_PROMPTS.md itself. Nothing deleted/repointed.
+    HOUSEKEEPING (b) — baselines captured in baseline/ (JSON + PDF + BASELINE_SUMMARY.json).
+      VERIFIED FIRST that the running container's BAKED code was byte-identical to repo HEAD
+      (md5 on taint_analyzer / android_analyzer / main.py) — otherwise the "before" set is a lie.
+        ib2_v140     23/F  55 findings  C3/H7/M13/L6/I26
+        ishop_v140   34/F  47 findings  C1/H11/M8/L7/I20
+        checkin_ios  92/B  14 findings  C0/H0/M4/L2/I8   <- iOS guard confirmed
+
+    CONFIRM-GATE — THREE PROMPT FACTS WERE WRONG, verified against live source before editing:
+      (a) TWO root-detection findings exist, not one — android_no_root_detection (code_rules.py:592)
+          and android_runtime_exec (reclassified at finding_model.py:983, security_control=True).
+          Both INFO, both at sources/com/android/insecurebankv2/PostLogin.java:26.
+      (b) *** THE PROMPT'S FIX A COULD NOT WORK AS WRITTEN. *** It said to drop an Execution flow
+          whose "sink call-site file:line" coincides with a defensive-control finding. THE TAINT
+          FLOW HAS NO file AND NO line. reconcile_taint_flows:634 synthesizes them:
+              "file": flow.get("file") or flow.get("class_name")  -> "com.android.insecurebankv2.PostLogin;"
+              "line": flow.get("line") or 0                        -> 0
+          A class name with a trailing semicolon at line 0 can NEVER string-match the finding's
+          "sources/com/android/insecurebankv2/PostLogin.java":26. Implementing it literally yields a
+          veto that NEVER FIRES — green tests, FP still in the artifact. Reported; human rejected the
+          file:line join and the class-granular fallback (would drop a TP) and directed the
+          constant-argument guard instead.
+      (c) "PROVEN" is NOT in taint_analyzer.py. The badge is attack_chains/engine.py:65 + :501
+          (field reachability_proof), rendered at pdf_generator.py:478. The "Reachable: YES (HIGH)"
+          label originates at trust_engine.py:84-86.
+      GROUND TRUTH (real jadx source, NOT the prompt): exec is at PostLogin.java:26 with
+      "/system/xbin/which" (prompt said :132 / "/system/bin/which"); the source is at :64 (prompt
+      said :47). MobSF's "92%" is overall_exploitability; overall_confidence is 85. Substance identical.
+
+    FIX A — CONSTANT-ARGUMENT GUARD (taint_analyzer.py). Feasibility PROVEN with androguard against
+      the real APK before writing a line: MethodAnalysis.get_xref_from() yields (class, caller, byte
+      offset), and the instructions at that offset decide it outright —
+        FP  PostLogin->doesSUexist @40: new-array + aput-object of const-string "/system/xbin/which"
+            and "su" -> invoke Runtime.exec(v6)          => arg PROVABLY constant  => DROP
+        TP  ViewStatement->onCreate @246: move-result-object (StringBuilder.toString) => NOT constant => KEEP
+        TP  MyWebViewClient->shouldOverrideUrlLoading @0: arg is a method PARAMETER  => NOT constant => KEEP
+      NOTE the exec lives in doesSUexist, NOT onCreate — the flow's method_name is the SOURCE method,
+      so no class/method join was ever available. Only a call-site analysis could work.
+      The guard drops an Execution flow ONLY when every reachable call site of that sink passes args
+      provably from const* opcodes (directly, or an array built entirely of const* values). It is
+      FAIL-OPEN by construction: a parameter, a move-result, a field read, or an unreadable call site
+      all KEEP the flow. It can remove an FP; it can never drop a TP.
+      Suppression is NOT silent: scan_metrics.taint_execution_flows_dropped_const_arg = 1 on IB2.
+
+    FIX B — LABEL HONESTY. New proof class PROOF_REACHABLE = "method-reachable", ranked
+      proven > method-reachable > heuristic > manifest-only. A taint flow is a CALL-GRAPH BFS with no
+      def-use check: it shows the source-calling method can REACH the sink-calling method, never that
+      the tainted value arrives. So:
+        - engine.py reachability_proof() now returns PROOF_REACHABLE, never PROOF_PROVEN.
+          PROOF_PROVEN is now UNREACHABLE ON PURPOSE — reserved for a future def-use pass (kept
+          defined so the badge + ranking survive that upgrade).
+        - The RUN 25 MEDIUM cap now covers method-reachable too (_UNPROVEN_DATAFLOW): an unproven
+          data-flow must never present as a HIGH/CRITICAL exploit.
+        - trust_engine.py:84-86 returned HIGH ("fully proven path") for ANY call_chain -> now MEDIUM,
+          plus a new reachability_basis = "method-reachable (data-flow not proven)".
+        - Wired every consumer: pdf badge (REACHABLE, amber — never reads "PROVEN"), analyst_intel
+          _PROOF_PHRASE + fp_note, workspaces.py proof checklist (does NOT tick the data-flow box,
+          DOES count as reachability support).
+      DELIBERATELY NOT collapsed into "heuristic": a call-graph link is real evidence and stronger
+      than bare co-occurrence. Collapsing them would understate — a different dishonesty.
+    FRONTEND: NO CHANGE NEEDED. The "Reachable: YES (HIGH)" string at workspace/SectionViews.jsx:555
+      is a DEAD RENDER PATH — the file is imported by Results.jsx:40 but `<SectionViews` is never
+      mounted (only <Workspace/> workspace2 renders). Live UI shows only "Reachable" via
+      reachabilityLabel(), which makes no proof claim. (Corrects a stale note that called the file
+      tree-shaken: it IS bundled, just never rendered.)
+
+    ARTIFACT VERIFICATION (real reports, not tests). A VirusTotal HIGH first appeared in the after-scan
+      — PROVEN ENVIRONMENTAL, not RUN 31: baseline ran with virustotal.api_key_set=false ("not
+      configured"), and the recreated container picked up VIRUSTOTAL_API_KEY from .env. Re-ran the
+      after-scan with VT disabled so both sides share the same env. CLEAN LIKE-FOR-LIKE:
+        InsecureBankv2  55 -> 53 findings, C3 -> C1, score 23 -> 35 (grade F held)
+          REMOVED (both FPs, nothing else): CRITICAL "Attack Chain: Exported Component to Command
+            Injection" and CRITICAL "Taint Flow: Intent.getStringExtra -> Runtime.exec"
+          ADDED: NONE.  H/M/L/I counts, chain_penalty (20) and bonuses all IDENTICAL.
+          SCORE FULLY ATTRIBUTED: the ONLY changed term is the critical deduction 27.5 -> 15.0
+            (3 criticals -> 1). 80.23 - 67.73 = 12.50 = exactly that delta.
+          TRUE POSITIVES SURVIVE: taint flows 13 -> 12 (only the exec flow dropped); WebView.loadUrl
+            + all 6 crypto flows KEPT. 0 Execution flows remain (the only one was the FP).
+          "Root Detection Present" INFO STILL FIRES on PostLogin.java:26 (both rule_ids).
+          Surviving WebView taint finding now reads reachability_confidence MEDIUM +
+            basis "method-reachable (data-flow not proven)" (was HIGH, "fully proven").
+        InsecureShop    47 findings, C1/H11/M8/L7/I20, score 34/F — IDENTICAL. 0 Execution flows
+          before AND after (nothing to lose), const-arg dropped = 0, all 6 chains unchanged.
+        testapp.ipa     14 findings, 92/B — IDENTICAL. iOS never runs taint_analyzer (androguard-only),
+          so iOS is untouched by construction as well as in fact.
+    HONEST GAP: no chain in EITHER app now carries "method-reachable" in the artifact — IB2's only
+      taint-backed injection chain WAS the FP (now gone) and the rest are manifest-only/heuristic. So
+      the new badge/phrase is exercised by unit tests, NOT by a live artifact on this corpus. The
+      trust_engine relabel IS live (the WebView finding). Re-check the badge on an app with a real
+      taint-backed injection chain.
+    Files changed: backend/analyzers/taint_analyzer.py, backend/analyzers/trust_engine.py,
+      backend/analyzers/attack_chains/engine.py, backend/analyzers/analyst_intel.py,
+      backend/analyzers/workspaces.py, backend/report/pdf_generator.py,
+      NEW backend/tests/test_taint_const_arg_guard.py (12 tests, BOTH directions),
+      backend/tests/test_chain_reachability.py (2 tests re-locked to the honest contract).
+    Tests: 924 passed, 11 skipped (was 912).
+    Commit-ready: Y  (nothing staged — human commits)
+
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
 - 2026-07-12  Plan created. Nothing run yet. Next: RUN 1.
@@ -1582,3 +1686,18 @@ NO code change and show the order moves on its own). Only then is it safe to pas
   LIMITATION: L1 only fires on a no-source/packed APK we don't have -> fix is code+test+zero-regression
   verified, live repro DEFERRED (same blocker class as L2). NOT PUSHED — awaiting human confirm of the
   verified-not-live-reproduced caveat. Next: push on confirm; then OSV / L5 / (L1 live repro if APK).
+- 2026-07-14  RUN 31 DONE (not committed). Housekeeping: the checkin-ios-normal.ipa stub does NOT
+  exist (never did) — no-op; baselines captured in baseline/ after proving the container's baked code
+  == repo HEAD. CONFIRM-GATE caught that the prompt's FIX A was UNIMPLEMENTABLE: a taint flow carries
+  no file/line (reconcile synthesizes class-name + line 0), so the specified file:line join could
+  never match and would have shipped a veto that never fires. Human rejected the class-granular
+  fallback; implemented the CONSTANT-ARGUMENT GUARD instead, after proving androguard feasibility on
+  the real APK (exec arg = filled const-string array => dropped; loadUrl/crypto args = move-result /
+  parameter => kept). FIX B: new "method-reachable" proof class — taint = call-graph reachability, NOT
+  data-flow; PROOF_PROVEN is now deliberately unreachable, the MEDIUM cap covers method-reachable, and
+  trust_engine no longer calls a call_chain "fully proven". ARTIFACT: IB2 55->53 findings, both
+  CRITICAL FPs gone, NOTHING added, TPs (WebView + 6 crypto) survive, Root Detection INFO still on
+  PostLogin.java:26, score 23->35 fully attributed to the critical deduction alone. InsecureShop and
+  testapp.ipa (92/B) byte-stable. Caught + neutralized a VirusTotal env confound (baseline had no VT
+  key; recreated container did) by re-scanning with VT off. 924 tests pass. Next: human confirms the
+  diff -> commit -> RUN 32 (StrandHogg 2.0).

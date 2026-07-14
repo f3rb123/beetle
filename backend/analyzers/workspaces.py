@@ -88,8 +88,11 @@ def _v2_confidence_checks(chain: dict, evidence: list, has_runtime: bool) -> lis
     member_confs = [e.get("confidence") for e in evidence]
     strong_members = bool(member_confs) and all(c in _STRONG_EVIDENCE for c in member_confs)
     return [
+        # RUN 31: "method-reachable" is a call-graph path, NOT data-flow proof — it must not
+        # tick the data-flow box, but it DOES support reachability (more than manifest-only).
         {"label": "Reachability proven by data-flow (taint)", "met": proof == "proven"},
-        {"label": "Reachability supported (not manifest-only)", "met": proof in ("proven", "heuristic")},
+        {"label": "Reachability supported (not manifest-only)",
+         "met": proof in ("proven", "method-reachable", "heuristic")},
         {"label": "Externally reachable entry point", "met": bool(entry.get("reachable"))},
         {"label": "Required links backed by strong evidence", "met": strong_members},
         {"label": "Runtime / data-flow proof present", "met": bool(has_runtime)},

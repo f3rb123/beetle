@@ -81,9 +81,13 @@ def reachability_confidence(f: dict) -> str:
     LOW = heuristic correlation only."""
     reach = str(f.get("reachability") or "").upper()
     if reach == "YES":
-        # Proven data-flow or correlated chain membership = fully proven path.
+        # RUN 31 — a taint_flow / call_chain is CALL-GRAPH reachability, not data-flow proof:
+        # the taint engine shows the source-calling method can reach the sink-calling method,
+        # never that the tainted value is the one arriving at the sink. Calling that "fully
+        # proven" is what let root detection (exec on constant arguments) read as a proven
+        # command injection. It is a real, inferred path → MEDIUM, not HIGH.
         if f.get("taint_flow") or f.get("call_chain"):
-            return HIGH
+            return MEDIUM
         if f.get("is_attack_chain"):
             return f.get("chain_confidence", HIGH)
         if f.get("in_attack_chain"):
@@ -104,6 +108,11 @@ def annotate_trust(results: dict) -> None:
     for f in findings:
         f["evidence_quality"] = evidence_quality(f)
         f["reachability_confidence"] = reachability_confidence(f)
+        # RUN 31 — say WHAT was established, so no surface can render a call-graph path as
+        # a proven data-flow. Only set where reachability actually rests on the taint engine.
+        if str(f.get("reachability") or "").upper() == "YES" and (
+                f.get("taint_flow") or f.get("call_chain")):
+            f["reachability_basis"] = "method-reachable (data-flow not proven)"
 
     _compute_resolution_scores(results, findings)
     _compute_trust_score(results, findings)

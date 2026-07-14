@@ -34,6 +34,7 @@ MAX_DEPTH   = 6      # max call-chain hops from source to sink
 MAX_PATHS   = 200    # stop collecting after this many paths (perf guard)
 TIMEOUT_S   = 60     # wall-clock seconds before we abort analysis
 MAX_DEX_MB  = 30     # skip APKs with >30 MB of combined DEX
+_CONST_TRACE_DEPTH = 2  # RUN 31: nesting depth when proving a sink arg is constant
 
 # ── Source definitions ────────────────────────────────────────────────────────
 # Each entry: (class_pattern, method_pattern, label, category)
@@ -244,6 +245,13 @@ def _analyze(apk_path: str, results: dict | None = None) -> list[dict]:
 
     flows: list[dict] = []
     seen_keys: set[str] = set()
+    const_arg_dropped = 0  # RUN 31 — Execution flows vetoed as provably non-attacker-controlled
+
+    def _record_metrics() -> None:
+        # Suppression is never silent: the count is recorded in the report itself.
+        if isinstance(results, dict):
+            results.setdefault("scan_metrics", {})[
+                "taint_execution_flows_dropped_const_arg"] = const_arg_dropped
 
     for (src_cls, src_mth, src_label, src_cat), caller_methods in source_methods.items():
         for caller_m in caller_methods:
@@ -253,6 +261,17 @@ def _analyze(apk_path: str, results: dict | None = None) -> list[dict]:
                 continue
 
             sink_entry = path[-1]
+
+            # RUN 31 — constant-argument guard. An Execution sink whose arguments are
+            # provably compile-time constants (root detection: exec({"/system/xbin/which",
+            # "su"})) is not attacker-controlled, however reachable it is. Drop the flow
+            # at birth rather than emitting a CRITICAL command-injection FP. Anything not
+            # provably constant survives, so a real exec(userInput) is untouched.
+            if sink_entry["sink_cat"] == "Execution" and _execution_args_all_constant(
+                    sink_entry.get("ma"), caller_m, MAX_DEPTH):
+                const_arg_dropped += 1
+                continue
+
             flow_key   = f"{src_label}|{sink_entry['sink_label']}|{caller_m.get_method().get_class_name()}"
             if flow_key in seen_keys:
                 continue
@@ -291,8 +310,10 @@ def _analyze(apk_path: str, results: dict | None = None) -> list[dict]:
             })
 
             if len(flows) >= MAX_PATHS:
+                _record_metrics()
                 return flows
 
+    _record_metrics()
     return flows
 
 
@@ -471,6 +492,157 @@ def _fmt_method(m) -> str:
         return f"{cls}.{m.get_name()}"
     except Exception:
         return "?"
+
+
+# ── RUN 31 — constant-argument guard for Execution sinks ──────────────────────
+# This engine proves CALL-GRAPH REACHABILITY, not data-flow: a source-calling
+# method that can reach a sink-calling method is emitted as a flow. That produces a
+# CRITICAL false positive on the single most common Execution pattern in Android —
+# root detection:
+#
+#     Runtime.getRuntime().exec(new String[]{"/system/xbin/which", "su"});
+#
+# The argument is a compile-time constant array; no attacker input can reach it. It
+# is a DEFENSIVE control (Beetle's own "Root Detection Present" finding flags the
+# same line), yet co-occurrence with a getStringExtra elsewhere in the class was
+# enough to emit "Intent → Runtime.exec (command injection)".
+#
+# The guard is a shallow, local def-use check at the sink CALL SITE: an Execution
+# flow is dropped ONLY when every reachable call site of that sink passes arguments
+# that provably originate from const* opcodes (directly, or via an array built
+# entirely from const* values). Anything we cannot prove constant — a parameter, a
+# move-result, a field read, an unreadable call site — KEEPS the flow. The guard can
+# therefore remove a false positive but can never drop a true positive: exec(userInput)
+# has a non-constant argument register and survives.
+def _insn_registers(ins) -> list[int]:
+    """Register operands of an instruction, in order (receiver first for invokes)."""
+    regs: list[int] = []
+    try:
+        for op in ins.get_operands():
+            # androguard operand: (Operand.REGISTER == 0, index)
+            if isinstance(op, tuple) and len(op) >= 2 and int(op[0]) == 0:
+                regs.append(int(op[1]))
+    except Exception:
+        return []
+    return regs
+
+
+def _method_instructions(em) -> list[tuple[int, object]]:
+    """[(byte_offset, instruction)] — offsets match those in MethodAnalysis xrefs."""
+    out: list[tuple[int, object]] = []
+    try:
+        off = 0
+        for ins in em.get_instructions():
+            out.append((off, ins))
+            off += ins.get_length()
+    except Exception:
+        return []
+    return out
+
+
+def _reg_is_constant(insns: list, idx: int, reg: int, depth: int = 0) -> bool:
+    """True only when `reg`, as of instruction `idx`, provably holds a compile-time
+    constant. Unknown provenance ⇒ False (fail-open: the flow is kept)."""
+    if depth > _CONST_TRACE_DEPTH:
+        return False
+    for j in range(idx - 1, -1, -1):
+        ins = insns[j][1]
+        name = ins.get_name()
+        regs = _insn_registers(ins)
+        if not regs:
+            continue
+        # aput* writes an ARRAY ELEMENT (regs[1] is the array), it does not define `reg`.
+        if name.startswith("aput"):
+            continue
+        if regs[0] != reg:
+            continue
+
+        # ── the nearest instruction that DEFINES reg ──
+        if name.startswith("const"):
+            return True  # const / const-string / const-class / const-wide …
+        if name == "new-array":
+            # Constant only if every element stored into it before the call is constant.
+            for k in range(j + 1, idx):
+                el = insns[k][1]
+                if not el.get_name().startswith("aput"):
+                    continue
+                el_regs = _insn_registers(el)
+                if len(el_regs) >= 2 and el_regs[1] == reg:
+                    if not _reg_is_constant(insns, k, el_regs[0], depth + 1):
+                        return False
+            return True
+        if name.startswith("filled-new-array"):
+            return all(_reg_is_constant(insns, j, r, depth + 1) for r in regs)
+        # move-result*, iget*, sget*, move*, invoke* … → not provably constant.
+        return False
+
+    # No defining write in this method ⇒ it is an incoming parameter ⇒ NOT constant.
+    return False
+
+
+def _call_site_args_constant(em, off: int) -> bool:
+    """True when the invoke at byte offset `off` passes only constant arguments."""
+    insns = _method_instructions(em)
+    for i, (o, ins) in enumerate(insns):
+        if o != off:
+            continue
+        name = ins.get_name()
+        regs = _insn_registers(ins)
+        if not name.startswith("invoke") or not regs:
+            return False
+        # An instance invoke passes the receiver first — it is not an argument.
+        args = regs if name.startswith("invoke-static") else regs[1:]
+        if not args:
+            return False  # nothing to judge ⇒ cannot prove constant ⇒ keep the flow
+        return all(_reg_is_constant(insns, i, r) for r in args)
+    return False  # offset not found ⇒ cannot prove ⇒ keep the flow
+
+
+def _forward_reachable_keys(start_ma, max_depth: int) -> set[str]:
+    """Method keys reachable FROM start_ma within max_depth call hops."""
+    from collections import deque
+    seen: set[str] = {_ma_key(start_ma)}
+    queue: deque = deque([(start_ma, 0)])
+    while queue:
+        ma, depth = queue.popleft()
+        if depth >= max_depth:
+            continue
+        try:
+            for _, callee_ma, _ in ma.get_xref_to():
+                k = _ma_key(callee_ma)
+                if k not in seen:
+                    seen.add(k)
+                    queue.append((callee_ma, depth + 1))
+        except Exception:
+            continue
+    return seen
+
+
+def _execution_args_all_constant(sink_ma, caller_m, max_depth: int) -> bool:
+    """True when EVERY call site of this Execution sink reachable from caller_m passes
+    provably-constant arguments. False whenever anything cannot be proven."""
+    if sink_ma is None:
+        return False
+    try:
+        xrefs = list(sink_ma.get_xref_from())
+    except Exception:
+        return False
+
+    reachable = _forward_reachable_keys(caller_m, max_depth)
+    sites: list[tuple] = []
+    for xref in xrefs:
+        try:
+            _cls, caller_ma, off = xref
+        except Exception:
+            continue
+        if _ma_key(caller_ma) not in reachable:
+            continue  # a call site the flow's caller cannot reach — not this flow's sink
+        em = caller_ma.get_method() if hasattr(caller_ma, "get_method") else caller_ma
+        sites.append((em, off))
+
+    if not sites:
+        return False  # could not locate the call site ⇒ cannot prove ⇒ keep the flow
+    return all(_call_site_args_constant(em, off) for em, off in sites)
 
 
 # ── Ownership filtering (BUG B) ───────────────────────────────────────────────
