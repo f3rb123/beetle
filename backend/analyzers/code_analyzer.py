@@ -353,6 +353,42 @@ def refine_hardcoded_key_evidence(results: dict) -> dict:
     results["hardcoded_key_evidence_repoint"] = stats
     return stats
 
+
+# ── RUN 36: plaintext-credential logging is worse than the generic Log.d LOW ──
+# android_log_debug is a generic "sensitive data may be logged" LOW. When the logged VALUE is a
+# credential-named variable (e.g. InsecureBankv2 DoLogin.java:136 logs username + ":" + password),
+# that is plaintext credentials to logcat and warrants MEDIUM. Matched on a credential identifier
+# used as a logged value (after '+' or ',') so a mere string-literal mention ("enter password") does
+# NOT trip it — verified: InsecureShop's Log.d("userName", valueOf) stays LOW.
+_CREDENTIAL_LOG_RE = re.compile(
+    r'[+,]\s*[\w.]*(?:password|passwd|pwd|credential|secret|token|apikey|api_key)[\w.]*',
+    re.IGNORECASE)
+
+
+def refine_credential_logging_severity(results: dict) -> dict:
+    """Upgrade android_log_debug to MEDIUM when a credential-named value is written to the log."""
+    stats = {"bumped": 0}
+    for f in results.get("findings") or []:
+        if not isinstance(f, dict) or f.get("rule_id") != "android_log_debug":
+            continue
+        texts = [f.get("snippet", ""), f.get("code_context", "")]
+        texts += [fe.get("snippet", "") for fe in (f.get("file_evidence") or []) if isinstance(fe, dict)]
+        if any(_CREDENTIAL_LOG_RE.search(t or "") for t in texts):
+            if f.get("severity") != "medium":
+                f["severity_original"] = f.get("severity_original") or f.get("severity")
+                f["severity"] = "medium"
+            f["title"] = "Plaintext Credentials Logged (Log.d/v/i)"
+            f["credential_logging"] = True
+            f["severity_upgraded_reason"] = "a credential-named value is written to logcat"
+            f["description"] = (
+                "A credential-named value (password / token / secret) is concatenated into a logcat "
+                "call. On a rooted or pre-API-26 device any app with READ_LOGS can read it, so this "
+                "leaks plaintext credentials — more than the generic 'sensitive data may be logged'."
+            )
+            stats["bumped"] += 1
+    results["credential_logging_resolution"] = stats
+    return stats
+
 try:
     import sys as _sys
     _sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))

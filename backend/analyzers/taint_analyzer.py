@@ -125,6 +125,13 @@ SINKS: list[tuple[str, str, str, str, str]] = [
     ("android/content/Context",    "startActivity",  "Context.startActivity",    "Intent",      "medium"),
     ("android/content/Context",    "sendBroadcast",  "Context.sendBroadcast",    "Intent",      "medium"),
 
+    # RUN 36 — SMS send: attacker-controlled destination/body is a real exfil/abuse sink. On
+    # InsecureBankv2 an EXPORTED receiver takes intent extras ("phonenumber","newpass") straight to
+    # SmsManager.sendTextMessage — a genuine Intent→SMS data flow the generic "SMS Sending" rule
+    # missed.
+    ("android/telephony/SmsManager", "sendTextMessage",          "SmsManager.sendTextMessage",          "SmsSend", "high"),
+    ("android/telephony/SmsManager", "sendMultipartTextMessage", "SmsManager.sendMultipartTextMessage", "SmsSend", "high"),
+
     # Phase 6 Task 7 — additional high-value sinks
     # WebView native bridge — tainted bridge target = potential RCE surface
     ("android/webkit/WebView",     "addJavascriptInterface", "WebView.addJavascriptInterface", "WebView", "high"),
@@ -160,6 +167,7 @@ _SINK_META: dict[str, dict] = {
     "WebView":    {"cwe": "CWE-79",  "masvs": "MASVS-PLATFORM-2", "owasp": "M1"},
     "Intent":     {"cwe": "CWE-926", "masvs": "MASVS-PLATFORM-1", "owasp": "M1"},
     "Storage":    {"cwe": "CWE-312", "masvs": "MASVS-STORAGE-1",  "owasp": "M2"},
+    "SmsSend":    {"cwe": "CWE-927", "masvs": "MASVS-PLATFORM-3", "owasp": "M3"},
 }
 
 
@@ -731,7 +739,7 @@ _SENSITIVE_SOURCES = {
 }
 # Sink categories whose risk does NOT depend on data sensitivity — a tainted
 # value reaching them is a real injection/exfiltration primitive.
-_HIGH_VALUE_SINKS = {"WebView", "FileSystem", "Crypto", "Execution", "SQLite", "Network"}
+_HIGH_VALUE_SINKS = {"WebView", "FileSystem", "Crypto", "Execution", "SQLite", "Network", "SmsSend"}
 
 
 def _calibrate_severity(sink_cat: str, source_cat: str, default_sev: str) -> str:
@@ -914,6 +922,10 @@ _SINK_CAT_EXPLAINERS: dict[str, dict] = {
         "plain_summary": "User-controlled data is written to on-device storage.",
         "why_it_matters": "On-device storage isn't encrypted by default — sensitive values are readable on a rooted or backed-up device.",
     },
+    "SmsSend": {
+        "plain_summary": "User-controlled data flows into an outbound SMS (SmsManager.sendTextMessage).",
+        "why_it_matters": "A tainted destination/body lets an attacker send SMS to any number — premium-rate abuse or data exfiltration (e.g. via an exported receiver's extras).",
+    },
 }
 _FLOW_EXPLAINER_DEFAULT = {
     "plain_summary": "User-controlled data flows into a sensitive operation without visible sanitization.",
@@ -959,6 +971,7 @@ _SINK_GLOSSARY_BY_CAT: dict[str, str] = {
     "WebView": "An in-app web view — tainted input can mean script injection.",
     "Intent": "An Android component launch — can redirect or leak data to other apps.",
     "Storage": "On-device storage — not encrypted by default; not safe for secrets.",
+    "SmsSend": "An outbound SMS — a tainted destination/body means attacker-controlled SMS.",
 }
 
 # One-line glossary for the SOURCE, keyed by source category.

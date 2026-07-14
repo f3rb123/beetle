@@ -1908,7 +1908,55 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Tests: 974 passed, 11 skipped; frontend build OK. Commit-ready: Y.
     NOTE (L6): the frontend split is verified by build + the data-level 3/2 split, not by an automated
     render test — same standing frontend-test gap. The Playwright smoke suite (RUN 30) could gain a
-    tracker-count assertion in a future pass.
+    tracker-count assertion in a future pass.  *** DONE in RUN 36 (see below) — L6 now CLOSED. ***
+
+[x] RUN 36 — Self-audit + discovery (verify every finding, find more, no new FPs)  DONE
+    PART 1 — PER-FINDING GROUND-TRUTH AUDIT (every finding, both apps, opened at file:line vs source):
+      InsecureBankv2 (53) + InsecureShop (47) = 100 findings audited. VERDICT: NO false positives in
+      either app after five runs of fixes. All app-owned HIGH/CRITICAL valid; ~46 INFO findings in
+      obfuscated/library code (zz*.java, gms, androidx, Firebase) are correctly demoted library-noise
+      (not FPs, not inflating severity). Defects found: (a) IB2 credential logging under-rated LOW;
+      (b) IB2 SMS-exfil taint linkage missed; (c) minor: behavior_get_cell_information anchored on an
+      IMPORT line (wrong-line, cosmetic INFO — logged, not fixed).
+    PART 2 — KNOWN GROUND TRUTH: hardcoded key ✓ (CRITICAL, CryptoClass:21 post-T2), AES/CBC ✓,
+      credentials-logged ✓ (but under-rated), ContentProvider ✓ (RUN 35 T3), allowBackup/debuggable/
+      exported/root-detection ✓. MISS: hardcoded ALL-ZERO IV (CryptoClass:22) — android_weak_iv
+      pattern `IvParameterSpec(new byte[` doesn't match `byte[] ivBytes = {0,..}` passed by variable;
+      logged as a follow-up (needs a name-based byte-array pattern to avoid FPs).
+    PART 3 — RANKED MISSED TRUE-POSITIVES (with source proof) + surgical fixes:
+      FIX 1 (missed TP) — IB2 SMS exfil taint flow. MyBroadCastReceiver.java:17-18 reads
+        intent.getStringExtra("phonenumber"/"newpass") -> :31 SmsManager.sendTextMessage, via an
+        EXPORTED receiver. SmsManager was only a taint SOURCE (getMessageBody); added
+        sendTextMessage/sendMultipartTextMessage as SINKS (cat "SmsSend", HIGH), wired _SINK_META /
+        _HIGH_VALUE_SINKS / finding_model _HIGH_VALUE_TAINT_SINKS + group title + explainers. Now
+        emits TAINT-SMSSEND "User-Controlled Data Sent via SMS" HIGH with the full Intent→SMS linkage.
+      FIX 2 (wrong-severity) — IB2 credential logging. DoLogin.java:136 `Log.d("Successful Login:",
+        …username + ":" + password)`. refine_credential_logging_severity bumps android_log_debug to
+        MEDIUM + retitles "Plaintext Credentials Logged" when a credential-named VALUE is logged
+        (matched after '+'/',' so a mere UI-string mention does not trip it).
+      FOLLOW-UPS logged (not fixed — pattern/FP risk or needs deeper analysis): hardcoded all-zero IV;
+        InsecureShopProvider returning username+password via MatrixCursor (exported, weak custom
+        readPermission — needs protection-level analysis); MBR:30 System.out.println password leak
+        (println not matched by Log.* rules); behavior_get_cell_information import-line anchor.
+    ARTIFACT (VT off both sides) — COVERAGE UP, FPs DOWN/UNCHANGED (the CLOSING guarantee):
+      InsecureBankv2  53 -> 54 findings. ADDED: TAINT-SMSSEND (HIGH, real missed TP). CHANGED: the
+        credential log LOW -> MEDIUM (retitled). score 40 -> 39 (more real risk surfaced). Chains
+        IDENTICAL (the SMS finding creates no bogus chain).
+      InsecureShop  47 / 34 F — BYTE-UNCHANGED. No SMS usage (SMS sink can't FP), LoginActivity:84
+        log is username-only -> stays LOW (credential bump correctly not tripped). Chains identical.
+      testapp.ipa  14 / 92 B — unchanged (taint is androguard-only; credential-log is Android).
+    L6 CLOSED: added two real-render Playwright assertions to frontend/e2e/smoke.spec.mjs and RAN them
+      against a live InsecureBankv2 scan (headless Chromium): (1) the Malware panel renders 3 trackers
+      with Google Maps SDK + Sign-In split into a "Bundled SDKs (not trackers)" section — the tracker
+      count is NOT inflated to 5; (2) attack-chain cards render their real name + a severity label.
+      Full smoke suite vs live IB2: 4 passed / 1 skipped (Mach-O = iOS-only). The last data-not-pixels
+      surface is now pixel-verified.
+    Files: backend/analyzers/taint_analyzer.py (SMS sink + meta + explainers),
+      backend/analyzers/finding_model.py (SMS group title + value gate),
+      backend/analyzers/code_analyzer.py (refine_credential_logging_severity + _CREDENTIAL_LOG_RE),
+      backend/analyzers/android_analyzer.py (wire credential-log refinement),
+      frontend/e2e/smoke.spec.mjs (2 L6 render tests), NEW backend/tests/test_run36_audit_fixes.py (8).
+    Tests: 982 backend passed, 11 skipped; e2e 4 passed / 1 skipped vs live IB2. Commit-ready: Y.
 
 ═══════════════ FUTURE RUNS (gated on new corpus / out of current scope) ═══════════════
 [ ] FUT-1  APKID app-owned surfacing. RUN 34 proved detect_apkid_features already collects anti-VM/
@@ -1916,6 +1964,17 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     app-owned-restricted emitter is only worth it with a corpus that has REAL app-owned anti-analysis
     (a packed/protected/anti-emulator APK), so it can be verified on a live artifact — not shipped as
     "correctly emitted nothing here" plumbing. Gate this run on acquiring such a sample.
+[ ] FUT-2  Hardcoded all-zero IV (RUN 36 Part 2 miss). android_weak_iv only matches inline
+    `IvParameterSpec(new byte[`; InsecureBankv2's `byte[] ivBytes = {0,0,..}` (CryptoClass:22) passed
+    by variable is missed. Add a name-gated pattern (a byte-array named *iv* initialised with a
+    literal, or a zero-filled array reaching IvParameterSpec) — must not FP on arbitrary `byte[] x={}`.
+[ ] FUT-3  InsecureShopProvider credential exposure. contentProvider/InsecureShopProvider.java:80-91
+    returns username + password via a MatrixCursor from an EXPORTED provider protected only by a weak
+    custom readPermission (com.insecureshop.permission.READ, normal-level). Needs a protection-level +
+    returned-data analysis to flag "exported provider exposes credentials behind a weak permission".
+[ ] FUT-4  Credential leak via System.out.println (RUN 36). MyBroadCastReceiver:30 prints the password
+    with System.out.println (goes to logcat) — the Log.* rules + the RUN 36 credential-log refinement
+    only cover Log.d/v/i. Extend the credential-logging signal to println/print sinks.
 
 ═══════════════ SESSION LOG ═══════════════
 (append one dated line per session: what ran, what's next)
@@ -2034,3 +2093,16 @@ NO code change and show the order moves on its own). Only then is it safe to pas
   parameterized step; IB2 54->53 / 34->40 F fully FP-attributed, InsecureShop + iOS untouched. R35-B
   (this commit) tracker vs bundled-SDK kind split: IB2 reads 3 trackers + 2 SDKs (= MobSF axis), iOS
   byte-stable. 974 tests pass. Next: human confirm -> RUN 36 (self-audit + discovery).
+- 2026-07-14  RUN 36 DONE (self-audit + discovery). Part 1: audited all 100 findings (IB2 53 +
+  InsecureShop 47) against decompiled source — NO false positives in either app after five runs of
+  fixes; library-INFO correctly demoted. Two confirmed defects fixed surgically: (1) missed IB2
+  SMS-exfil taint flow — added SmsManager.sendTextMessage as a taint sink (cat SmsSend, HIGH), now
+  emits TAINT-SMSSEND with the Intent-extra→SMS linkage via the exported MyBroadCastReceiver; (2) IB2
+  credential logging LOW→MEDIUM (DoLogin:136 logs username:password) via a credential-value refinement
+  that leaves username-only logs LOW. Coverage up, FPs unchanged: IB2 53→54 (only the real SMS TP
+  added), chains identical; InsecureShop + iOS byte-unchanged. L6 CLOSED — added 2 real-render
+  Playwright assertions (tracker count 3-not-5 with bundled-SDK split; chain-card name+severity) and
+  RAN them green against a live IB2 scan (full smoke 4 pass / 1 iOS-skip). Logged FUT-2/3/4
+  (hardcoded-IV pattern, InsecureShopProvider credential exposure, println credential leak). 982
+  backend tests pass. Next: human confirm → commit. This completes the RUN 31–36 production-readiness
+  arc.
