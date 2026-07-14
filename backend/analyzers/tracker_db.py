@@ -241,6 +241,24 @@ def _domain_seen(domain: str, hosts: set) -> bool:
     return any(h == d or h.endswith("." + d) or d.endswith("." + h) for h in hosts)
 
 
+# RUN 35 R35-B: split "Exodus-style tracker" (phones home with behavioural/user data) from
+# "bundled functional SDK" (Maps, Sign-In, Payments, …). Both are real detections, but a bundled
+# SDK is NOT a tracker on the Exodus-comparable axis — counting them together inflates the tracker
+# number (RUN 33 surfaced Google Maps SDK + Sign-In alongside AdMob/Analytics/Tag Manager, reading
+# as "5 trackers" when the tracker count is 3). Classification is by category keyword.
+_TRACKER_CATEGORY_KEYWORDS = (
+    "analytics", "advertis", "attribution", "crash", "session", "replay", "social",
+    "push", "marketing", "telemetry", "experiment", "tag manag",
+)
+
+
+def classify_tracker_kind(category: str) -> str:
+    """'tracker' for behavioural/analytics/ad/crash SDKs; 'sdk' for bundled functional SDKs
+    (Maps, Identity/Sign-In, Payments, App Updates, Background Work, ML/AI, Debug, Messaging)."""
+    cat = (category or "").lower()
+    return "tracker" if any(kw in cat for kw in _TRACKER_CATEGORY_KEYWORDS) else "sdk"
+
+
 def detect_trackers(package_names: set, class_names=None, endpoints=None) -> list:
     """Detect known trackers.
 
@@ -320,6 +338,7 @@ def detect_trackers(package_names: set, class_names=None, endpoints=None) -> lis
             "match_surface": "code" if has_class else "manifest",
             "domain_observed": domain_seen,
             "evidence":      evidence,
+            "kind":          classify_tracker_kind(tracker.get("category")),
         })
         found.append(entry)
     return found

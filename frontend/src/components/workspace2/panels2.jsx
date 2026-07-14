@@ -1507,10 +1507,14 @@ export function MalwarePanel({ results }) {
   ]
   const obfCount = indicators.filter(([, p]) => p).length
 
-  // Trackers grouped by category.
-  const trackerRows = trackers.filter(t => !tq || `${t.name} ${t.category} ${t.pkg}`.toLowerCase().includes(tq.toLowerCase()))
+  // Trackers vs bundled SDKs (RUN 35 R35-B). A bundled functional SDK (Maps, Sign-In, Payments)
+  // is a real detection but NOT an Exodus-style tracker, so it must not inflate the tracker count.
+  // Missing kind (e.g. iOS trackers, which don't carry it) counts as a tracker — iOS is unchanged.
+  const exodusTrackers = trackers.filter(t => t.kind !== 'sdk')
+  const bundledSdks = trackers.filter(t => t.kind === 'sdk')
+  const trackerRows = exodusTrackers.filter(t => !tq || `${t.name} ${t.category} ${t.pkg}`.toLowerCase().includes(tq.toLowerCase()))
   const trackerCats = {}
-  trackers.forEach(t => { const c = t.category || 'Other'; trackerCats[c] = (trackerCats[c] || 0) + 1 })
+  exodusTrackers.forEach(t => { const c = t.category || 'Other'; trackerCats[c] = (trackerCats[c] || 0) + 1 })
 
   const avDetections = vt.available ? (vt.main?.malicious ?? vt.malicious ?? 0) : null
 
@@ -1523,7 +1527,7 @@ export function MalwarePanel({ results }) {
 
       {/* Risk summary */}
       <div className="ws-metrics ws-section">
-        <Metric label="Trackers" value={trackers.length} />
+        <Metric label="Trackers" value={exodusTrackers.length} />
         <Metric label="SDKs" value={sdks.length} />
         <Metric label="Suspicious Perms" value={`${suspiciousPerms.length}${mp.total ? ` / ${mp.total}` : ''}`} />
         <Metric label="Obfuscation Signals" value={obfCount} />
@@ -1532,8 +1536,8 @@ export function MalwarePanel({ results }) {
 
       {/* Trackers */}
       <div className="ws-section">
-        <div className="ws-section__head"><h2>Third-Party Trackers</h2><span className="ws-muted">{trackers.length}</span></div>
-        {trackers.length ? (
+        <div className="ws-section__head"><h2>Third-Party Trackers</h2><span className="ws-muted">{exodusTrackers.length}</span></div>
+        {exodusTrackers.length ? (
           <>
             <div className="ws-toolbar"><input className="ws-input" placeholder="Search trackers…" value={tq} onChange={e => setTq(e.target.value)} style={{ minWidth: 240 }} />
               {Object.entries(trackerCats).map(([c, n]) => <SoftTag key={c}>{c} · {n}</SoftTag>)}</div>
@@ -1551,6 +1555,23 @@ export function MalwarePanel({ results }) {
             </div>
           </>
         ) : <EmptyState title="No trackers detected" body="No known third-party tracking/analytics SDK signatures matched this package." />}
+
+        {/* Bundled SDKs — detected the same way but functional, not Exodus trackers. */}
+        {bundledSdks.length ? (
+          <div style={{ marginTop: 12 }}>
+            <div className="ws-section__head"><h3>Bundled SDKs (detected, not trackers)</h3><span className="ws-muted">{bundledSdks.length}</span></div>
+            <p className="ws-muted" style={{ margin: '4px 0 8px' }}>Functional SDKs (maps, sign-in, payments) present in the app. Real detections, but they do not phone home behavioural data, so they are not counted as trackers.</p>
+            <div className="ws-card" style={{ overflow: 'hidden' }}>
+              {bundledSdks.map((t, i) => (
+                <div key={i} className="ws-file">
+                  <span style={{ fontWeight: 560, fontSize: 13 }}>{t.name}</span>
+                  {t.category ? <SoftTag>{t.category}</SoftTag> : null}
+                  <span className="ws-file__path ws-mono ws-muted" title={t.matched_class || t.pkg}>{t.matched_class || t.pkg}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
 
       {/* SDKs */}

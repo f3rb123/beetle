@@ -111,6 +111,35 @@ def test_domain_seen_matches_subdomains():
     assert _domain_seen("evil.com", hosts) is False
 
 
+# ── R35-B: tracker vs bundled-SDK kind split ─────────────────────────────────
+def test_classify_tracker_kind():
+    from analyzers.tracker_db import classify_tracker_kind as k
+    for cat in ("Analytics", "Advertising", "Attribution", "Crash Reporting",
+                "Session Replay", "Social", "Push/Marketing", "Analytics/Tag Management"):
+        assert k(cat) == "tracker", cat
+    for cat in ("Maps", "Identity", "Payments", "App Updates", "Background Work",
+                "ML/AI", "Debug"):
+        assert k(cat) == "sdk", cat
+
+
+def test_detected_trackers_carry_kind_and_split_ib2():
+    """The InsecureBankv2 play-services set: 3 Exodus trackers + 2 bundled SDKs (not 5 trackers)."""
+    classes = {
+        "com.google.android.gms.ads.AdView",             # AdMob        -> Advertising -> tracker
+        "com.google.android.gms.analytics.Tracker",      # Analytics    -> tracker
+        "com.google.android.gms.tagmanager.Container",   # Tag Manager  -> tracker
+        "com.google.android.gms.maps.CameraUpdate",      # Maps SDK     -> sdk
+        "com.google.android.gms.auth.AccountChangeEvent",# Sign-In      -> sdk (Identity)
+    }
+    got = _named(detect_trackers(set(), class_names=classes))
+    kinds = {name: t["kind"] for name, t in got.items()}
+    trackers = [n for n, k in kinds.items() if k == "tracker"]
+    sdks = [n for n, k in kinds.items() if k == "sdk"]
+    assert len(trackers) == 3, trackers
+    assert len(sdks) == 2, sdks
+    assert "Google Maps SDK" in sdks and "Google Sign-In" in sdks
+
+
 def test_matched_class_is_deterministic():
     """A set has no stable iteration order, so the matched class must be chosen deterministically
     (min) — otherwise the Android tracker output drifts run-to-run and breaks byte-stability."""

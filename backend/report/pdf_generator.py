@@ -1860,12 +1860,7 @@ def _trackers_section(story, results, T, styles):
     if not trackers:
         return
 
-    story.append(Paragraph(f"Trackers ({len(trackers)})", styles["section_title"]))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
-    story.append(Spacer(1, 4 * mm))
-
-    rows = [["Tracker", "Category", "Evidence", "Linkage"]]
-    for t in trackers:
+    def _row(t):
         ev = ", ".join(sorted({e.get("type", "") for e in (t.get("evidence") or [])}))
         # iOS trackers carry statically_linked; Android (RUN 33) carries a confidence tier.
         if t.get("statically_linked"):
@@ -1874,16 +1869,45 @@ def _trackers_section(story, results, T, styles):
             linkage = t.get("confidence")            # "confirmed" | "likely"
         else:
             linkage = "framework in bundle"
-        rows.append([
+        return [
             Paragraph(_safe(t.get("name", "")), styles["table_cell"]),
             Paragraph(_safe(t.get("category", "")), styles["table_cell"]),
             Paragraph(_safe(ev), styles["table_cell"]),
             Paragraph(_safe(linkage), styles["table_cell"]),
-        ])
-    tbl = Table(rows, colWidths=[52 * mm, 42 * mm, 40 * mm, 21 * mm])
-    tbl.setStyle(_table_style(T))
-    story.append(tbl)
-    story.append(Spacer(1, 6 * mm))
+        ]
+
+    def _table(items):
+        rows = [["Tracker", "Category", "Evidence", "Linkage"]] + [_row(t) for t in items]
+        tbl = Table(rows, colWidths=[52 * mm, 42 * mm, 40 * mm, 21 * mm])
+        tbl.setStyle(_table_style(T))
+        return tbl
+
+    # RUN 35 R35-B: split Exodus-style trackers from bundled functional SDKs so the tracker count
+    # is not inflated by Maps/Sign-In/Payments. iOS trackers carry no "kind" -> treated as trackers,
+    # so the iOS section is byte-unchanged.
+    exodus = [t for t in trackers if t.get("kind") != "sdk"]
+    bundled = [t for t in trackers if t.get("kind") == "sdk"]
+
+    story.append(Paragraph(f"Trackers ({len(exodus)})", styles["section_title"]))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=T["accent"]))
+    story.append(Spacer(1, 4 * mm))
+    if exodus:
+        story.append(_table(exodus))
+        story.append(Spacer(1, 6 * mm))
+    else:
+        story.append(Paragraph("No Exodus-style trackers detected.", styles["table_cell"]))
+        story.append(Spacer(1, 4 * mm))
+
+    if bundled:
+        story.append(Paragraph(f"Bundled SDKs — detected, not trackers ({len(bundled)})",
+                              styles["subsection_title"]))
+        story.append(Paragraph(
+            "Functional SDKs (maps, sign-in, payments) present in the app. Real detections, but they "
+            "do not phone home behavioural data, so they are not counted as trackers.",
+            styles["table_cell"]))
+        story.append(Spacer(1, 2 * mm))
+        story.append(_table(bundled))
+        story.append(Spacer(1, 6 * mm))
 
 
 def _property_lists_section(story, results, T, styles):
