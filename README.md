@@ -14,6 +14,7 @@
   <img src="https://img.shields.io/badge/OWASP-MASVS-1B1F23?logo=owasp&logoColor=white" alt="OWASP MASVS">
   <img src="https://img.shields.io/badge/Export-SARIF-orange" alt="SARIF">
   <img src="https://img.shields.io/badge/SBOM-CycloneDX-darkred" alt="CycloneDX SBOM">
+  <img src="https://img.shields.io/badge/License-Apache_2.0-blue" alt="License Apache 2.0">
   <img src="https://img.shields.io/badge/docs-available-blue" alt="Documentation Available">
   <img src="https://img.shields.io/badge/contributions-welcome-brightgreen" alt="Contributions Welcome">
 </p>
@@ -46,6 +47,7 @@ A modern mobile application can produce hundreds of security findings. Beetle is
 
 * **Explainable findings** — every score and verdict ships with a human-readable reason
 * **Evidence before assumptions** — findings are grounded in concrete artifacts (code, manifest, certificates, binaries)
+* **Low false-positive rate** — ownership, confidence, and evidence gating are designed to suppress noise, not inflate a count
 * **Attack Chains** — isolated findings are correlated into realistic, evidence-backed attack paths
 * **Source Navigation** — every finding links directly to its exact file and line
 * **Standards Mapping** — OWASP MASVS coverage and OWASP Mobile Top 10 alignment
@@ -181,7 +183,7 @@ A high-level overview of a scanned application: scores, finding rollups, and pla
 
 The findings view — evidence-driven, confidence-scored, and mapped to standards.
 
-![Security Findings](docs/screenshots/findigs-latest.png)
+![Security Findings](docs/screenshots/findings-latest.png)
 
 ### Open Finding
 
@@ -242,6 +244,20 @@ flowchart TD
 
 ---
 
+## Validation
+
+Beetle's detection is exercised against **known-vulnerable reference applications** — deliberately insecure test apps with documented, ground-truth weaknesses — with an explicit focus on **evidence-backed findings and a low false-positive rate**.
+
+The guiding principle across the detection engines is that a finding must map to real, attributable code:
+
+* **Ownership gating** — library and framework code is separated from application code, so third-party SDK behavior is not reported as an application weakness.
+* **Reachability honesty** — data-flow findings distinguish *proven* data-flow from *method-reachable* co-occurrence, and severity/confidence are labeled accordingly rather than overstated.
+* **Evidence grounding** — every finding resolves to a concrete artifact (a source line, a manifest entry, a certificate, or a binary), and correlated attack chains are built from that evidence rather than from keyword coincidence.
+
+The goal is a report an analyst can trust finding-by-finding, where each verdict can be traced back to the exact code or artifact that produced it.
+
+---
+
 ## Documentation
 
 Beetle includes comprehensive technical documentation. The **Beetle Bible** is the single authoritative reference — it documents what every feature does, why it exists, how it works internally, and how an analyst should interpret its output.
@@ -278,7 +294,9 @@ CORTEX_ADMIN_PASSWORD=beetle
 ```
 
 * Bootstrap credentials are applied **only when no administrator account exists** — existing accounts are **never overwritten** and passwords are never reset.
-* **Production deployments should override these values** with strong credentials (or change the password after the first login).
+* The login page displays these defaults only on a fresh installation and hides them automatically once the password is changed.
+
+> ⚠️ **Production deployments must override these defaults** with strong credentials before first startup, or change the password immediately after the first login. The `beetle` / `beetle` defaults are intended for local development only.
 
 Optional integrations (AI providers and threat intelligence) can be enabled with additional variables:
 
@@ -428,6 +446,12 @@ Please open an issue before submitting large feature changes so the implementati
 
 ---
 
+## License
+
+Beetle is released under the **Apache License 2.0**. See [LICENSE](LICENSE) for the full text.
+
+---
+
 ## Acknowledgements
 
 Beetle builds upon and benefits from the open-source mobile security ecosystem, including projects such as:
@@ -437,6 +461,8 @@ Beetle builds upon and benefits from the open-source mobile security ecosystem, 
 * LIEF
 * Semgrep
 * APKLeaks
+* MobSF (Mobile Security Framework) — a reference point for mobile SAST capabilities and detection benchmarking
+* Exodus Privacy — tracker signature data
 * OWASP Mobile Application Security Verification Standard (MASVS)
 * OWASP Mobile Security Testing Guide (MSTG)
 
