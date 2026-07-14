@@ -224,7 +224,14 @@ def tag_capabilities(f: dict, results: dict | None = None) -> set:
         if "ssl" in blob or "onreceivedsslerror" in blob:
             caps.add("WEBVIEW_SSL")
     # Injection sinks (taint or title)
-    if sink in ("sqlite", "sql") or "sql injection" in blob:
+    # RUN 35 T3: a raw SQL finding that resolve_sql_raw_query_severity proved PARAMETERIZED (only '?'
+    # placeholders, no string-building, no taint reach) has NO injection — it must not provide a
+    # SQL_SINK capability, or a "Exported Component to SQL Injection" chain gets built on a step
+    # whose own evidence reads "No Injection Evidence" (a self-contradiction). A real SQLi finding
+    # (string-building / taint-reaching) is unaffected.
+    _parameterized_sql = (str(f.get("sql_injection_evidence") or "").startswith("parameterized")
+                          or f.get("severity_downgraded_reason") == "parameterized raw query")
+    if not _parameterized_sql and (sink in ("sqlite", "sql") or "sql injection" in blob):
         caps.add("SQL_SINK")
     if sink in ("execution", "command") or "command injection" in blob or "os command" in blob:
         caps.add("CMD_SINK")

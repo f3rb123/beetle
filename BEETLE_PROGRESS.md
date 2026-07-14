@@ -1850,6 +1850,42 @@ NO code change and show the order moves on its own). Only then is it safe to pas
     Files: backend/analyzers/attack_chains/engine.py (tag_capabilities + 2 identity constants),
       NEW backend/tests/test_capability_tagger_identity.py (12 tests, both directions).
     Tests: 962 passed, 11 skipped. Commit-ready: Y.
+
+[x] T1–T3  FP/mislabel sweep (crypto + SQLi) — DONE (own commit).  ANDROID (crypto/SQLi); iOS no-drift.
+    Prompt line numbers were off (said key @:25, IV @:28); used LIVE source: CryptoClass.java key
+    literal @:21, all-zero IV @:22, CBC @:27.
+    T1 — "User-Controlled Data in Crypto Operation" was HIGH noise. Reaching a crypto API with user
+      data is the NORMAL use of crypto, not a weakness (a user IV is public; user plaintext is the
+      point). taint_analyzer._calibrate_severity now returns LOW for Crypto sinks, and _flow_to_finding
+      reframes the crypto flow as CONTEXT that points at the structural crypto findings. The genuine
+      weaknesses are detected STRUCTURALLY and SURVIVE: Hardcoded Key (CRITICAL), CBC Padding Oracle
+      (MEDIUM), Base64-as-encryption (LOW). Verified on the IB2 artifact.
+    T2 — "Hardcoded Encryption Key" (CRITICAL) had the right conclusion but its greedy multiline
+      pattern put evidence on the SecretKeySpec usage line (26). New code_analyzer.refine_hardcoded_
+      key_evidence (post-SAST, BEFORE evidence_selection) repoints it to the key STRING LITERAL —
+      IB2 now CryptoClass.java:21, snippet `String key = "This is the super secret key 123";`, masked
+      value surfaced via secret_intel.mask_value. Followed the CONSUMER-FIELD RULE: updated
+      file_evidence[*].lines (the field the code viewer reads), not just f.line.
+    T3 — "Exported Component to SQL Injection" chain was built on a SQL step whose OWN evidence reads
+      "Raw SQL Query (Parameterized) — No Injection Evidence" (self-contradiction). tag_capabilities no
+      longer grants SQL_SINK to a finding proven parameterized (sql_injection_evidence startswith
+      "parameterized" / severity_downgraded_reason "parameterized raw query"), so the chain can't form.
+      A REAL SQLi finding (string-building / taint-reaching) is unaffected and its chain still forms.
+    ARTIFACT (VT off both sides):
+      InsecureBankv2  findings 54->53 (SQLi FP chain dropped); score 34->40/F (grade held) — fully
+        attributed to FP removal: HIGH 9->8 (T1 crypto), MEDIUM 12->11 + chain_penalty 20->15 (T3);
+        CRITICAL held (T2). Crypto taint now LOW @ DoTransfer.java:78; key evidence @ CryptoClass:21;
+        no SQLi chain; genuine crypto findings all survive.
+      InsecureShop  47 findings / 34 F — UNCHANGED. No crypto taint, no hardcoded key, no
+        parameterized-SQL chain -> T1–T3 correctly no-op. Chains identical; nothing suppressed.
+      testapp.ipa  14 / 92 B — chains identical, no iOS drift (iOS runs no taint; T2 Android-only;
+        shared tag_capabilities change touches only parameterized-SQL, which iOS has none of).
+    Files: backend/analyzers/taint_analyzer.py (crypto calibration + reframed description),
+      backend/analyzers/code_analyzer.py (refine_hardcoded_key_evidence + _KEY_LITERAL_RE),
+      backend/analyzers/android_analyzer.py (wire T2 call), backend/analyzers/attack_chains/engine.py
+      (parameterized-SQL SQL_SINK guard), NEW backend/tests/test_run35_fp_sweep.py (10 tests).
+    Tests: 972 passed, 11 skipped. Commit-ready: Y.
+
 [ ] R35-B  Tracker vs bundled-SDK label split. RUN 33's detect_trackers returns bundled functional
     SDKs (Google Maps SDK, Google Sign-In) alongside true Exodus trackers (AdMob/Analytics/Tag
     Manager). All are real detections, but the REPORT must distinguish "tracker (Exodus)" from
