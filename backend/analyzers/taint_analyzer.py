@@ -747,6 +747,13 @@ def _calibrate_severity(sink_cat: str, source_cat: str, default_sev: str) -> str
     if sink_cat in ("Intent", "Storage"):
         # Component/redirect & prefs-write risk scales with sensitivity.
         return default_sev if source_cat in _SENSITIVE_SOURCES else "low"
+    if sink_cat == "Crypto":
+        # RUN 35 T1: encrypting/hashing user-controlled data is the NORMAL use of a crypto API —
+        # "user data reaches a crypto call" is not itself a weakness (a user-controlled IV is public;
+        # a user-controlled plaintext is the point of encryption). The genuine crypto weaknesses —
+        # hardcoded key/IV, ECB/CBC, Base64-as-encryption — are detected STRUCTURALLY by code_rules
+        # and reported at their real severity. So this flow is LOW context, not a HIGH finding.
+        return "low"
     if sink_cat in _HIGH_VALUE_SINKS:
         return default_sev
     return default_sev
@@ -1003,20 +1010,38 @@ def _flow_to_finding(flow: dict) -> dict:
     chain    = flow.get("call_chain", [])
     chain_str = " → ".join(chain) if chain else "N/A"
 
+    # RUN 35 T1: a Crypto-sink flow is reframed as CONTEXT — reaching a crypto API with user data
+    # is normal, not a weakness. Point the reader at the structural crypto findings for the real risk.
+    if sink_cat == "Crypto":
+        description = (
+            f"User-controlled data from **{flow['source']}** ({flow['source_cat']}) reaches the "
+            f"crypto API **{flow['sink']}**. This is CONTEXT, not a weakness by itself — encrypting or "
+            "hashing user input is the normal use of cryptography. Any actual crypto weakness "
+            "(hardcoded key/IV, ECB/CBC mode, Base64-as-encryption) is reported separately as its own "
+            f"structural finding.\n\nCall chain: `{chain_str}`"
+        )
+        recommendation = (
+            "No action for the data-flow itself. Address the structural crypto findings for this class "
+            "(remove hardcoded keys/IVs, use an authenticated cipher mode)."
+        )
+    else:
+        description = (
+            f"User-controlled data from **{flow['source']}** ({flow['source_cat']}) "
+            f"flows into **{flow['sink']}** ({sink_cat}) without apparent sanitization.\n\n"
+            f"Call chain: `{chain_str}`"
+        )
+        recommendation = (
+            f"Validate and sanitize all data originating from {flow['source_cat']} "
+            f"before it reaches {sink_cat} APIs. "
+            "Apply input validation, output encoding, or parameterized queries as appropriate."
+        )
+
     return {
         "title":          f"Taint Flow: {flow['source']} → {flow['sink']}",
         "severity":       sev,
         "category":       "Taint Analysis",
-        "description": (
-            f"User-controlled data from **{flow['source']}** ({flow['source_cat']}) "
-            f"flows into **{flow['sink']}** ({sink_cat}) without apparent sanitization.\n\n"
-            f"Call chain: `{chain_str}`"
-        ),
-        "recommendation": (
-            f"Validate and sanitize all data originating from {flow['source_cat']} "
-            f"before it reaches {sink_cat} APIs. "
-            "Apply input validation, output encoding, or parameterized queries as appropriate."
-        ),
+        "description":    description,
+        "recommendation": recommendation,
         "file_path":    flow.get("class_name", ""),
         "line":         0,
         "snippet":      chain_str,

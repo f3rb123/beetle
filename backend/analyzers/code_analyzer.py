@@ -293,6 +293,66 @@ def resolve_sql_raw_query_severity(results: dict) -> dict:
     results["sql_raw_query_resolution"] = stats
     return stats
 
+
+# ── RUN 35 T2: point the hardcoded-key finding at the key LITERAL, not the usage line ──
+# The android_encryption_key_hardcoded pattern is a greedy multiline regex that starts at a
+# SecretKeySpec/Cipher call, so its evidence line lands on the USAGE, not the actual key literal
+# (e.g. `String key = "This is the super secret key 123";`). The conclusion is right; only the
+# location was wrong. This repoints it. Runs post-SAST, BEFORE evidence_selection, so the corrected
+# location flows to every consumer (panel / PDF / SARIF).
+_HARDCODED_KEY_RULES = {"android_encryption_key_hardcoded"}
+_KEY_LITERAL_RE = re.compile(
+    r'\b(?:final\s+)?(?:String|char\[\]|byte\[\])\s+\w*(?:key|secret|passwd|password|pwd)\w*\s*'
+    r'=\s*"([^"]{4,})"', re.IGNORECASE)
+
+
+def refine_hardcoded_key_evidence(results: dict) -> dict:
+    """Repoint each hardcoded-encryption-key finding at the key string literal in its own file."""
+    from . import scan_storage
+    stats = {"repointed": 0}
+    scan_id = results.get("scan_id")
+    if not scan_id:
+        return stats
+    file_cache: dict = {}
+    for f in results.get("findings") or []:
+        if not isinstance(f, dict) or f.get("rule_id") not in _HARDCODED_KEY_RULES:
+            continue
+        rel = f.get("file_path") or ""
+        if not rel:
+            continue
+        content = file_cache.get(rel)
+        if content is None:
+            p = scan_storage.resolve_source_file(scan_id, rel)
+            content = p.read_text(errors="replace") if (p and p.is_file()) else ""
+            file_cache[rel] = content
+        if not content:
+            continue
+        m = _KEY_LITERAL_RE.search(content)
+        if not m:
+            continue  # no literal key assignment found — leave evidence as-is
+        key_line = content[:m.start()].count("\n") + 1
+        src_lines = content.splitlines()
+        snippet = src_lines[key_line - 1].strip() if key_line - 1 < len(src_lines) else m.group(0)
+        try:
+            from .secret_intel import mask_value
+            masked = mask_value(m.group(1))
+        except Exception:
+            masked = "***"
+        f["line"] = key_line
+        f["snippet"] = snippet
+        f["code_context"] = _get_context(content, key_line)
+        f["masked_key_value"] = masked
+        f["evidence_repointed_reason"] = "moved from crypto-usage line to the key string literal"
+        # CONSUMER-FIELD RULE (RUN 20/24): update the file_evidence entry the code viewer reads,
+        # not just the top-level line.
+        for fe in (f.get("file_evidence") or []):
+            if isinstance(fe, dict) and normalize_relative_path(fe.get("path", "")) == normalize_relative_path(rel):
+                fe["lines"] = [key_line]
+                fe["snippet"] = snippet
+        stats["repointed"] += 1
+    results["hardcoded_key_evidence_repoint"] = stats
+    return stats
+
 try:
     import sys as _sys
     _sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))

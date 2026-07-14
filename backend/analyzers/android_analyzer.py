@@ -33,7 +33,7 @@ from .source_corpus import SourceCorpus
 from . import reachability_engine
 from . import trust_engine
 from . import finding_model
-from .code_analyzer import run_android_sast, resolve_sql_raw_query_severity
+from .code_analyzer import run_android_sast, resolve_sql_raw_query_severity, refine_hardcoded_key_evidence
 from .semgrep_runner import run_semgrep, semgrep_available
 from .osv_scanner import scan_dependencies
 from .string_analyzer import analyze_strings, suppress_crypto_string_presence_duplicates
@@ -577,6 +577,14 @@ def analyze_apk(apk_path: str, scan_id: str, filename: str,
             resolve_sql_raw_query_severity(results)
         except Exception:
             log.exception("[sast] raw-SQL severity reconciliation failed")
+
+        # RUN 35 T2: repoint the hardcoded-encryption-key finding at the key string literal
+        # (not the SecretKeySpec/Cipher usage line the greedy pattern lands on). Runs before
+        # evidence_selection so the corrected location reaches every consumer.
+        try:
+            refine_hardcoded_key_evidence(results)
+        except Exception:
+            log.exception("[sast] hardcoded-key evidence repoint failed")
 
         # ── VirusTotal hash lookup ────────────────────────────────────────────
         vt_started = time.perf_counter()
