@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/screenshots/beetle-banner.png" width="100%" alt="Beetle — Attack-Chain Driven Mobile Application Security Platform">
+  <img src="docs/screenshots/intro.png" width="100%" alt="Beetle — Attack-Chain Driven Mobile Application Security Platform">
 </p>
 
 <p align="center">
