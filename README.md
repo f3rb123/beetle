@@ -262,6 +262,7 @@ The goal is a report an analyst can trust finding-by-finding, where each verdict
 
 Beetle includes comprehensive technical documentation. The **Beetle Bible** is the single authoritative reference — it documents what every feature does, why it exists, how it works internally, and how an analyst should interpret its output.
 
+* **[Beetle, Explained](https://f3rb.in/posts/beetle-explained/)** — Writeup: the scan workflow, every UI panel, and how the engines work under the hood
 * **[Beetle Bible](docs/beetle-bible/README.md)** — complete technical reference (architecture, engines, scoring, reports, FAQ, glossary)
 * **[Architecture Guide](ARCHITECTURE.md)** — system architecture and pipeline
 * **[Feature Inventory](FEATURE_INVENTORY.md)** — full inventory of implemented capabilities
